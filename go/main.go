@@ -163,7 +163,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  _=a.set(e,d,final,partial,"running","");var total int64
  for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:true}){if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)};if obj.IsDir||strings.HasSuffix(obj.Key,"/"){continue}
   rel:=strings.TrimPrefix(obj.Key,e.ParentKey+"/");dst,err:=safeJoin(partial,rel);if err!=nil{return a.fail(e,d,final,partial,err)};if err=os.MkdirAll(filepath.Dir(dst),0755);err!=nil{return a.fail(e,d,final,partial,err)}
-  tmp:=dst+".minio-tmp";_ = tmp;if err=a.fetchObject(obj.Key,dst,obj);err!=nil{return a.fail(e,d,final,partial,err)};total+=obj.Size
+  if err=a.fetchObject(obj.Key,dst,obj);err!=nil{return a.fail(e,d,final,partial,err)};total+=obj.Size
  }
  if total==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
  if err:=os.RemoveAll(final);err!=nil{return a.fail(e,d,final,partial,err)};if err:=os.Rename(partial,final);err!=nil{return a.fail(e,d,final,partial,err)}
@@ -178,6 +178,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
   if st,err:=os.Stat(tmp);err==nil{
    if st.Size()>expected.Size{_=os.Remove(tmp)}else{offset=st.Size()}
   }else if !os.IsNotExist(err){return err}
+  if offset>=expected.Size&&offset>0{_=os.Remove(tmp);offset=0}
   opts:=minio.GetObjectOptions{}
   if expected.ETag!=""{if err:=opts.SetMatchETag(strings.Trim(expected.ETag,"\""));err!=nil{return err}}
   if offset>0{if err:=opts.SetRange(offset,0);err!=nil{return err}}
