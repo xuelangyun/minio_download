@@ -1105,6 +1105,9 @@ func TestWebAuthTokenCanSetRotateAndClear(t *testing.T) {
 	var raw string
 	if err = db.QueryRow("SELECT value FROM settings WHERE key='web.token_hash'").Scan(&raw); err != nil { t.Fatal(err) }
 	if raw != "null" { t.Fatalf("cleared token must persist JSON null, got %q", raw) }
+	var loaded string
+	if err = db.QueryRow("SELECT CASE WHEN value='null' THEN '' ELSE trim(value,char(34)) END FROM settings WHERE key='web.token_hash'").Scan(&loaded); err != nil { t.Fatal(err) }
+	if loaded != "" { t.Fatalf("cleared token should reload as empty, got %q", loaded) }
 }
 
 func TestAcquireSemaphoreStopsWhenContextCancelled(t *testing.T) {
