@@ -10,6 +10,7 @@ import (
  "crypto/md5"
  "database/sql"
  "encoding/json"
+ "os/exec"
  "errors"
  "flag"
  "fmt"
@@ -93,12 +94,12 @@ func main(){
  if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil)}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH);a.saveLastRun("finished",nil)}
 }
 
-type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;authMu sync.Mutex;failures map[string][]time.Time;lockouts map[string]time.Time}
+type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;runMu sync.Mutex;authMu sync.Mutex;failures map[string][]time.Time;lockouts map[string]time.Time}
 func serveWeb(c Config,host string,port int)error{
  if port<1||port>65535{return errors.New("web-port 必须在 1 到 65535 之间")}
  if err:=os.MkdirAll(filepath.Dir(c.StateDB),0755);err!=nil{return err}
  state,err:=sql.Open("sqlite",c.StateDB);if err!=nil{return err};state.SetMaxOpenConns(4);_,_=state.Exec("PRAGMA busy_timeout=30000");defer state.Close()
- api:=&WebAPI{cfg:c,db:state}
+ configFile,_:=filepath.Abs(*configPath);api:=&WebAPI{cfg:c,db:state,configFile:configFile,mode:c.Mode}
  if c.ConfigDB!=""{db,e:=sql.Open("sqlite",c.ConfigDB);if e!=nil{return e};defer db.Close();_ = db.QueryRow("SELECT json_extract(value,'
  if strings.TrimSpace(c.ConfigDB)==""{return nil}
  if runMode!="count"{return errors.New("config_db 当前只支持 count 模式；duration 模式请使用独立 JSON 任务目标")}
@@ -779,6 +780,7 @@ func taskFolderKey(t Task)string{return safe(t.Scene)+"\x00"+safe(taskDir(t))}
  mux.HandleFunc("GET /healthz",func(w http.ResponseWriter,r *http.Request){writeJSON(w,map[string]any{"ok":true,"version":"go-dev"})})
  mux.HandleFunc("GET /",func(w http.ResponseWriter,r *http.Request){w.Header().Set("Content-Type","text/html; charset=utf-8");_,_=io.WriteString(w,"<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>MinIO Go Downloader</title><body style='font:15px system-ui;max-width:1100px;margin:40px auto;padding:0 20px'><h2>MinIO Go Downloader API</h2><p>只读 API：<a href='/api/status'>状态</a> · <a href='/api/logs'>日志</a> · <a href='/healthz'>健康检查</a></p><pre id='out'>正在读取状态…</pre><script>async function tick(){try{let r=await fetch('/api/status');document.querySelector('#out').textContent=JSON.stringify(await r.json(),null,2)}catch(e){document.querySelector('#out').textContent=String(e)}}tick();setInterval(tick,5000)</script></body></html>")})
  mux.HandleFunc("GET /api/status",api.status)
+ mux.HandleFunc("POST /api/run",api.run)
  mux.HandleFunc("GET /api/episodes",api.episodes)
  mux.HandleFunc("GET /api/logs",api.logs)
  mux.HandleFunc("POST /api/stop",api.stop)
@@ -840,9 +842,7 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
  disks:=[]map[string]any{}
  diskTasks:=map[string][]string{};for task,name:=range taskDisk{diskTasks[name]=append(diskTasks[name],task)}
  for _,d:=range a.cfg.Disks{usage,e:=disk.Usage(d.Path);item:=map[string]any{"name":d.Name,"path":d.Path,"mounted":isMountedPath(d.Mountpoint),"exists":pathIsDir(d.Path),"total":uint64(0),"free":uint64(0),"used":uint64(0),"tasks":diskTasks[d.Name]};if e==nil{item["total"]=usage.Total;item["free"]=usage.Free;item["used"]=usage.Used};disks=append(disks,item)}
- state:=map[string]any{"running":false,"pid":nil,"by_web":false}
- if raw,e:=os.ReadFile(a.cfg.PIDFile);e==nil{var p pidRecord;if json.Unmarshal(raw,&p)==nil{if proc,e:=process.NewProcess(int32(p.PID));e==nil{alive,_:=proc.IsRunning();if alive{ct,_:=proc.CreateTime();if p.Created==0||math.Abs(float64(ct)/1000-p.Created)<2{state=map[string]any{"running":true,"pid":p.PID,"by_web":false}}}}}}
- running,_:=state["running"].(bool)
+ pid,running,byWeb:=a.activeDownloader();var pidValue any=nil;if running{pidValue=pid};state:=map[string]any{"running":running,"pid":pidValue,"by_web":byWeb}
  control:=map[string]string{};for _,key:=range []string{"stop_requested","last_run"}{var v string;if a.db.QueryRow("SELECT value FROM control WHERE key=?",key).Scan(&v)==nil{control[key]=v}}
  var last any=map[string]any{};if raw:=control["last_run"];raw!=""{var v map[string]any;if json.Unmarshal([]byte(raw),&v)==nil{last=v}}
  runningEpisodes:=[]map[string]any{}
@@ -852,14 +852,35 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
  settings:=map[string]any{"min_free_gb":a.cfg.MinFreeGB,"writes_per_disk":a.cfg.Workers,"require_mcap":a.cfg.RequireMCAP,"mcap_pattern":a.cfg.MCAPPattern,"default_rounds":1}
  writeJSON(w,map[string]any{"version":"go-dev","data_version":a.cfg.DataVersion,"downloader":state,"stop_requested":running&&isStopRequested(control["stop_requested"]),"setup_issues":issues,"minio":map[string]any{"endpoint":endpoint,"bucket":a.cfg.Bucket},"settings":settings,"last_run":last,"stale_records":staleRecords,"running_episodes":runningEpisodes,"disks":disks,"scenes":scenes})
 }
+func(a *WebAPI)activeDownloader()(int,bool,bool){
+ if a.childPID>0{if proc,err:=process.NewProcess(a.childPID);err==nil{alive,_:=proc.IsRunning();if alive{created,err:=proc.CreateTime();if err!=nil||a.childCreated==0||math.Abs(float64(created)/1000-a.childCreated)<2{return int(a.childPID),true,true}}}}
+ raw,err:=os.ReadFile(a.cfg.PIDFile);if err!=nil{return 0,false,false}
+ var record pidRecord;if json.Unmarshal(raw,&record)!=nil||record.PID<=0{return 0,false,false}
+ proc,err:=process.NewProcess(int32(record.PID));if err!=nil{return 0,false,false};alive,err:=proc.IsRunning();if err!=nil||!alive{return 0,false,false}
+ created,err:=proc.CreateTime();if err==nil&&record.Created>0&&math.Abs(float64(created)/1000-record.Created)>=2{return 0,false,false}
+ return record.PID,true,false
+}
+func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
+ var body struct{Mode string `json:"mode"`;MaxRounds int `json:"max_rounds"`;RecheckMissing bool `json:"recheck_missing"`}
+ if err:=json.NewDecoder(io.LimitReader(r.Body,4096)).Decode(&body);err!=nil&&err!=io.EOF{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
+ if body.Mode==""{body.Mode="download"};if body.Mode!="download"{writeJSONStatus(w,400,map[string]any{"error":"当前 Go Web API 只支持 download 模式"});return}
+ if body.MaxRounds==0{body.MaxRounds=1};if body.MaxRounds<1||body.MaxRounds>50{writeJSONStatus(w,400,map[string]any{"error":"补齐轮数范围 1–50"});return}
+ if len(a.cfg.Tasks)==0||len(a.cfg.Disks)==0||a.cfg.Endpoint==""||a.cfg.AccessKey==""||a.cfg.SecretKey==""||a.cfg.PGHost==""{writeJSONStatus(w,400,map[string]any{"error":"配置未补全：需要 MinIO、PostgreSQL、任务和磁盘配置"});return}
+ a.runMu.Lock();defer a.runMu.Unlock()
+ if pid,running,_:=a.activeDownloader();running{writeJSONStatus(w,409,map[string]any{"error":fmt.Sprintf("下载器已在运行（PID %d）",pid)});return}
+ if err:=os.MkdirAll(a.cfg.LogDir,0755);err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return}
+ logFile,err:=os.OpenFile(filepath.Join(a.cfg.LogDir,"minio_task_downloader.log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0644);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"打开日志失败: "+err.Error()});return}
+ executable,err:=os.Executable();if err!=nil{logFile.Close();writeJSONStatus(w,500,map[string]any{"error":"定位下载器程序失败: "+err.Error()});return}
+ args:=[]string{"--config",a.configFile,"--mode",a.mode,"--max-rounds",strconv.Itoa(body.MaxRounds)};if body.RecheckMissing{args=append(args,"--recheck-missing")}
+ cmd:=exec.Command(executable,args...);configureDetached(cmd);cmd.Stdout=logFile;cmd.Stderr=logFile;cmd.Stdin=nil
+ if err=cmd.Start();err!=nil{logFile.Close();writeJSONStatus(w,500,map[string]any{"error":"启动下载器失败: "+err.Error()});return}
+ _=logFile.Close();a.childPID=int32(cmd.Process.Pid);if proc,e:=process.NewProcess(a.childPID);e==nil{if ms,e:=proc.CreateTime();e==nil{a.childCreated=float64(ms)/1000}}
+ writeJSON(w,map[string]any{"ok":true,"pid":cmd.Process.Pid})
+}
 func(a *WebAPI)stop(w http.ResponseWriter,r *http.Request){
  var body struct{Force bool `json:"force"`};if err:=json.NewDecoder(io.LimitReader(r.Body,4096)).Decode(&body);err!=nil&&err!=io.EOF{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
  if body.Force{writeJSONStatus(w,400,map[string]any{"error":"Go Web API 暂未实现强制结束；请使用安全暂停"});return}
- raw,err:=os.ReadFile(a.cfg.PIDFile);if err!=nil{writeJSONStatus(w,409,map[string]any{"error":"当前没有运行中的下载器"});return}
- var record pidRecord;if json.Unmarshal(raw,&record)!=nil||record.PID<=0{writeJSONStatus(w,409,map[string]any{"error":"当前没有运行中的下载器"});return}
- proc,err:=process.NewProcess(int32(record.PID));if err!=nil{writeJSONStatus(w,409,map[string]any{"error":"当前没有运行中的下载器"});return}
- alive,err:=proc.IsRunning();if err!=nil||!alive{writeJSONStatus(w,409,map[string]any{"error":"当前没有运行中的下载器"});return}
- created,err:=proc.CreateTime();if err==nil&&record.Created>0&&math.Abs(float64(created)/1000-record.Created)>=2{writeJSONStatus(w,409,map[string]any{"error":"PID 已被其他进程复用"});return}
+ pid,running,_:=a.activeDownloader();if !running||pid<=0{writeJSONStatus(w,409,map[string]any{"error":"当前没有运行中的下载器"});return}
  if err:=writeStopRequest(a.db);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"写入暂停请求失败: "+err.Error()});return}
  writeJSON(w,map[string]any{"ok":true,"mode":"pause"})
 }
