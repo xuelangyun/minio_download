@@ -198,19 +198,43 @@ func findExistingTaskDisk(version string,t Task,disks []DiskConfig,rows []Episod
  }
  return found,nil
 }
+func resolvePathWithMissingTail(p string)(string,error){
+ abs,err:=filepath.Abs(p);if err!=nil{return "",err}
+ cur:=filepath.Clean(abs);tail:=[]string{}
+ for{
+  resolved,e:=filepath.EvalSymlinks(cur)
+  if e==nil{for i:=len(tail)-1;i>=0;i--{resolved=filepath.Join(resolved,tail[i])};return filepath.Clean(resolved),nil}
+  parent:=filepath.Dir(cur);if parent==cur{return "",e}
+  tail=append(tail,filepath.Base(cur));cur=parent
+ }
+}
 func validateDisk(d DiskConfig)error{
  mount:=d.Mountpoint;if mount==""{mount=d.Path}
- if _,err:=os.Stat(mount);err!=nil{return fmt.Errorf("磁盘挂载点不存在 %s: %w",mount,err)}
- rel,err:=filepath.Rel(filepath.Clean(mount),filepath.Clean(d.Path))
+ mountResolved,err:=resolvePathWithMissingTail(mount);if err!=nil{return fmt.Errorf("磁盘挂载点不存在 %s: %w",mount,err)}
+ pathResolved,err:=resolvePathWithMissingTail(d.Path);if err!=nil{return fmt.Errorf("无法解析目标路径 %s: %w",d.Path,err)}
+ rel,err:=filepath.Rel(mountResolved,pathResolved)
  if err!=nil||rel==".."||strings.HasPrefix(rel,".."+string(os.PathSeparator)){return fmt.Errorf("目标路径 %s 不在挂载点 %s 之下",d.Path,mount)}
  parts,err:=disk.Partitions(false);if err!=nil{return fmt.Errorf("读取磁盘挂载信息失败: %w",err)}
- found:=false
- want:=filepath.Clean(mount);if runtime.GOOS=="windows"{want=strings.ToLower(want)}
- for _,part:=range parts{got:=filepath.Clean(part.Mountpoint);if runtime.GOOS=="windows"{got=strings.ToLower(got)};if got==want{found=true;break}}
+ found:=false;want:=filepath.Clean(mountResolved);if runtime.GOOS=="windows"{want=strings.ToLower(want)}
+ for _,part:=range parts{got,resolveErr:=resolvePathWithMissingTail(part.Mountpoint);if resolveErr!=nil{continue};got=filepath.Clean(got);if runtime.GOOS=="windows"{got=strings.ToLower(got)};if got==want{found=true;break}}
  if !found{return fmt.Errorf("路径存在但不是已挂载的磁盘挂载点: %s",mount)}
  return nil
 }
+func validateDiskSet(disks []DiskConfig)error{
+ parts,err:=disk.Partitions(false);if err!=nil{return fmt.Errorf("读取磁盘挂载信息失败: %w",err)}
+ devices:=map[string]string{}
+ for _,d:=range disks{
+  mount:=d.Mountpoint;if mount==""{mount=d.Path};resolved,err:=resolvePathWithMissingTail(mount);if err!=nil{return err}
+  for _,part:=range parts{
+   got,e:=resolvePathWithMissingTail(part.Mountpoint);if e!=nil{continue}
+   same:=filepath.Clean(got)==filepath.Clean(resolved);if runtime.GOOS=="windows"{same=strings.EqualFold(filepath.Clean(got),filepath.Clean(resolved))}
+   if same&&part.Device!=""{if old,ok:=devices[part.Device];ok{return fmt.Errorf("磁盘 %s 和 %s 指向同一个文件系统设备 %s",old,d.Name,part.Device)};devices[part.Device]=d.Name}
+  }
+ }
+ return nil
+}
 func(a *App)downloadSelected(sel map[string][]Episode)error{
+ if err:=validateDiskSet(a.cfg.Disks);err!=nil{return err}
  loads:=map[string]int{};for _,t:=range a.cfg.Tasks{if a.assigned(t.Name)!=""{loads[a.assigned(t.Name)]++}}
  byDisk:=map[string][]batch{};waitingSpace:=false
  for _,t:=range a.cfg.Tasks{rs:=sel[t.Name];if len(rs)==0{continue};var d *DiskConfig;old:=a.assigned(t.Name)
