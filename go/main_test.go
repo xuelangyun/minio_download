@@ -182,6 +182,25 @@ func TestAcquireNamedDiskLocksSortsAndReleasesPartialSet(t *testing.T) {
  if err!=nil{t.Fatalf("reacquire locks after release: %v",err)}
  release2()
 }
+func TestSpaceReservationConsumeAndRelease(t *testing.T) {
+ app:=&App{cfg:Config{MinFreeGB:0}}
+ diskCfg:=DiskConfig{Name:"disk-a",Path:t.TempDir()}
+ reservation,err:=app.reserveObjectSpace(diskCfg,100)
+ if err!=nil{t.Fatalf("reserve: %v",err)}
+ if app.spaceInFlight["disk-a"]!=100{t.Fatalf("reserved=%d want 100",app.spaceInFlight["disk-a"])}
+ reservation.Consume(40)
+ if app.spaceInFlight["disk-a"]!=60{t.Fatalf("after consume reserved=%d want 60",app.spaceInFlight["disk-a"])}
+ reservation.Consume(100)
+ if _,ok:=app.spaceInFlight["disk-a"];ok{t.Fatal("consuming beyond remaining bytes should clear reservation")}
+ reservation.Release()
+ reservation.Release()
+ if _,ok:=app.spaceInFlight["disk-a"];ok{t.Fatal("release should be idempotent")}
+}
+func TestReserveObjectSpaceRejectsInsufficientCapacity(t *testing.T) {
+ app:=&App{cfg:Config{MinFreeGB:0}}
+ _,err:=app.reserveObjectSpace(DiskConfig{Name:"disk-a",Path:t.TempDir()},int64(^uint64(0)>>1))
+ if err==nil{t.Fatal("expected reservation larger than available capacity to fail")}
+}
 func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
  dir:=t.TempDir();dst:=filepath.Join(dir,"object.bin")
  if got:=remainingObjectBytes(dst,100);got!=100{t.Fatalf("missing partial: got %d want 100",got)}
