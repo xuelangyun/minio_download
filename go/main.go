@@ -849,8 +849,7 @@ func writePIDFile(name,runMode string)error{
  if _,err=f.Write(data);err!=nil{f.Close();os.Remove(tmp);return err}
  if err=f.Sync();err!=nil{f.Close();os.Remove(tmp);return err}
  if err=f.Close();err!=nil{os.Remove(tmp);return err}
- if runtime.GOOS=="windows"{if err=os.Remove(name);err!=nil&&!os.IsNotExist(err){os.Remove(tmp);return err}}
- if err=os.Rename(tmp,name);err!=nil{os.Remove(tmp);return err}
+ if err=replaceDownloadedFile(tmp,name);err!=nil{os.Remove(tmp);return err}
  return nil
 }
 func removePIDFile(name string){
@@ -1516,7 +1515,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  if first!=nil{if errors.Is(first,errInsufficientDiskSpace){_=a.set(e,d,final,partial,"waiting_space",first.Error());return first};return a.fail(e,d,final,partial,first)}
  if a.ctx.Err()!=nil{return a.fail(e,d,final,partial,a.ctx.Err())}
  if completedObjects.Load()==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
- if err:=os.RemoveAll(final);err!=nil{return a.fail(e,d,final,partial,err)};if err:=os.Rename(partial,final);err!=nil{return a.fail(e,d,final,partial,err)};if *a.cfg.Fsync{syncDirectory(filepath.Dir(final))}
+ if err:=replaceEpisodeDirectory(partial,final);err!=nil{return a.fail(e,d,final,partial,err)};if *a.cfg.Fsync{syncDirectory(filepath.Dir(final))}
  if err:=a.record(e,d,final);err!=nil{return err};return a.set(e,d,final,"","completed","")
 }
 func sweepPartial(root,parent string,objects []minio.ObjectInfo)error{
@@ -1545,6 +1544,28 @@ func retryFileOperation(operation func()error,windows bool)error{
   if !windows||!os.IsPermission(err)||attempt==5{return err}
   time.Sleep(time.Duration(attempt+1)*200*time.Millisecond)
  }
+ return nil
+}
+func replaceEpisodeDirectory(partial,final string)error{
+ return replaceEpisodeDirectoryForOS(partial,final,runtime.GOOS=="windows")
+}
+func replaceEpisodeDirectoryForOS(partial,final string,windows bool)error{
+ info,err:=os.Lstat(partial)
+ if err!=nil{return err}
+ if !info.IsDir()||info.Mode()&os.ModeSymlink!=0{return fmt.Errorf("episode 暂存路径不是普通目录: %s",partial)}
+ _,statErr:=os.Lstat(final)
+ if os.IsNotExist(statErr){return retryFileOperation(func()error{return os.Rename(partial,final)},windows)}
+ if statErr!=nil{return statErr}
+ backup,err:=os.MkdirTemp(filepath.Dir(final),".minio-episode-backup-*")
+ if err!=nil{return err}
+ if err=os.Remove(backup);err!=nil{return err}
+ if err=retryFileOperation(func()error{return os.Rename(final,backup)},windows);err!=nil{return err}
+ if err=retryFileOperation(func()error{return os.Rename(partial,final)},windows);err!=nil{
+  rollbackErr:=retryFileOperation(func()error{return os.Rename(backup,final)},windows)
+  if rollbackErr!=nil{return fmt.Errorf("发布 episode 目录失败: %v；恢复旧目录也失败: %w",err,rollbackErr)}
+  return err
+ }
+ if err=os.RemoveAll(backup);err!=nil{log.Printf("episode 已发布，但旧目录备份清理失败 %s: %v",backup,err)}
  return nil
 }
 func replaceDownloadedFile(src,dst string)error{
