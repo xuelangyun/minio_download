@@ -336,6 +336,28 @@ func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
  if err:=os.WriteFile(dst+".minio-tmp",make([]byte,100),0600);err!=nil{t.Fatal(err)}
  if got:=remainingObjectBytes(dst,100);got!=0{t.Fatalf("complete temp remaining: got %d want 0",got)}
 }
+func TestReplaceEpisodeDirectoryForWindowsReplacesExistingDirectory(t *testing.T) {
+ parent:=t.TempDir()
+ final:=filepath.Join(parent,"episode")
+ partial:=filepath.Join(parent,".episode.partial")
+ if err:=os.MkdirAll(filepath.Join(final,"old"),0755);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(final,"old","old.txt"),[]byte("old"),0600);err!=nil{t.Fatal(err)}
+ if err:=os.MkdirAll(filepath.Join(partial,"new"),0755);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(partial,"new","new.txt"),[]byte("new"),0600);err!=nil{t.Fatal(err)}
+ if err:=replaceEpisodeDirectoryForOS(partial,final,true);err!=nil{t.Fatal(err)}
+ if _,err:=os.Stat(filepath.Join(final,"new","new.txt"));err!=nil{t.Fatalf("new episode file missing: %v",err)}
+ if _,err:=os.Stat(filepath.Join(final,"old"));!os.IsNotExist(err){t.Fatalf("old episode content remains, err=%v",err)}
+ entries,err:=os.ReadDir(parent);if err!=nil{t.Fatal(err)}
+ if len(entries)!=1||entries[0].Name()!="episode"{t.Fatalf("unexpected leftovers: %+v",entries)}
+}
+func TestReplaceEpisodeDirectoryRejectsInvalidSourceBeforeMovingFinal(t *testing.T) {
+ parent:=t.TempDir();final:=filepath.Join(parent,"episode");partial:=filepath.Join(parent,"missing.partial")
+ if err:=os.Mkdir(final,0755);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(final,"keep.txt"),[]byte("keep"),0600);err!=nil{t.Fatal(err)}
+ if err:=replaceEpisodeDirectoryForOS(partial,final,true);err==nil{t.Fatal("expected missing source error")}
+ if _,err:=os.Stat(filepath.Join(final,"keep.txt"));err!=nil{t.Fatalf("existing final directory was changed: %v",err)}
+}
+
 func TestReplaceDownloadedFileForWindowsReplacesExistingFile(t *testing.T) {
  dir:=t.TempDir()
  dst:=filepath.Join(dir,"final.bin")
