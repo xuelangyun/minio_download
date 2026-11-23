@@ -145,6 +145,7 @@ func(a *App)clearStopRequest()error{
  _,err:=a.db.Exec("INSERT INTO control(key,value,updated_at) VALUES('stop_requested','0',?) ON CONFLICT(key) DO UPDATE SET value='0',updated_at=excluded.updated_at",controlTimestamp())
  return err
 }
+func isStopRequested(value string)bool{value=strings.TrimSpace(value);return value!=""&&value!="0"}
 func(a *App)startStopWatcher()<-chan struct{}{
  done:=make(chan struct{})
  go func(){
@@ -156,7 +157,7 @@ func(a *App)startStopWatcher()<-chan struct{}{
    case <-ticker.C:
     var value string
     err:=a.db.QueryRowContext(a.ctx,"SELECT value FROM control WHERE key='stop_requested'").Scan(&value)
-    if err==nil&&value=="1"{log.Print("检测到外部暂停请求，正在安全停止并保留断点");a.cancel();return}
+    if err==nil&&isStopRequested(value){log.Print("检测到外部暂停请求，正在安全停止并保留断点");a.cancel();return}
    }
   }
  }()
