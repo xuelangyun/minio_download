@@ -118,6 +118,7 @@ func writePIDFile(name,runMode string)error{
  if _,err=f.Write(data);err!=nil{f.Close();os.Remove(tmp);return err}
  if err=f.Sync();err!=nil{f.Close();os.Remove(tmp);return err}
  if err=f.Close();err!=nil{os.Remove(tmp);return err}
+ if runtime.GOOS=="windows"{if err=os.Remove(name);err!=nil&&!os.IsNotExist(err){os.Remove(tmp);return err}}
  if err=os.Rename(tmp,name);err!=nil{os.Remove(tmp);return err}
  return nil
 }
