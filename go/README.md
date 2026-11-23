@@ -90,3 +90,5 @@ Episode 备份路径使用随机且尚不存在的同级路径，不创建临时
 SQLite 完成状态校验：默认不再仅凭正式目录存在就认定 Episode 已完成；必须是非符号链接的普通目录，且包含普通文件 `task_info.json`。启用 `require_mcap` 时，还必须存在匹配 `mcap_pattern` 的普通文件。`trust_completed_records=true` 仍保留历史归档记录信任行为。
 
 SQLite 异常退出恢复：每次新一轮下载启动时，在选取任务前扫描遗留 `running` 记录。正式目录已满足完成文件要求的，恢复为 `completed`；否则重置为 `pending`，记录中断原因并保留 `partial_path`，供后续续传。该操作使用 SQLite 事务，重复执行安全，不删除临时文件。
+
+缺失 MCAP 清理具备异常中断恢复：先在 SQLite 事务中将记录标记为 `cleanup_pending` 并移除完成台账，再删除 Episode 目录，最后删除清理状态记录。正常启动时会在验证所有配置磁盘挂载后恢复遗留清理项；清理目标必须位于配置磁盘目录内。`--cleanup-missing-mcap --dry-run` 只预览待清理和待恢复记录，不修改文件或数据库。
