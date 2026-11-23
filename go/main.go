@@ -1500,7 +1500,7 @@ func syncDirectory(dir string){
 func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *spaceReservation)error{
  if existingObjectComplete(dst,expected){return nil}
  tmp:=dst+".minio-tmp"
- var writtenThisCall int64=existingPartialBytes(dst,expected.Size)
+ var writtenThisCall int64=int64(reservation.consumed)
  onProgress:=func(n int64){if n>0{reservation.Consume(n);writtenThisCall+=n}}
  restoreWritten:=func(){if writtenThisCall>0{reservation.Restore(writtenThisCall);writtenThisCall=0}}
  discardTemp:=func()error{
