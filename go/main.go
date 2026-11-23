@@ -1222,14 +1222,23 @@ func diskLockKeys(disks []DiskConfig) ([]string,error) {
  parts,err:=disk.Partitions(false);if err!=nil{return nil,fmt.Errorf("读取磁盘挂载信息失败，无法建立跨进程磁盘锁: %w",err)}
  keys:=map[string]bool{}
  for _,d:=range disks {
-  target:=filepath.Clean(d.Path);bestLen:=-1;key:=""
-  for _,p:=range parts {
-   mount:=filepath.Clean(p.Mountpoint);rel,e:=filepath.Rel(mount,target)
-   if e!=nil||rel==".."||strings.HasPrefix(rel,".."+string(os.PathSeparator)){continue}
-   if runtime.GOOS=="windows"&&!strings.EqualFold(mount,target)&&!strings.HasPrefix(strings.ToLower(target),strings.ToLower(mount+string(os.PathSeparator))){continue}
-   if len(mount)>bestLen {bestLen=len(mount);key=p.Device}
+  resolved,err:=resolvePathWithMissingTail(d.Path);if err!=nil{return nil,fmt.Errorf("解析磁盘路径失败 %s: %w",d.Path,err)}
+  key:=""
+  // On Unix, st_dev identifies the actual filesystem, including bind mounts
+  // whose mount source strings may differ. Windows falls back to the volume
+  // device reported by the partition table.
+  if identity,e:=filesystemIdentity(resolved);e==nil&&identity!=""{key=identity}
+  if key=="" {
+   target:=filepath.Clean(resolved);bestLen:=-1
+   for _,p:=range parts {
+    mount,e:=resolvePathWithMissingTail(p.Mountpoint);if e!=nil{continue};mount=filepath.Clean(mount)
+    rel,e:=filepath.Rel(mount,target)
+    if e!=nil||rel==".."||strings.HasPrefix(rel,".."+string(os.PathSeparator)){continue}
+    if runtime.GOOS=="windows"&&!strings.EqualFold(mount,target)&&!strings.HasPrefix(strings.ToLower(target),strings.ToLower(mount+string(os.PathSeparator))){continue}
+    if len(mount)>bestLen&&p.Device!=""{bestLen=len(mount);key=p.Device}
+   }
   }
-  if key=="" {resolved,e:=filepath.Abs(target);if e!=nil{return nil,e};key=resolved}
+  if key==""{key=resolved}
   sum:=sha256.Sum256([]byte(strings.ToLower(key)))
   keys[hex.EncodeToString(sum[:])]=true
  }
