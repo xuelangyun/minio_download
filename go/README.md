@@ -97,13 +97,13 @@ Web 页面也提供开始、暂停和强制停止操作。强制停止后保留�
 Windows 文件发布：替换已有目标文件时先将旧文件改名为同目录备份，再发布新文件；发布失败时回滚旧文件，并对 Windows sharing violation / lock violation 最多重试 6 次。
 
 
-Windows 文件发布与恢复：单文件和 PID 文件替换使用同目录备份、发布、失败回滚，并对Windows sharing violation / lock violation 最多重试 6 次；Episode 正式目录更新也先备份旧目录，发布失败时恢复旧目录，避免先删除旧数据再发布新数据造成数据丢失。
+Windows 文件发布与恢复：单文件和 Episode 目录替换使用同目录备份、发布、失败回滚，并对 Windows sharing violation / lock violation 最多重试 6 次；Episode 正式目录更新也先备份旧目录，发布失败时恢复旧目录，避免先删除旧数据再发布新数据造成数据丢失。
 
 Episode 目录发布具备启动时崩溃恢复：备份目录按 episode 正式目录名隔离；若进程在旧目录移走后异常退出，下次处理该 episode 时会恢复最近的普通目录备份并保留 `.partial` 下载目录；若新正式目录已发布，则清理遗留备份。符号链接备份不会被自动跟随。
 
 Episode 备份路径使用随机且尚不存在的同级路径，不创建临时空目录占位，避免进程在占位目录创建后崩溃时被误恢复为空 Episode；恢复扫描会清理遗留空备份目录，只恢复含有内容的普通目录。
 
-跨进程磁盘锁文件位于配置的 `lock_file` 同级 `disk-locks` 目录。不同系统用户需要对该共享目录具有读写权限，并使用相同的 `lock_file` 路径，才能实现同机实例间协调。
+同一主机上的下载进程通过 SQLite `process_state` 租约做单实例协调；租约记录异常残留时，会通过进程 PID 和启动时间识别并清除过期记录，不需要磁盘锁文件。
 
 SQLite 完成状态校验：默认不再仅凭正式目录存在就认定 Episode 已完成；必须是非符号链接的普通目录，且包含普通文件 `task_info.json`。启用 `require_mcap` 时，还必须存在匹配 `mcap_pattern` 的普通文件。`trust_completed_records=true` 仍保留历史归档记录信任行为。
 
