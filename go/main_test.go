@@ -425,6 +425,30 @@ func TestRetryFileOperationRetriesWindowsSharingViolation(t *testing.T) {
  if calls!=2{t.Fatalf("operation calls=%d, want 2",calls)}
 }
 
+func TestRecoverDownloadedFileRestoresBackupAfterInterruptedReplacement(t *testing.T) {
+ root:=t.TempDir()
+ dir:=filepath.Join(root,"nested")
+ if err:=os.MkdirAll(dir,0755);err!=nil{t.Fatal(err)}
+ dst:=filepath.Join(dir,"final.bin")
+ backup:=filepath.Join(dir,".final.bin.minio-file-backup-crash")
+ if err:=os.WriteFile(backup,[]byte("old-complete"),0600);err!=nil{t.Fatal(err)}
+ if err:=recoverDownloadedFile(dst,root);err!=nil{t.Fatal(err)}
+ got,err:=os.ReadFile(dst);if err!=nil{t.Fatal(err)}
+ if string(got)!="old-complete"{t.Fatalf("restored file=%q",got)}
+ if _,err:=os.Stat(backup);!os.IsNotExist(err){t.Fatalf("backup should be moved to destination, err=%v",err)}
+}
+func TestRecoverDownloadedFileCleansBackupAfterSuccessfulReplacement(t *testing.T) {
+ root:=t.TempDir()
+ dst:=filepath.Join(root,"final.bin")
+ backup:=filepath.Join(root,".final.bin.minio-file-backup-crash")
+ if err:=os.WriteFile(dst,[]byte("new-complete"),0600);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(backup,[]byte("old-complete"),0600);err!=nil{t.Fatal(err)}
+ if err:=recoverDownloadedFile(dst,root);err!=nil{t.Fatal(err)}
+ got,err:=os.ReadFile(dst);if err!=nil{t.Fatal(err)}
+ if string(got)!="new-complete"{t.Fatalf("published file changed: %q",got)}
+ if _,err:=os.Stat(backup);!os.IsNotExist(err){t.Fatalf("stale backup should be removed, err=%v",err)}
+}
+
 func TestReplaceDownloadedFileForWindowsReplacesExistingFile(t *testing.T) {
  dir:=t.TempDir()
  dst:=filepath.Join(dir,"final.bin")
