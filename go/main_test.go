@@ -51,7 +51,7 @@ func TestMD5ETagRecognition(t *testing.T) {
 }
 
 func TestWindowsObjectNameRules(t *testing.T) {
-	if !windowsReserved("CON.txt") || !windowsReserved("lpt1") {
+	if !windowsReserved("CON.txt") || !windowsReserved("CON.archive.txt") || !windowsReserved("lpt1") {
 		t.Fatal("Windows reserved device names were not recognized")
 	}
 	if invalidWindowsObjectPart("bad:name") == false {
@@ -117,5 +117,13 @@ func TestSweepPartialKeepsExpectedFileAndResumeTemp(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "stale/old.txt")); !os.IsNotExist(err) {
 		t.Errorf("stale file should be removed, got err=%v", err)
+	}
+}
+
+func TestConfigRejectsMismatchedMode(t *testing.T) {
+	cfg := validTestConfig(t)
+	cfg.Mode = "duration"
+	if err := cfg.normalize("count"); err == nil {
+		t.Fatal("expected duration config to reject count mode")
 	}
 }
