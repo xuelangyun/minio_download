@@ -510,6 +510,9 @@ func TestWebStatusReturnsConfiguredTasksAndProgress(t *testing.T) {
 	if _, err := db.Exec("INSERT INTO downloaded_episodes VALUES('ep-1','桌面收纳',3600,1024,?)", target); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec("INSERT INTO downloaded_episodes VALUES('ep-deleted','桌面收纳',1800,512,?)", filepath.Join(root, "deleted-episode")); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.Exec("INSERT INTO task_disk_assignments VALUES('桌面收纳','disk1')"); err != nil {
 		t.Fatal(err)
 	}
@@ -526,6 +529,7 @@ func TestWebStatusReturnsConfiguredTasksAndProgress(t *testing.T) {
 	scenes := response["scenes"].([]any)
 	tasks := scenes[0].(map[string]any)["tasks"].([]any)
 	task := tasks[0].(map[string]any)
+	if response["stale_records"] != float64(1) { t.Fatalf("expected one stale record, got %#v", response["stale_records"]) }
 	if task["downloaded"] != float64(1) || task["hours"] != float64(1) || task["disk"] != "disk1" {
 		t.Fatalf("unexpected task progress: %#v", task)
 	}
