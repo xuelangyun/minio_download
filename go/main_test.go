@@ -1063,3 +1063,46 @@ func TestWebConfigTasksResetRestoresDefaultsAndPreservesTags(t *testing.T) {
  if err=db.QueryRow("SELECT COUNT(*) FROM tasks").Scan(&count);err!=nil{t.Fatal(err)}
  if count!=len(api.cfg.Tasks){t.Fatalf("persisted tasks=%d runtime tasks=%d",count,len(api.cfg.Tasks))}
 }
+
+func TestNewTokenHashIsPythonCompatible(t *testing.T) {
+	hash, err := newTokenHash("a-long-enough-token")
+	if err != nil { t.Fatal(err) }
+	parts := strings.Split(hash, "$")
+	if len(parts) != 4 || parts[0] != "pbkdf2_sha256" || parts[1] != "120000" {
+		t.Fatalf("unexpected token hash format: %q", hash)
+	}
+	salt, err := hex.DecodeString(parts[2]); if err != nil || len(salt) != 16 { t.Fatalf("invalid salt: %q %v", parts[2], err) }
+	want, err := hex.DecodeString(parts[3]); if err != nil || len(want) != 32 { t.Fatalf("invalid digest: %q %v", parts[3], err) }
+	api := &WebAPI{tokenHash: hash}
+	req := httptest.NewRequest(http.MethodGet, "http://example.test/api/status", nil)
+	req.Host = "example.test"
+	req.Header.Set("Authorization", "Bearer a-long-enough-token")
+	if !api.authorized(req) { t.Fatal("generated token hash must authenticate") }
+}
+
+func TestWebAuthTokenCanSetRotateAndClear(t *testing.T) {
+	api := newPlanTestAPI(t)
+	db, err := sql.Open("sqlite", api.cfg.ConfigDB); if err != nil { t.Fatal(err) }
+	if _, err = db.Exec("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)"); err != nil { t.Fatal(err) }
+	db.Close()
+
+	call := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/api/auth/token", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		api.authToken(rec, req)
+		return rec
+	}
+	if rec := call(`{"action":"set","token":"short"}`); rec.Code != http.StatusBadRequest { t.Fatalf("short token should be rejected: %d %s", rec.Code, rec.Body.String()) }
+	if rec := call(`{"action":"set","token":"first-long-token-123"}`); rec.Code != http.StatusOK { t.Fatalf("set token failed: %d %s", rec.Code, rec.Body.String()) }
+	first := api.tokenHash
+	if first == "" || !strings.HasPrefix(first, "pbkdf2_sha256$") { t.Fatalf("token hash was not installed: %q", first) }
+	if rec := call(`{"action":"set","token":"second-long-token-456"}`); rec.Code != http.StatusOK { t.Fatalf("rotate token failed: %d %s", rec.Code, rec.Body.String()) }
+	if api.tokenHash == first { t.Fatal("rotation must replace the previous hash") }
+	if rec := call(`{"action":"clear"}`); rec.Code != http.StatusOK { t.Fatalf("clear token failed: %d %s", rec.Code, rec.Body.String()) }
+	if api.tokenHash != "" { t.Fatal("clear must disable token authentication") }
+
+	db, err = sql.Open("sqlite", api.cfg.ConfigDB); if err != nil { t.Fatal(err) }; defer db.Close()
+	var raw string
+	if err = db.QueryRow("SELECT value FROM settings WHERE key='web.token_hash'").Scan(&raw); err != nil { t.Fatal(err) }
+	if raw != "null" { t.Fatalf("cleared token must persist JSON null, got %q", raw) }
+}
