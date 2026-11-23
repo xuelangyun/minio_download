@@ -63,6 +63,7 @@ func main(){
  a:=&App{cfg:c,ctx:ctx,mode:*mode,recheck:*recheck,validated:map[string]bool{}}
  lock:=flock.New(c.LockFile);locked,lockErr:=lock.TryLock();if lockErr!=nil{log.Fatalf("创建下载锁失败: %v",lockErr)};if !locked{log.Fatal("检测到另一个下载器实例正在运行")};defer lock.Unlock()
  if e=a.open();e!=nil{log.Fatal(e)};defer a.db.Close()
+ if e=validateDiskSet(a.cfg.Disks);e!=nil{log.Fatal(e)}
  if *cleanup{n,err:=a.cleanup(*dry);if err!=nil{log.Fatal(err)};log.Printf("清理结束：%d 条",n);if *dry{return}}else if *dry{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
  rows,e:=a.fetch();if e!=nil{log.Fatal(e)}
  if e=a.run(rows,*rounds);e!=nil{log.Fatal(e)}
@@ -318,7 +319,6 @@ func validateDiskSet(disks []DiskConfig)error{
  return nil
 }
 func(a *App)downloadSelected(sel map[string][]Episode)error{
- if err:=validateDiskSet(a.cfg.Disks);err!=nil{return err}
  loads:=map[string]int{};for _,t:=range a.cfg.Tasks{if a.assigned(t.Name)!=""{loads[a.assigned(t.Name)]++}}
  byDisk:=map[string][]batch{};waitingSpace:=false
  for _,t:=range a.cfg.Tasks{rs:=sel[t.Name];if len(rs)==0{continue};var d *DiskConfig;old:=a.assigned(t.Name)
