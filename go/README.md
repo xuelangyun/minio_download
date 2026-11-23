@@ -66,4 +66,12 @@ Go 对配置库只读，不会改写 Python Web 保存的配置。当前导入 M
 
 ## 当前限制
 
-尚未移植 Python Web 的完整控制台与写接口（启动下载、强制停止、任务/磁盘/设置管理、连接测试、方案 CRUD 和导入导出）；当前只实现安全暂停写接口、完整 Python 状态库的所有历史兼容、实时速度/ETA 汇总、动态磁盘预留锁，以及完整的崩溃恢复集成测试。Go 可读取 Python 运行控制表中的 `stop_requested`（兼容 ISO 时间戳），`--stop` 也会写入同一控制表；要让 Python Web 控制台观察 Go 的下载状态、进程和日志，请将两者的 `state_db`、`pid_file`、`log_dir` 指向同一位置。Go 使用 Python Web 预期的 `minio_task_downloader.log` 文件名，PID 文件包含兼容的 `pid` / `created` 字段。生产使用前应先在测试 bucket 验证。
+目前 Go Web 只覆盖状态查询、日志读取、episode 问题列表和安全暂停。尚未实现 Python Web 的完整页面与以下接口：
+
+- Web 启动下载任务、强制结束进程树。
+- 任务 / 磁盘 / 设置管理、连接测试和访问口令管理。
+- 任务方案的创建、编辑、删除、应用、导入和导出。
+- 完整 Python 状态库的所有历史兼容、精确实时速度 / ETA 汇总。
+- 动态磁盘预留锁、完整崩溃恢复与真实 MinIO / PostgreSQL 集成测试。
+
+Go 可读取 Python 运行控制表中的 `stop_requested`（兼容 ISO 时间戳），`--stop` 和 Web `POST /api/stop` 都会写入同一控制表。要让 Python Web 控制台观察 Go 下载状态、进程和日志，请将两者的 `state_db`、`pid_file`、`log_dir` 指向同一位置。Go 使用 Python Web 预期的 `minio_task_downloader.log` 文件名，PID 文件包含兼容的 `pid` / `created` 字段。生产使用前应先在测试 bucket 验证。
