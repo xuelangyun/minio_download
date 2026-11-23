@@ -1442,7 +1442,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
   objects=append(objects,obj)
  }
  if err:=sweepPartial(partial,e.ParentKey,objects);err!=nil{return a.fail(e,d,final,partial,err)}
- sem:=make(chan struct{},a.cfg.FileWorkers);var wg sync.WaitGroup;var total atomic.Int64;var mu sync.Mutex;var first error
+ sem:=make(chan struct{},a.cfg.FileWorkers);var wg sync.WaitGroup;var completedObjects atomic.Int64;var mu sync.Mutex;var first error
  // Serialize the admission check with the first capacity failure so workers
  // that have not reserved space yet cannot start additional object downloads.
  var admissionMu sync.Mutex
@@ -1457,7 +1457,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
    dst,err:=safeJoin(partial,rel)
    if err==nil{err=os.MkdirAll(filepath.Dir(dst),0755)}
    if err==nil&&existingObjectComplete(dst,item){
-    total.Add(item.Size)
+    completedObjects.Add(1)
     return
    }
    if err==nil{
@@ -1480,7 +1480,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  wg.Wait()
  if first!=nil{if errors.Is(first,errInsufficientDiskSpace){_=a.set(e,d,final,partial,"waiting_space",first.Error());return first};return a.fail(e,d,final,partial,first)}
  if a.ctx.Err()!=nil{return a.fail(e,d,final,partial,a.ctx.Err())}
- if total.Load()==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
+ if completedObjects.Load()==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
  if err:=os.RemoveAll(final);err!=nil{return a.fail(e,d,final,partial,err)};if err:=os.Rename(partial,final);err!=nil{return a.fail(e,d,final,partial,err)};if *a.cfg.Fsync{syncDirectory(filepath.Dir(final))}
  if err:=a.record(e,d,final);err!=nil{return err};return a.set(e,d,final,"","completed","")
 }
