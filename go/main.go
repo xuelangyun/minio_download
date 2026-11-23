@@ -1186,7 +1186,7 @@ func(a *App)reconcileInterruptedDownloads()error{
   status:="pending"
   message:="检测到上次运行异常中断；保留临时文件，等待续传"
   completedAt:=any(nil)
-  if item.target.Valid&&a.completedPath(item.target.String){
+  if item.target.Valid&&completedEpisodeDir(item.target.String,a.cfg.RequireMCAP,a.cfg.MCAPPattern){
    status="completed"
    message=""
    completedAt=now
