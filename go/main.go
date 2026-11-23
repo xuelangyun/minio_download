@@ -97,7 +97,7 @@ type WebAPI struct{cfg Config;db *sql.DB;tokenHash string}
 func serveWeb(c Config,host string,port int)error{
  if port<1||port>65535{return errors.New("web-port 必须在 1 到 65535 之间")}
  if err:=os.MkdirAll(filepath.Dir(c.StateDB),0755);err!=nil{return err}
- state,err:=sql.Open("sqlite",c.StateDB);if err!=nil{return err};state.SetMaxOpenConns(4);defer state.Close()
+ state,err:=sql.Open("sqlite",c.StateDB);if err!=nil{return err};state.SetMaxOpenConns(4);_,_=state.Exec("PRAGMA busy_timeout=30000");defer state.Close()
  api:=&WebAPI{cfg:c,db:state}
  if c.ConfigDB!=""{db,e:=sql.Open("sqlite",c.ConfigDB);if e!=nil{return e};defer db.Close();_ = db.QueryRow("SELECT json_extract(value,'
  if strings.TrimSpace(c.ConfigDB)==""{return nil}
@@ -781,9 +781,10 @@ func taskFolderKey(t Task)string{return safe(t.Scene)+"\x00"+safe(taskDir(t))}
  mux.HandleFunc("GET /api/status",api.status)
  mux.HandleFunc("GET /api/episodes",api.episodes)
  mux.HandleFunc("GET /api/logs",api.logs)
+ mux.HandleFunc("POST /api/stop",api.stop)
  handler:=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
   w.Header().Set("X-Content-Type-Options","nosniff");w.Header().Set("X-Frame-Options","DENY");w.Header().Set("Referrer-Policy","no-referrer")
-  if strings.HasPrefix(r.URL.Path,"/api/"){w.Header().Set("Cache-Control","no-store");if !api.authorized(r){writeJSONStatus(w,401,map[string]any{"error":"口令缺失或错误"});return}}
+  if strings.HasPrefix(r.URL.Path,"/api/"){w.Header().Set("Cache-Control","no-store");if r.Method=="POST"&&r.Header.Get("Content-Type")!="application/json"{writeJSONStatus(w,415,map[string]any{"error":"写操作必须使用 Content-Type: application/json"});return};if !api.authorized(r){writeJSONStatus(w,401,map[string]any{"error":"口令缺失或错误"});return}}
   mux.ServeHTTP(w,r)
  })
  addr:=net.JoinHostPort(host,strconv.Itoa(port));log.Printf("Go Web API listening on http://%s",addr)
@@ -840,6 +841,17 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
  endpoint:=a.cfg.Endpoint;if u,e:=url.Parse(endpoint);e==nil&&u.Host!=""{endpoint=u.Scheme+"://"+u.Host}
  settings:=map[string]any{"min_free_gb":a.cfg.MinFreeGB,"writes_per_disk":a.cfg.Workers,"require_mcap":a.cfg.RequireMCAP,"mcap_pattern":a.cfg.MCAPPattern,"default_rounds":1}
  writeJSON(w,map[string]any{"version":"go-dev","data_version":a.cfg.DataVersion,"downloader":state,"stop_requested":running&&isStopRequested(control["stop_requested"]),"setup_issues":issues,"minio":map[string]any{"endpoint":endpoint,"bucket":a.cfg.Bucket},"settings":settings,"last_run":last,"stale_records":staleRecords,"running_episodes":runningEpisodes,"disks":disks,"scenes":scenes})
+}
+func(a *WebAPI)stop(w http.ResponseWriter,r *http.Request){
+ var body struct{Force bool `json:"force"`};if err:=json.NewDecoder(io.LimitReader(r.Body,4096)).Decode(&body);err!=nil&&err!=io.EOF{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
+ if body.Force{writeJSONStatus(w,400,map[string]any{"error":"Go Web API 暂未实现强制结束；请使用安全暂停"});return}
+ raw,err:=os.ReadFile(a.cfg.PIDFile);if err!=nil{writeJSONStatus(w,409,map[string]any{"error":"当前没有运行中的下载器"});return}
+ var record pidRecord;if json.Unmarshal(raw,&record)!=nil||record.PID<=0{writeJSONStatus(w,409,map[string]any{"error":"当前没有运行中的下载器"});return}
+ proc,err:=process.NewProcess(int32(record.PID));if err!=nil{writeJSONStatus(w,409,map[string]any{"error":"当前没有运行中的下载器"});return}
+ alive,err:=proc.IsRunning();if err!=nil||!alive{writeJSONStatus(w,409,map[string]any{"error":"当前没有运行中的下载器"});return}
+ created,err:=proc.CreateTime();if err==nil&&record.Created>0&&math.Abs(float64(created)/1000-record.Created)>=2{writeJSONStatus(w,409,map[string]any{"error":"PID 已被其他进程复用"});return}
+ if err:=writeStopRequest(a.db);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"写入暂停请求失败: "+err.Error()});return}
+ writeJSON(w,map[string]any{"ok":true,"mode":"pause"})
 }
 func(a *WebAPI)episodes(w http.ResponseWriter,r *http.Request){
  task:=r.URL.Query().Get("task");rows,err:=a.db.Query("SELECT episode_id,status,error,parent_key,updated_at FROM downloads WHERE task_name=? AND status<>'completed' ORDER BY updated_at DESC LIMIT 200",task)
