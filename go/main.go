@@ -299,7 +299,7 @@ func findExistingTaskDisk(version string,t Task,disks []DiskConfig,rows []Episod
  for _,ep:=range rows{
   for _,d:=range disks{
    final,_:=episodePaths(version,t,d,ep.ParentKey)
-   if dirHasFiles(final){
+   if pathIsDir(final){
     if found!=""&&found!=d.Name{return "",fmt.Errorf("任务 %s 的已有数据分布在多块磁盘（%s、%s）",t.Name,found,d.Name)}
     found=d.Name
    }
