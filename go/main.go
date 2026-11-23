@@ -1423,7 +1423,7 @@ func existingObjectComplete(dst string,expected minio.ObjectInfo)bool{
 const resumeBackoffBytes int64=64*1024*1024
 func existingPartialBytes(dst string,expected int64)int64{
  if expected<=0{return 0}
- if st,err:=os.Stat(dst+".minio-tmp");err==nil&&st.Size()>0&&st.Size()<=expected{return st.Size()}
+ if st,err:=os.Lstat(dst+".minio-tmp");err==nil&&st.Mode().IsRegular()&&st.Size()>0&&st.Size()<=expected{return st.Size()}
  return 0
 }
 func resumeOffset(have,expected int64,firstAttempt bool)int64{
@@ -1553,8 +1553,8 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
  for attempt:=1;attempt<=attempts;attempt++{
   if a.ctx.Err()!=nil{return a.ctx.Err()}
   offset:=int64(0)
-  if st,err:=os.Stat(tmp);err==nil{
-   if st.Size()>expected.Size{if err:=discardTemp();err!=nil{return err}}else{
+  if st,err:=os.Lstat(tmp);err==nil{
+   if !st.Mode().IsRegular()||st.Size()>expected.Size{if err:=discardTemp();err!=nil{return err}}else{
     offset=resumeOffset(st.Size(),expected.Size,attempt==1)
     if offset<st.Size(){
      if err:=truncateResumeFile(tmp,offset);err!=nil{return fmt.Errorf("回退续传临时文件失败 %s: %w",key,err)}
