@@ -43,6 +43,17 @@ Windows PowerShell：
     Copy-Item config.example.json config.json
     .\minio-download.exe --config config.json --mode count
 
-## 当前首版限制
+## Python SQLite 配置库
 
-已实现文件级 Range 续传、ETag 条件请求、标准 MD5 ETag 校验、下载后远端元数据复核和 Windows 对象文件名检查。仍未移植 Python Web 控制台、配置 SQLite、任务方案/标签、Web 控制台、Web 发起的跨进程暂停控制、Web 进程树管理、动态磁盘预留锁、完整崩溃恢复与 Python 配置库兼容层。命令行 `--stop` 或 Ctrl+C 可请求取消当前 context，并将正在下载的 episode 标记为 `paused`，保留 `.minio-tmp` 供下次 Range 续传。Go 使用自己的 SQLite 状态表，不会直接复用 Python 状态库。生产使用前应先在测试 bucket 验证。
+条数模式可直接读取 `py_sample` 的配置库，不需要再复制 MinIO / PostgreSQL / 磁盘 / 任务参数：
+
+1. 先在 Python Web 控制台完成配置并停止正在运行的下载器。
+2. 复制 `config.count.example.json` 为 `config.json`。
+3. 将 `config_db` 设置为 Python 的 `minio_downloader_config.sqlite3` 文件路径；`state_db` 设置为 Python 的 `minio_download_state.sqlite3` 路径（若希望共享暂停控制和进度状态）。
+4. 运行 `./minio-download --config config.json`，未指定 `--mode` 时会自动识别为 `count`。
+
+Go 对配置库只读，不会改写 Python Web 保存的配置。当前导入 MinIO、PostgreSQL、磁盘、任务顺序、别名、条数目标和下载参数。`config_db` 目前只支持 `count` 模式；时长模式仍使用 `config.example.json` 中的 `target_hours`，避免把 Python 条数目标误解释为时长目标。
+
+## 当前限制
+
+尚未移植 Python Web 控制台本身、任务方案/标签的管理接口、Web 进程树管理、完整 Python 状态库的所有历史兼容、实时速度/ETA 汇总、动态磁盘预留锁，以及完整的崩溃恢复集成测试。Go 可读取 Python 运行控制表中的 `stop_requested`（兼容 ISO 时间戳），`--stop` 也会写入同一控制表；要让 Python Web 控制台观察 Go 的下载状态，请将两者的 `state_db` 指向同一文件。生产使用前应先在测试 bucket 验证。
