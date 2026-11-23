@@ -38,6 +38,15 @@ Go 版本按 Python 的两个 py_shell 脚本拆分了任务配置模板：
     cp config.count.example.json config.json
     ./minio-download --config config.json --mode count
 
+    # 条数模式：重新检查此前因缺少必需文件而记录为 missing 的候选
+    ./minio-download --config config.json --mode count --recheck-missing
+
+    # 只预览缺少 MCAP 的已下载目录及待恢复清理项，不执行删除
+    ./minio-download --config config.json --cleanup-missing-mcap --dry-run
+
+    # 确认预览结果后，执行缺失 MCAP 目录清理
+    ./minio-download --config config.json --cleanup-missing-mcap
+
     # 启动 Web API（默认 127.0.0.1:8765）
     ./minio-download --config config.json --web
 
