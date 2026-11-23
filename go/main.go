@@ -56,19 +56,19 @@ type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentK
 type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool }
 var configPath=flag.String("config","config.json","JSON 配置文件")
 var mode=flag.String("mode","","duration 或 count；未指定时根据配置自动选择")
-var rounds=flag.Int("max-rounds",1,"缺少必需文件后的补选轮数")
+var rounds=flag.Int("max-rounds",0,"缺少必需文件后的补选轮数；默认使用配置项 run.default_rounds")
 var recheck=flag.Bool("recheck-missing",false,"重新检查缺文件数据")
 var cleanup=flag.Bool("cleanup-missing-mcap",false,"清理缺少 mcap 的已下载目录")
 var dry=flag.Bool("dry-run",false,"只预览清理操作")
 var stopFlag=flag.Bool("stop",false,"请求正在运行的下载器安全暂停")
 var webFlag=flag.Bool("web",false,"启动只读 Web API 服务")
-var webHost=flag.String("web-host","127.0.0.1","Web API 监听地址")
-var webPort=flag.Int("web-port",8765,"Web API 监听端口")
+var webHost=flag.String("web-host","","覆盖配置文件中的 Web API 监听地址")
+var webPort=flag.Int("web-port",0,"覆盖配置文件中的 Web API 监听端口")
 var preserveStopRequest=flag.Bool("preserve-stop-request",false,"内部参数：保留 Web 启动后写入的暂停请求")
 
 func main(){
  flag.Parse()
- if *rounds<1{log.Fatal("--max-rounds 必须 >= 1")}
+ if *rounds<0{log.Fatal("--max-rounds 不能为负数")}
  b,e:=os.ReadFile(*configPath);if e!=nil{log.Fatalf("读取配置失败: %v；请复制 config.example.json 为 config.json",e)}
  var c Config;if e=json.Unmarshal(b,&c);e!=nil{log.Fatalf("配置 JSON 无效: %v",e)}
  if *stopFlag{if e=requestStop(c);e!=nil{log.Fatal(e)};log.Print("已写入安全暂停请求");return}
@@ -91,7 +91,7 @@ func main(){
  if e=validateDiskSet(a.cfg.Disks);e!=nil{log.Fatal(e)}
  if *cleanup{n,err:=a.cleanup(*dry);if err!=nil{log.Fatal(err)};log.Printf("清理结束：%d 条",n);if *dry{return}}else if *dry{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
  rows,e:=a.fetch();if e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停（候选查询期间收到暂停请求）");a.saveLastRun("paused",nil);return};log.Printf("候选查询失败: %v",e);a.saveLastRun("error",e);return}
- if e=a.run(rows,*rounds);e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil);return};log.Printf("下载执行失败: %v",e);a.saveLastRun("error",e);return}
+ if e=a.run(rows,effectiveRounds);e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil);return};log.Printf("下载执行失败: %v",e);a.saveLastRun("error",e);return}
  if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil)}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH);a.saveLastRun("finished",nil)}
 }
 
@@ -499,6 +499,11 @@ func applyWebSetting(c *Config,key string,v any){
  case "transfer.retry_delay":c.RetryDelaySeconds=v.(float64)
  case "transfer.verify_md5":b:=v.(bool);c.VerifyMD5=&b
  case "transfer.fsync":b:=v.(bool);c.Fsync=&b
+ case "run.default_rounds":c.DefaultRounds=v.(int)
+ case "transfer.connect_timeout":c.ConnectTimeout=v.(int)
+ case "transfer.read_timeout":c.ReadTimeout=v.(int)
+ case "web.host":c.WebHost=v.(string)
+ case "web.port":c.WebPort=v.(int)
  }
 }
 func(a *WebAPI)configSettings(w http.ResponseWriter,r *http.Request){
@@ -528,7 +533,7 @@ func(a *WebAPI)configTest(w http.ResponseWriter,r *http.Request){
  clean,err:=decodeWebSettings(body.Values);if err!=nil{writeJSON(w,map[string]any{"ok":false,"message":err.Error()});return}
  cfg:=a.cfg
  for key,value:=range clean{applyWebSetting(&cfg,key,value)}
- ctx,cancel:=context.WithTimeout(r.Context(),10*time.Second);defer cancel()
+ timeout:=time.Duration(cfg.ConnectTimeout)*time.Second;if timeout<=0{timeout=10*time.Second};ctx,cancel:=context.WithTimeout(r.Context(),timeout);defer cancel()
  if body.Target=="minio"{
   endpoint:=strings.TrimPrefix(strings.TrimPrefix(cfg.Endpoint,"https://"),"http://")
   secure:=cfg.SSL||strings.HasPrefix(cfg.Endpoint,"https://")
@@ -854,6 +859,18 @@ func minioHTTPTransport(c Config)*http.Transport{
  t.ResponseHeaderTimeout=time.Duration(read)*time.Second
  if c.MinioSkipVerify{t.TLSClientConfig=&tls.Config{InsecureSkipVerify:true} /* #nosec: explicitly configured by operator */}
  return t
+}
+func minioTransport(cfg Config)*http.Transport{
+ transport:=http.DefaultTransport.(*http.Transport).Clone()
+ dialTimeout:=time.Duration(cfg.ConnectTimeout)*time.Second;if dialTimeout<=0{dialTimeout=10*time.Second}
+ readTimeout:=time.Duration(cfg.ReadTimeout)*time.Second;if readTimeout<=0{readTimeout=120*time.Second}
+ dialer:=&net.Dialer{Timeout:dialTimeout,KeepAlive:30*time.Second}
+ transport.DialContext=dialer.DialContext
+ transport.TLSHandshakeTimeout=dialTimeout
+ // ResponseHeaderTimeout bounds waiting for MinIO response headers; streaming body reads remain context-cancellable.
+ transport.ResponseHeaderTimeout=readTimeout
+ if cfg.MinioSkipVerify{transport.TLSClientConfig=&tls.Config{InsecureSkipVerify:true} /* #nosec: explicitly configured by operator */}
+ return transport
 }
 func(a *App)open()error{
  endpoint:=strings.TrimPrefix(strings.TrimPrefix(a.cfg.Endpoint,"https://"),"http://");secure:=a.cfg.SSL||strings.HasPrefix(a.cfg.Endpoint,"https://")
