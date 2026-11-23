@@ -1462,6 +1462,18 @@ func TestMaxInt64(t *testing.T) {
  if got:=maxInt64(5,3);got!=5{t.Fatalf("maxInt64(5,3)=%d",got)}
 }
 
+func TestDiskLockDirectoryUsesConfiguredLockLocation(t *testing.T) {
+ c:=Config{LockFile:filepath.Join("shared-state","minio_download.lock")}
+ got:=diskLockDirectory(c)
+ want:=filepath.Join("shared-state","disk-locks")
+ if got!=want{t.Fatalf("diskLockDirectory=%q want %q",got,want)}
+}
+func TestDiskLockDirectoryDefaultsWhenLockFileMissing(t *testing.T) {
+ got:=diskLockDirectory(Config{})
+ want:="disk-locks"
+ if got!=want{t.Fatalf("diskLockDirectory=%q want %q",got,want)}
+}
+
 func TestDiskLockKeysCollapseDirectoriesOnSameFilesystem(t *testing.T) {
  root:=t.TempDir()
  first:=filepath.Join(root,"first")
