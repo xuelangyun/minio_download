@@ -83,8 +83,8 @@ func main(){
  ctx,cancel:=context.WithCancel(baseCtx);defer cancel()
  a:=&App{cfg:c,ctx:ctx,cancel:cancel,mode:*mode,recheck:*recheck,validated:map[string]bool{}}
  lock:=flock.New(c.LockFile);locked,lockErr:=lock.TryLock();if lockErr!=nil{log.Fatalf("创建下载锁失败: %v",lockErr)};if !locked{log.Fatal("检测到另一个下载器实例正在运行")};defer lock.Unlock()
+ if e=clearStopRequestDB(c.StateDB);e!=nil{log.Fatal(e)}
  if e=a.open();e!=nil{log.Fatal(e)};defer a.db.Close()
- if e=a.clearStopRequest();e!=nil{log.Fatal(e)}
  if e=writePIDFile(c.PIDFile,*mode);e!=nil{log.Fatal(e)};defer removePIDFile(c.PIDFile)
  watcherDone:=a.startStopWatcher();defer func(){cancel();<-watcherDone}()
  if e=validateDiskSet(a.cfg.Disks);e!=nil{log.Fatal(e)}
@@ -179,6 +179,12 @@ func writeStopRequest(db *sql.DB) error {
  if _,err:=db.Exec("CREATE TABLE IF NOT EXISTS control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL)");err!=nil{return err}
  _,err:=db.Exec("INSERT INTO control(key,value,updated_at) VALUES('stop_requested','1',?) ON CONFLICT(key) DO UPDATE SET value='1',updated_at=excluded.updated_at",controlTimestamp())
  return err
+}
+func clearStopRequestDB(name string)error{
+ if name==""{name="minio_download_state.sqlite3"}
+ db,err:=sql.Open("sqlite",name);if err!=nil{return err};defer db.Close();db.SetMaxOpenConns(1)
+ if _,err=db.Exec("PRAGMA busy_timeout=30000; CREATE TABLE IF NOT EXISTS control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL)");err!=nil{return err}
+ _,err=db.Exec("DELETE FROM control WHERE key='stop_requested'");return err
 }
 func requestStop(c Config) error {
  if c.StateDB==""{c.StateDB="minio_download_state.sqlite3"}
