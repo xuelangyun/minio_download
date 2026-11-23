@@ -163,6 +163,25 @@ func TestNormalizeParentKey(t *testing.T) {
 	}
 }
 
+func TestAcquireNamedDiskLocksPreventsConcurrentInstance(t *testing.T) {
+ dir:=t.TempDir()
+ release,err:=acquireNamedDiskLocks([]string{"device-a"},dir)
+ if err!=nil{t.Fatalf("first lock: %v",err)}
+ if _,err=acquireNamedDiskLocks([]string{"device-a"},dir);err==nil{t.Fatal("second instance acquired an already-held disk lock")}
+ release()
+ release2,err:=acquireNamedDiskLocks([]string{"device-a"},dir)
+ if err!=nil{t.Fatalf("lock was not released: %v",err)}
+ release2()
+}
+func TestAcquireNamedDiskLocksSortsAndReleasesPartialSet(t *testing.T) {
+ dir:=t.TempDir()
+ release,err:=acquireNamedDiskLocks([]string{"device-b","device-a"},dir)
+ if err!=nil{t.Fatalf("acquire sorted locks: %v",err)}
+ release()
+ release2,err:=acquireNamedDiskLocks([]string{"device-a","device-b"},dir)
+ if err!=nil{t.Fatalf("reacquire locks after release: %v",err)}
+ release2()
+}
 func TestAddSpaceReservations(t *testing.T) {
 	got, ok := addSpaceReservations(100, 200, 30)
 	if !ok || got != 330 {
