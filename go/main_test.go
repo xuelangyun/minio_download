@@ -718,3 +718,88 @@ func TestKillProcessTreeRejectsUnsafePID(t *testing.T) {
 		}
 	}
 }
+
+func newPlanTestAPI(t *testing.T) *WebAPI {
+	t.Helper()
+	return &WebAPI{cfg: Config{
+		ConfigDB: filepath.Join(t.TempDir(), "config.sqlite3"),
+		DataVersion: "银河2.2数据",
+		Tasks: []Task{{Scene: "Household", Name: "桌面收纳", Dir: "桌面收纳", TargetCount: 40, Aliases: []string{"0930桌面收纳"}, Tags: []string{"家居"}}},
+	}}
+}
+
+func callPlanHandler(handler http.HandlerFunc, method, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if strings.Contains(path, "{id}") { req.SetPathValue("id", strings.Trim(path, "{}")) }
+	return nil
+}
+
+func TestWebPlanCRUDAndImportExport(t *testing.T) {
+	api := newPlanTestAPI(t)
+	payload := `{"data_version":"银河2.2数据","scenes":[{"scene":"Household","tasks":[{"name":"桌面收纳","count":40,"aliases":["0930桌面收纳"],"dir":"桌面收纳","tags":["家居"]}]}]}`
+	create := httptest.NewRecorder()
+	api.planCreate(create, httptest.NewRequest(http.MethodPost, "/api/plans", strings.NewReader(`{"name":"第一批","note":"测试方案","payload":`+payload+`}`)))
+	if create.Code != http.StatusOK { t.Fatalf("create failed: %d %s", create.Code, create.Body.String()) }
+	var created map[string]any
+	if err := json.Unmarshal(create.Body.Bytes(), &created); err != nil { t.Fatal(err) }
+	id := int64(created["id"].(float64))
+
+	list := httptest.NewRecorder()
+	api.plansList(list, httptest.NewRequest(http.MethodGet, "/api/plans", nil))
+	if list.Code != http.StatusOK { t.Fatalf("list failed: %d %s", list.Code, list.Body.String()) }
+	var listed map[string]any
+	if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil { t.Fatal(err) }
+	plans := listed["plans"].([]any)
+	if len(plans) != 1 { t.Fatalf("expected one plan, got %d", len(plans)) }
+	summary := plans[0].(map[string]any)
+	if summary["task_count"] != float64(1) || summary["total_target"] != float64(40) || summary["tags"].([]any)[0] != "家居" { t.Fatalf("incorrect plan summary: %#v", summary) }
+
+	get := httptest.NewRequest(http.MethodGet, "/api/plans/"+strconv.FormatInt(id, 10), nil)
+	get.SetPathValue("id", strconv.FormatInt(id, 10))
+	got := httptest.NewRecorder()
+	api.planGet(got, get)
+	if got.Code != http.StatusOK || !strings.Contains(got.Body.String(), "桌面收纳") { t.Fatalf("get failed: %d %s", got.Code, got.Body.String()) }
+
+	exportReq := httptest.NewRequest(http.MethodGet, "/api/plans/"+strconv.FormatInt(id, 10)+"/export", nil)
+	exportReq.SetPathValue("id", strconv.FormatInt(id, 10))
+	exported := httptest.NewRecorder()
+	api.planExport(exported, exportReq)
+	if exported.Code != http.StatusOK || !strings.Contains(exported.Header().Get("Content-Disposition"), "attachment") { t.Fatalf("export failed: %d %s", exported.Code, exported.Body.String()) }
+
+	imported := httptest.NewRecorder()
+	api.planImport(imported, httptest.NewRequest(http.MethodPost, "/api/plans/import", strings.NewReader(exported.Body.String())))
+	if imported.Code != http.StatusOK { t.Fatalf("import failed: %d %s", imported.Code, imported.Body.String()) }
+	var importResult map[string]any
+	if err := json.Unmarshal(imported.Body.Bytes(), &importResult); err != nil { t.Fatal(err) }
+	if importResult["name"] != "第一批 (2)" { t.Fatalf("expected duplicate import name suffix, got %#v", importResult["name"]) }
+
+	newName := "第二批"
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/plans/"+strconv.FormatInt(id, 10), strings.NewReader(`{"name":"第二批","note":"已更新"}`))
+	updateReq.SetPathValue("id", strconv.FormatInt(id, 10))
+	updated := httptest.NewRecorder()
+	api.planUpdate(updated, updateReq)
+	if updated.Code != http.StatusOK { t.Fatalf("update failed: %d %s", updated.Code, updated.Body.String()) }
+	_ = newName
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/plans/"+strconv.FormatInt(id, 10), nil)
+	deleteReq.SetPathValue("id", strconv.FormatInt(id, 10))
+	deleted := httptest.NewRecorder()
+	api.planDelete(deleted, deleteReq)
+	if deleted.Code != http.StatusOK { t.Fatalf("delete failed: %d %s", deleted.Code, deleted.Body.String()) }
+	missingReq := httptest.NewRequest(http.MethodGet, "/api/plans/"+strconv.FormatInt(id, 10), nil)
+	missingReq.SetPathValue("id", strconv.FormatInt(id, 10))
+	missing := httptest.NewRecorder()
+	api.planGet(missing, missingReq)
+	if missing.Code != http.StatusNotFound { t.Fatalf("expected 404 after delete, got %d", missing.Code) }
+}
+
+func TestValidatePlanPayloadRejectsDuplicateTasksAndInvalidCounts(t *testing.T) {
+	for _, raw := range []string{
+		`{"data_version":"v1","scenes":[{"scene":"A","tasks":[{"name":"same","count":1},{"name":"same","count":2}]}]}`,
+		`{"data_version":"v1","scenes":[{"scene":"A","tasks":[{"name":"bad","count":-1}]}]}`,
+		`{"data_version":"","scenes":[]}`,
+	} {
+		if _, err := validatePlanPayload(json.RawMessage(raw)); err == nil { t.Errorf("expected invalid payload: %s", raw) }
+	}
+}
