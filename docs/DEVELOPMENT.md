@@ -355,6 +355,7 @@ Web 页面修改 ───────▶ ConfigStore.set_* （校验 → 事务
   * `merge`：`merge_payloads` 只追加当前**没有**（按任务名）的任务，**已有任务和条数绝不改动**；每追加一个任务都用 `validate` 回调试校验，冲突的任务跳过并返回原因，不影响其它任务；
 * **导入 / 导出**：导出为 `{"format": "minio-downloader-plan", "version": 1, "name", "note", "payload"}`；导入内容不可信，必须校验；同名自动加序号，不覆盖。
 * **Go 兼容实现**：Go Web 已实现同一组方案列表 / 详情 / CRUD / replace / merge / 标签筛选 / JSON 导入导出接口。Go 校验允许方案 `data_version` 为空；`replace` 时继承当前配置版本目录，当前配置也为空则拒绝应用。对应测试覆盖空版本保存与载入。
+* **Go 配置写接口**：已实现 `PUT /api/config/tasks`（完整校验后事务替换场景 / 任务 / 别名 / 版本目录，并同步 Web 进程内配置）和 `PUT /api/config/disks`（唯一名称、路径校验后事务替换磁盘配置）。设置项批量修改、连接测试、默认任务重置和磁盘实挂载检查仍待补齐。
 
 ## 5. Episode 状态机
 
