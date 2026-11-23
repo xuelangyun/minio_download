@@ -285,3 +285,16 @@ ORDER BY j.task_name ASC, j.create_time ASC, j.episode_id ASC
 | 重置配置 | 停止 Web 与下载器，删除配置库。下次启动重新初始化（默认任务 + 环境变量 / 旧文件导入）；连接、磁盘、方案、口令需重新设置 |
 | 忘记 Web 口令 | 在本机运行 `python web_app.py --set-token 新口令` |
 | 清掉卡住的暂停请求 | `delete from control where key='stop_requested'`（状态库） |
+
+
+## 9. Go CLI 配置与状态
+
+Go 版本使用 JSON 配置模板，配置文件应由使用者复制后填写，不能提交真实密钥：
+
+- `go/config.example.json`：按时长配置（目标单位小时，数据库 `content_time` 单位秒）。
+- `go/config.count.example.json`：按条数配置（当前与 `py_shell/minio_task_downloader_by_count.py` 的 43 个任务清单对应）。
+- 两种模式分别运行：`--mode duration` / `--mode count`。模板与模式应匹配，不要交叉复用。
+
+关键运行配置包括 `max_writes_per_disk`（每盘并发 episode 数）、`file_workers`（单条 episode 内并发文件数）、`min_free_gb`、`space_safety_factor`、`require_mcap`、`mcap_pattern`、`trust_completed_records`、`lock_file`、`state_db`。按条数模板默认信任已完成台账，以兼容 py_shell 的换盘 / 归档场景；按时长模板默认要求已下载目录仍存在。
+
+Go 版本创建 `downloads`、`downloaded_episodes`、`task_disk_assignments`、`control` 四张 SQLite 表，并为 `downloads` 补齐 `started_at` / `completed_at` 字段。表结构与 Python 状态库的核心字段保持接近，但 Go 尚未实现 Python 的全部状态码、`control.last_run` 约定及 Web 只读 / 暂停写入流程。升级或共用状态库前必须先备份并验证，当前建议使用独立的 `state_db` 文件。
