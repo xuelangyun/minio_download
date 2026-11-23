@@ -3,6 +3,8 @@ package main
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/minio/minio-go/v7"
 )
 
 func TestSafeComponent(t *testing.T) {
@@ -89,5 +91,30 @@ func TestConfigAcceptsSeparateSceneDirectories(t *testing.T) {
 	cfg.Tasks = append(cfg.Tasks, Task{Name: "task-b", Scene: "scene-b", Dir: "dir-a"})
 	if err := cfg.normalize("count"); err != nil {
 		t.Fatalf("different scenes may use the same directory name: %v", err)
+	}
+}
+
+func TestSweepPartialKeepsExpectedFileAndResumeTemp(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"camera/video.mp4", "camera/video.mp4.minio-tmp", "stale/old.txt"} {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	objects := []minio.ObjectInfo{{Key: "episode/camera/video.mp4", Size: 1}}
+	if err := sweepPartial(root, "episode", objects); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"camera/video.mp4", "camera/video.mp4.minio-tmp"} {
+		if _, err := os.Stat(filepath.Join(root, name)); err != nil {
+			t.Errorf("expected resume file to remain %s: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "stale/old.txt")); !os.IsNotExist(err) {
+		t.Errorf("stale file should be removed, got err=%v", err)
 	}
 }
