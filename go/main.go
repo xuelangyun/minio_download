@@ -1388,6 +1388,14 @@ func(w progressWriter)Write(p []byte)(int,error){
  if n>0&&w.onWrite!=nil{w.onWrite(int64(n))}
  return n,err
 }
+func existingObjectComplete(dst string,expected minio.ObjectInfo)bool{
+ st,err:=os.Lstat(dst)
+ if err!=nil||!st.Mode().IsRegular()||st.Size()!=expected.Size{return false}
+ if expected.LastModified.IsZero(){return true}
+ delta:=st.ModTime().Sub(expected.LastModified)
+ if delta<0{delta=-delta}
+ return delta<2*time.Second
+}
 func existingPartialBytes(dst string,expected int64)int64{
  if expected<=0{return 0}
  if st,err:=os.Stat(dst+".minio-tmp");err==nil&&st.Size()>0&&st.Size()<expected{return st.Size()}
@@ -1442,6 +1450,10 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
    rel:=strings.TrimPrefix(item.Key,e.ParentKey+"/")
    dst,err:=safeJoin(partial,rel)
    if err==nil{err=os.MkdirAll(filepath.Dir(dst),0755)}
+   if err==nil&&existingObjectComplete(dst,item){
+    total.Add(item.Size)
+    return
+   }
    if err==nil{
     admissionMu.Lock()
     if stopStarting {
@@ -1486,6 +1498,7 @@ func syncDirectory(dir string){
  f,err:=os.Open(dir);if err!=nil{return};_=f.Sync();_=f.Close()
 }
 func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *spaceReservation)error{
+ if existingObjectComplete(dst,expected){return nil}
  tmp:=dst+".minio-tmp"
  var writtenThisCall int64=existingPartialBytes(dst,expected.Size)
  onProgress:=func(n int64){if n>0{reservation.Consume(n);writtenThisCall+=n}}
