@@ -117,6 +117,8 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("GET /api/plans/{id}/export",api.planExport)
  mux.HandleFunc("POST /api/plans/import",api.planImport)
  mux.HandleFunc("POST /api/plans/{id}/apply",api.planApply)
+ mux.HandleFunc("PUT /api/config/settings",api.configSettings)
+ mux.HandleFunc("POST /api/config/test",api.configTest)
  mux.HandleFunc("PUT /api/config/tasks",api.configTasks)
  mux.HandleFunc("PUT /api/config/disks",api.configDisks)
  mux.HandleFunc("POST /api/config/disks/check",api.configDisksCheck)
@@ -441,6 +443,103 @@ func(a *WebAPI)planImport(w http.ResponseWriter,r *http.Request){
  writeJSON(w,map[string]any{"ok":true,"id":id,"name":name})
 }
 
+
+func decodeWebSettings(raw map[string]json.RawMessage)(map[string]any,error){
+ schema:=webConfigSchema();allowed:=map[string]map[string]any{}
+ for _,item:=range schema{key,_:=item["key"].(string);allowed[key]=item}
+ clean:=map[string]any{}
+ for key,data:=range raw{
+  item,ok:=allowed[key];if !ok{return nil,fmt.Errorf("未知设置项：%s",key)}
+  if item["secret"]==true&&string(data)=="null"{continue}
+  kind,_:=item["kind"].(string)
+  switch kind{
+  case "str":
+   var v string;if err:=json.Unmarshal(data,&v);err!=nil{return nil,fmt.Errorf("%s：必须是字符串",key)};clean[key]=v
+  case "bool":
+   var v bool;if err:=json.Unmarshal(data,&v);err!=nil{return nil,fmt.Errorf("%s：必须是布尔值",key)};clean[key]=v
+  case "int","float":
+   var v float64;if err:=json.Unmarshal(data,&v);err!=nil{return nil,fmt.Errorf("%s：必须是数字",key)}
+   if min,ok:=item["min"].(int);ok&&v<float64(min){return nil,fmt.Errorf("%s：不能小于 %v",item["label"],min)}
+   if max,ok:=item["max"].(int);ok&&v>float64(max){return nil,fmt.Errorf("%s：不能大于 %v",item["label"],max)}
+   if kind=="int"&&v!=float64(int64(v)){return nil,fmt.Errorf("%s：必须是整数",item["label"])}
+   if kind=="int"{clean[key]=int(v)}else{clean[key]=v}
+  default:return nil,fmt.Errorf("不支持的设置类型：%s",kind)
+  }
+ }
+ return clean,nil
+}
+func applyWebSetting(c *Config,key string,v any){
+ switch key{
+ case "minio.endpoint":c.Endpoint=v.(string)
+ case "minio.access_key":c.AccessKey=v.(string)
+ case "minio.secret_key":c.SecretKey=v.(string)
+ case "minio.secure":c.SSL=v.(bool)
+ case "minio.cert_check":c.MinioSkipVerify=!v.(bool)
+ case "minio.region":c.Region=v.(string)
+ case "minio.bucket":c.Bucket=v.(string)
+ case "pg.host":c.PGHost=v.(string)
+ case "pg.port":c.PGPort=v.(int)
+ case "pg.database":c.PGDB=v.(string)
+ case "pg.user":c.PGUser=v.(string)
+ case "pg.password":c.PGPassword=v.(string)
+ case "run.min_free_gb":c.MinFreeGB=v.(float64)
+ case "run.space_safety_factor":c.SafetyFactor=v.(float64)
+ case "run.max_writes_per_disk":c.Workers=v.(int)
+ case "run.require_mcap":c.RequireMCAP=v.(bool)
+ case "run.include_null_quality":c.IncludeNull=v.(bool)
+ case "run.mcap_pattern":c.MCAPPattern=v.(string)
+ case "run.validate_workers":c.ValidateWorkers=v.(int)
+ case "transfer.file_workers":c.FileWorkers=v.(int)
+ case "transfer.file_retries":c.FileRetries=v.(int)
+ case "transfer.retry_delay":c.RetryDelaySeconds=v.(float64)
+ case "transfer.verify_md5":b:=v.(bool);c.VerifyMD5=&b
+ case "transfer.fsync":b:=v.(bool);c.Fsync=&b
+ }
+}
+func(a *WebAPI)configSettings(w http.ResponseWriter,r *http.Request){
+ var body struct{Values map[string]json.RawMessage `json:"values"`}
+ if err:=json.NewDecoder(io.LimitReader(r.Body,2<<20)).Decode(&body);err!=nil||body.Values==nil{writeJSONStatus(w,400,map[string]any{"error":"请求内容不是有效的 JSON"});return}
+ clean,err:=decodeWebSettings(body.Values);if err!=nil{writeJSONStatus(w,400,map[string]any{"error":err.Error()});return}
+ if strings.TrimSpace(a.cfg.ConfigDB)==""{writeJSONStatus(w,500,map[string]any{"error":"未配置 SQLite 配置库"});return}
+ db,err:=sql.Open("sqlite",a.cfg.ConfigDB);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close();db.SetMaxOpenConns(1)
+ if _,err=db.Exec("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)");err!=nil{writeJSONStatus(w,500,map[string]any{"error":"初始化设置表失败："+err.Error()});return}
+ tx,err:=db.Begin();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer tx.Rollback()
+ saved:=[]string{}
+ for key,value:=range clean{
+  encoded,e:=json.Marshal(value);if e!=nil{writeJSONStatus(w,500,map[string]any{"error":"编码设置失败："+e.Error()});return}
+  if _,e=tx.Exec("INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",key,string(encoded),controlTimestamp());e!=nil{writeJSONStatus(w,500,map[string]any{"error":"保存设置失败："+e.Error()});return}
+  saved=append(saved,key)
+ }
+ if err=tx.Commit();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"提交设置失败："+err.Error()});return}
+ sort.Strings(saved)
+ for key,value:=range clean{applyWebSetting(&a.cfg,key,value)}
+ _,running,_:=a.activeDownloader()
+ writeJSON(w,map[string]any{"ok":true,"saved":saved,"running":running})
+}
+func(a *WebAPI)configTest(w http.ResponseWriter,r *http.Request){
+ var body struct{Target string `json:"target"`;Values map[string]json.RawMessage `json:"values"`}
+ if err:=json.NewDecoder(io.LimitReader(r.Body,2<<20)).Decode(&body);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
+ if body.Target!="minio"&&body.Target!="pg"{writeJSONStatus(w,400,map[string]any{"error":"未知的测试目标"});return}
+ clean,err:=decodeWebSettings(body.Values);if err!=nil{writeJSON(w,map[string]any{"ok":false,"message":err.Error()});return}
+ cfg:=a.cfg
+ for key,value:=range clean{applyWebSetting(&cfg,key,value)}
+ ctx,cancel:=context.WithTimeout(r.Context(),10*time.Second);defer cancel()
+ if body.Target=="minio"{
+  endpoint:=strings.TrimPrefix(strings.TrimPrefix(cfg.Endpoint,"https://"),"http://")
+  secure:=cfg.SSL||strings.HasPrefix(cfg.Endpoint,"https://")
+  transport:=http.DefaultTransport.(*http.Transport).Clone()
+  if cfg.MinioSkipVerify{transport.TLSClientConfig=&tls.Config{InsecureSkipVerify:true} /* #nosec: explicitly configured by operator */}
+  client,e:=minio.New(endpoint,&minio.Options{Creds:credentials.NewStaticV4(cfg.AccessKey,cfg.SecretKey,""),Secure:secure,Region:cfg.Region,Transport:transport})
+  if e==nil{var exists bool;exists,e=client.BucketExists(ctx,cfg.Bucket);if e==nil&&!exists{e=fmt.Errorf("MinIO bucket 不存在：%s",cfg.Bucket)}}
+  if e!=nil{writeJSON(w,map[string]any{"ok":false,"message":fmt.Sprintf("%T: %v",e,e)});return}
+  writeJSON(w,map[string]any{"ok":true,"message":fmt.Sprintf("连接成功：%s，bucket=%s",cfg.Endpoint,cfg.Bucket)});return
+ }
+ db,e:=sql.Open("pgx",postgresDSN(cfg))
+ if e==nil{defer db.Close();e=db.PingContext(ctx)}
+ if e==nil{var exists bool;e=db.QueryRowContext(ctx,"SELECT to_regclass('public.minio_galbot_scene_task_jobs') IS NOT NULL").Scan(&exists);if e==nil&&!exists{writeJSON(w,map[string]any{"ok":false,"message":"连接成功，但没有找到表 public.minio_galbot_scene_task_jobs"});return}}
+ if e!=nil{writeJSON(w,map[string]any{"ok":false,"message":fmt.Sprintf("%T: %v",e,e)});return}
+ writeJSON(w,map[string]any{"ok":true,"message":"连接成功，已找到任务数据表"})
+}
 func(a *WebAPI)configTasks(w http.ResponseWriter,r *http.Request){
  var raw json.RawMessage
  if err:=json.NewDecoder(io.LimitReader(r.Body,10<<20)).Decode(&raw);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"任务配置 JSON 无效"});return}
