@@ -2,6 +2,7 @@ name: Go cross-platform release
 
 on:
   push:
+    branches: ["feature/go-downloader"]
     tags: ["go-v*"]
   workflow_dispatch:
 
@@ -26,17 +27,22 @@ jobs:
           cache-dependency-path: go/go.sum
       - name: Build binary
         shell: bash
+        working-directory: go
         run: |
-          cd go
           go mod tidy
           mkdir -p dist
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="-s -w" -o dist/minio-download${{ matrix.ext }} .
           cp config.example.json README.md dist/
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            cd dist && 7z a ../../minio-download-windows-amd64.zip .
-          else
-            tar -C dist -czf ../../minio-download-linux-${{ matrix.goarch }}.tar.gz .
-          fi
+      - name: Package Windows
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        working-directory: go
+        run: Compress-Archive -Path dist/* -DestinationPath ../minio-download-windows-amd64.zip -Force
+      - name: Package Linux
+        if: matrix.goos == 'linux'
+        shell: bash
+        working-directory: go
+        run: tar -C dist -czf ../minio-download-linux-${{ matrix.goarch }}.tar.gz .
       - uses: actions/upload-artifact@v4
         with:
           name: minio-download-${{ matrix.goos }}-${{ matrix.goarch }}
