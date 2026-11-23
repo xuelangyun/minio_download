@@ -15,7 +15,7 @@
   "log_dir": "logs",
   "min_free_gb": 3,
   "space_safety_factor": 1.15,
-  "max_writes_per_disk": 2,
+  "max_writes_per_disk": 1,
   "require_mcap": true,
   "mcap_pattern": "*.SYNC.mcap",
   "include_null_quality": false,
