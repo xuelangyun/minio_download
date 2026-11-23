@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"strconv"
 	"path/filepath"
 	"testing"
 	"time"
@@ -728,13 +729,6 @@ func newPlanTestAPI(t *testing.T) *WebAPI {
 	}}
 }
 
-func callPlanHandler(handler http.HandlerFunc, method, path, body string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, path, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	if strings.Contains(path, "{id}") { req.SetPathValue("id", strings.Trim(path, "{}")) }
-	return nil
-}
-
 func TestWebPlanCRUDAndImportExport(t *testing.T) {
 	api := newPlanTestAPI(t)
 	payload := `{"data_version":"银河2.2数据","scenes":[{"scene":"Household","tasks":[{"name":"桌面收纳","count":40,"aliases":["0930桌面收纳"],"dir":"桌面收纳","tags":["家居"]}]}]}`
@@ -774,13 +768,11 @@ func TestWebPlanCRUDAndImportExport(t *testing.T) {
 	if err := json.Unmarshal(imported.Body.Bytes(), &importResult); err != nil { t.Fatal(err) }
 	if importResult["name"] != "第一批 (2)" { t.Fatalf("expected duplicate import name suffix, got %#v", importResult["name"]) }
 
-	newName := "第二批"
 	updateReq := httptest.NewRequest(http.MethodPut, "/api/plans/"+strconv.FormatInt(id, 10), strings.NewReader(`{"name":"第二批","note":"已更新"}`))
 	updateReq.SetPathValue("id", strconv.FormatInt(id, 10))
 	updated := httptest.NewRecorder()
 	api.planUpdate(updated, updateReq)
 	if updated.Code != http.StatusOK { t.Fatalf("update failed: %d %s", updated.Code, updated.Body.String()) }
-	_ = newName
 
 	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/plans/"+strconv.FormatInt(id, 10), nil)
 	deleteReq.SetPathValue("id", strconv.FormatInt(id, 10))
