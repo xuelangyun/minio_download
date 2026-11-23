@@ -109,6 +109,7 @@ func serveWeb(c Config,host string,port int)error{
  mux:=http.NewServeMux()
  mux.HandleFunc("GET /healthz",func(w http.ResponseWriter,r *http.Request){writeJSON(w,map[string]any{"ok":true,"version":"go-dev"})})
  mux.HandleFunc("GET /",func(w http.ResponseWriter,r *http.Request){w.Header().Set("Content-Type","text/html; charset=utf-8");_,_=io.WriteString(w,"<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>MinIO Go Downloader</title><body style='font:15px system-ui;max-width:1100px;margin:40px auto;padding:0 20px'><h2>MinIO Go Downloader API</h2><p>只读 API：<a href='/api/status'>状态</a> · <a href='/api/logs'>日志</a> · <a href='/healthz'>健康检查</a></p><pre id='out'>正在读取状态…</pre><script>async function tick(){try{let r=await fetch('/api/status');document.querySelector('#out').textContent=JSON.stringify(await r.json(),null,2)}catch(e){document.querySelector('#out').textContent=String(e)}}tick();setInterval(tick,5000)</script></body></html>")})
+ mux.HandleFunc("GET /api/config",api.config)
  mux.HandleFunc("GET /api/status",api.status)
  mux.HandleFunc("POST /api/run",api.run)
  mux.HandleFunc("GET /api/episodes",api.episodes)
@@ -182,6 +183,82 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
  settings:=map[string]any{"min_free_gb":a.cfg.MinFreeGB,"writes_per_disk":a.cfg.Workers,"require_mcap":a.cfg.RequireMCAP,"mcap_pattern":a.cfg.MCAPPattern,"default_rounds":1}
  writeJSON(w,map[string]any{"version":"go-dev","data_version":a.cfg.DataVersion,"downloader":state,"stop_requested":running&&isStopRequested(control["stop_requested"]),"setup_issues":issues,"minio":map[string]any{"endpoint":endpoint,"bucket":a.cfg.Bucket},"settings":settings,"last_run":last,"stale_records":staleRecords,"running_episodes":runningEpisodes,"disks":disks,"scenes":scenes})
 }
+func webConfigSchema() []map[string]any {
+ return []map[string]any{
+  {"key":"minio.endpoint","kind":"str","group":"minio","label":"服务地址","help":"例如 http://192.168.1.10:9000","secret":false,"default":"","placeholder":"http://127.0.0.1:9000"},
+  {"key":"minio.access_key","kind":"str","group":"minio","label":"Access Key","secret":false,"default":""},
+  {"key":"minio.secret_key","kind":"str","group":"minio","label":"Secret Key","help":"保存后不会再显示；留空表示不修改","secret":true,"default":nil},
+  {"key":"minio.secure","kind":"bool","group":"minio","label":"使用 HTTPS","secret":false,"default":true},
+  {"key":"minio.cert_check","kind":"bool","group":"minio","label":"校验证书","secret":false,"default":true},
+  {"key":"minio.region","kind":"str","group":"minio","label":"区域","secret":false,"default":""},
+  {"key":"minio.bucket","kind":"str","group":"minio","label":"Bucket","secret":false,"default":"rocp-data"},
+  {"key":"pg.host","kind":"str","group":"pg","label":"主机","secret":false,"default":"127.0.0.1"},
+  {"key":"pg.port","kind":"int","group":"pg","label":"端口","secret":false,"min":1,"max":65535,"default":5432},
+  {"key":"pg.database","kind":"str","group":"pg","label":"数据库","secret":false,"default":"minio_event"},
+  {"key":"pg.user","kind":"str","group":"pg","label":"用户名","secret":false,"default":"postgres"},
+  {"key":"pg.password","kind":"str","group":"pg","label":"密码","help":"保存后不会再显示；留空表示不修改","secret":true,"default":nil},
+  {"key":"run.min_free_gb","kind":"float","group":"run","label":"每块盘保留空间（GiB）","secret":false,"min":0,"max":1000000,"default":3.0},
+  {"key":"run.space_safety_factor","kind":"float","group":"run","label":"空间安全系数","secret":false,"min":1,"max":5,"default":1.15},
+  {"key":"run.max_writes_per_disk","kind":"int","group":"run","label":"每块盘并发写入数","secret":false,"min":1,"max":16,"default":2},
+  {"key":"run.require_mcap","kind":"bool","group":"run","label":"要求每条数据含 mcap","secret":false,"default":true},
+  {"key":"run.include_null_quality","kind":"bool","group":"run","label":"包含质量状态为空的数据","secret":false,"default":false},
+  {"key":"run.mcap_pattern","kind":"str","group":"run","label":"mcap 文件名规则","secret":false,"default":"*.SYNC.mcap"},
+  {"key":"run.validate_workers","kind":"int","group":"run","label":"检查 MinIO 目录的并发数","secret":false,"min":1,"max":64,"default":16},
+  {"key":"run.default_rounds","kind":"int","group":"run","label":"默认补齐轮数","secret":false,"min":1,"max":50,"default":1},
+  {"key":"transfer.file_workers","kind":"int","group":"transfer","label":"单条数据内并行文件数","secret":false,"min":1,"max":16,"default":4},
+  {"key":"transfer.file_retries","kind":"int","group":"transfer","label":"单个文件最大尝试次数","secret":false,"min":1,"max":20,"default":5},
+  {"key":"transfer.retry_delay","kind":"float","group":"transfer","label":"重试间隔基数（秒）","secret":false,"min":0,"max":60,"default":1.0},
+  {"key":"transfer.connect_timeout","kind":"int","group":"transfer","label":"连接超时（秒）","secret":false,"min":1,"max":300,"default":10},
+  {"key":"transfer.read_timeout","kind":"int","group":"transfer","label":"读取超时（秒）","secret":false,"min":5,"max":3600,"default":120},
+  {"key":"transfer.fsync","kind":"bool","group":"transfer","label":"改名前 fsync","secret":false,"default":true},
+  {"key":"transfer.verify_md5","kind":"bool","group":"transfer","label":"校验 MD5","secret":false,"default":true},
+  {"key":"web.host","kind":"str","group":"web","label":"监听地址","secret":false,"default":"127.0.0.1"},
+  {"key":"web.port","kind":"int","group":"web","label":"监听端口","secret":false,"min":1,"max":65535,"default":8765},
+ }
+}
+func(a *WebAPI)config(w http.ResponseWriter,r *http.Request) {
+ groups:=map[string]string{"minio":"MinIO 连接","pg":"PostgreSQL（任务元数据）","run":"运行与空间","transfer":"传输与校验","web":"Web 控制台"}
+ values:=map[string]any{}
+ secretKeys:=map[string]bool{"minio.secret_key":true,"pg.password":true}
+ secretsSet:=[]string{}
+ schema:=webConfigSchema()
+ for _,item:=range schema { values[item["key"].(string)]=item["default"] }
+ values["minio.endpoint"]=a.cfg.Endpoint;values["minio.access_key"]=a.cfg.AccessKey;values["minio.bucket"]=a.cfg.Bucket;values["minio.region"]=a.cfg.Region;values["minio.secure"]=a.cfg.SSL
+ values["pg.host"]=a.cfg.PGHost;values["pg.port"]=a.cfg.PGPort;values["pg.database"]=a.cfg.PGDB;values["pg.user"]=a.cfg.PGUser
+ values["run.min_free_gb"]=a.cfg.MinFreeGB;values["run.space_safety_factor"]=a.cfg.SafetyFactor;values["run.max_writes_per_disk"]=a.cfg.Workers;values["run.require_mcap"]=a.cfg.RequireMCAP;values["run.include_null_quality"]=a.cfg.IncludeNull;values["run.mcap_pattern"]=a.cfg.MCAPPattern;values["run.validate_workers"]=a.cfg.ValidateWorkers
+ values["transfer.file_workers"]=a.cfg.FileWorkers;values["transfer.file_retries"]=a.cfg.FileRetries;values["transfer.retry_delay"]=a.cfg.RetryDelaySeconds
+ if a.cfg.VerifyMD5!=nil {values["transfer.verify_md5"]=*a.cfg.VerifyMD5};if a.cfg.Fsync!=nil {values["transfer.fsync"]=*a.cfg.Fsync}
+ if a.cfg.SecretKey!="" {secretsSet=append(secretsSet,"minio.secret_key")};if a.cfg.PGPassword!="" {secretsSet=append(secretsSet,"pg.password")}
+ if a.cfg.ConfigDB!="" {
+  db,err:=sql.Open("sqlite",a.cfg.ConfigDB)
+  if err==nil {
+   defer db.Close()
+   rows,e:=db.Query("SELECT key,value FROM settings")
+   if e==nil {
+    for rows.Next(){var key,raw string;if rows.Scan(&key,&raw)!=nil{continue};if key=="web.token_hash"||key=="tasks.data_version"{continue};var value any;if json.Unmarshal([]byte(raw),&value)!=nil{continue};if secretKeys[key]{if value!="" {found:=false;for _,k:=range secretsSet{if k==key{found=true}};if !found{secretsSet=append(secretsSet,key)}};values[key]=""}else{values[key]=value}}
+    _=rows.Close()
+   }
+  }
+ }
+ sort.Strings(secretsSet)
+ scenes:=[]map[string]any{};sceneIndex:=map[string]int{}
+ for _,task:=range a.cfg.Tasks {
+  i,ok:=sceneIndex[task.Scene];if !ok{i=len(scenes);sceneIndex[task.Scene]=i;scenes=append(scenes,map[string]any{"scene":task.Scene,"tasks":[]map[string]any{}})}
+  aliases:=task.Aliases;if aliases==nil{aliases=[]string{}}
+  tags:=task.Tags;if tags==nil{tags=[]string{}}
+  items:=scenes[i]["tasks"].([]map[string]any)
+  items=append(items,map[string]any{"name":task.Name,"count":task.TargetCount,"aliases":aliases,"dir":task.Dir,"tags":tags})
+  scenes[i]["tasks"]=items
+ }
+ _,running,_:=a.activeDownloader()
+ platform:="posix";if runtime.GOOS=="windows"{platform="windows"}
+ writeJSON(w,map[string]any{
+  "schema":schema,"groups":groups,"values":values,"secrets_set":secretsSet,
+  "tasks":map[string]any{"data_version":a.cfg.DataVersion,"scenes":scenes},"disks":a.cfg.Disks,
+  "token_set":a.tokenHash!="","paths":map[string]any{"config_db":a.cfg.ConfigDB,"state_db":a.cfg.StateDB,"log_dir":a.cfg.LogDir},
+  "platform":platform,"running":running,
+ })
+}
 func(a *WebAPI)activeDownloader()(int,bool,bool){
  if a.childPID>0{if proc,err:=process.NewProcess(a.childPID);err==nil{alive,_:=proc.IsRunning();if alive{created,err:=proc.CreateTime();if err!=nil||a.childCreated==0||math.Abs(float64(created)/1000-a.childCreated)<2{return int(a.childPID),true,true}}}}
  raw,err:=os.ReadFile(a.cfg.PIDFile);if err!=nil{return 0,false,false}
@@ -248,9 +325,9 @@ func loadConfigDB(c *Config,runMode string)error{
  if raw,ok:=settings["transfer.verify_md5"];ok{var v bool;if json.Unmarshal([]byte(raw),&v)==nil{c.VerifyMD5=&v}}
  if raw,ok:=settings["transfer.fsync"];ok{var v bool;if json.Unmarshal([]byte(raw),&v)==nil{c.Fsync=&v}}
  if raw,ok:=settings["tasks.data_version"];ok{var v string;if json.Unmarshal([]byte(raw),&v)==nil&&v!=""{c.DataVersion=v}}
- taskRows,err:=db.Query("SELECT s.name,t.name,t.target_count,t.directory,t.id FROM tasks t JOIN scenes s ON s.id=t.scene_id ORDER BY s.position,t.position");if err!=nil{return err}
+ taskRows,err:=db.Query("SELECT s.name,t.name,t.target_count,t.directory,t.id,t.tags FROM tasks t JOIN scenes s ON s.id=t.scene_id ORDER BY s.position,t.position");if err!=nil{return err}
  aliases:=map[int64][]string{};aliasRows,err:=db.Query("SELECT task_id,alias FROM task_aliases ORDER BY task_id,position");if err!=nil{taskRows.Close();return err};for aliasRows.Next(){var id int64;var alias string;if err=aliasRows.Scan(&id,&alias);err!=nil{aliasRows.Close();taskRows.Close();return err};aliases[id]=append(aliases[id],alias)};if err=aliasRows.Err();err!=nil{aliasRows.Close();taskRows.Close();return err};if err=aliasRows.Close();err!=nil{taskRows.Close();return err}
- tasks:=[]Task{};for taskRows.Next(){var t Task;var id int64;if err=taskRows.Scan(&t.Scene,&t.Name,&t.TargetCount,&t.Dir,&id);err!=nil{taskRows.Close();return err};t.Aliases=aliases[id];tasks=append(tasks,t)};if err=taskRows.Err();err!=nil{taskRows.Close();return err};if err=taskRows.Close();err!=nil{return err};if len(tasks)==0{return errors.New("SQLite 配置库中没有任务")};c.Tasks=tasks
+ tasks:=[]Task{};for taskRows.Next(){var t Task;var id int64;var tags string;if err=taskRows.Scan(&t.Scene,&t.Name,&t.TargetCount,&t.Dir,&id,&tags);err!=nil{taskRows.Close();return err};t.Aliases=aliases[id];if tags!=""{_ = json.Unmarshal([]byte(tags),&t.Tags)};tasks=append(tasks,t)};if err=taskRows.Err();err!=nil{taskRows.Close();return err};if err=taskRows.Close();err!=nil{return err};if len(tasks)==0{return errors.New("SQLite 配置库中没有任务")};c.Tasks=tasks
  diskRows,err:=db.Query("SELECT name,path,mountpoint FROM disks ORDER BY position");if err!=nil{return err};disks:=[]DiskConfig{};for diskRows.Next(){var d DiskConfig;if err=diskRows.Scan(&d.Name,&d.Path,&d.Mountpoint);err!=nil{diskRows.Close();return err};disks=append(disks,d)};if err=diskRows.Err();err!=nil{diskRows.Close();return err};if err=diskRows.Close();err!=nil{return err};if len(disks)==0{return errors.New("SQLite 配置库中没有目标磁盘")};c.Disks=disks
  c.Mode="count";c.fromConfigDB=true;log.Printf("已从 SQLite 配置库加载配置: %s（任务 %d 个，磁盘 %d 块）",c.ConfigDB,len(c.Tasks),len(c.Disks));return nil
 }
