@@ -13,7 +13,7 @@ Go 实现与 Python 版本并行维护，提供 Windows / Linux 命令行下载�
 - SQLite WAL 状态库与下载台账；按配置兼容 Python 的历史完成台账信任策略，即使旧磁盘归档也能正确计入目标。
 - 暂存目录下载完成后原子 rename 发布；启动时清理不属于当前对象清单的残留文件，保留有效 Range 临时文件。
 - 跨平台单实例文件锁、原子 PID 文件与 SQLite `--stop` 暂停请求；文件与发布目录执行 fsync（Windows 不支持时安全忽略）。
-- 任务级磁盘空间预检，默认预留 3 GiB，按 1.15 安全系数估算；同一磁盘上排队的多个任务会累计预留预计空间，避免分别预检均通过但总量超出可用空间。文件并发参数 `file_workers` 默认 4，与 `max_writes_per_disk` 分开控制；条数模式会先并发检查必需文件并补足有效候选，`validate_workers` 默认 16；单文件重试次数 `file_retries` 默认 5，退避基数 `retry_delay_seconds` 默认 1 秒。`verify_md5` 默认开启；若 MinIO 使用 SSE 且 ETag 并非对象内容 MD5，可按实际情况关闭。
+- 任务级磁盘空间预检，默认预留 3 GiB，按 1.15 安全系数估算；同一磁盘上排队的多个任务会累计预留预计空间。启动磁盘调度前，Go 还会按文件系统设备标识获取跨进程 `flock`，同一主机上不同下载器实例即使配置了同一文件系统的不同目录，也不能并发占用；锁在进程退出或崩溃时由操作系统释放。该机制仅协调同一主机，不等同于跨主机共享存储锁。文件并发参数 `file_workers` 默认 4，与 `max_writes_per_disk` 分开控制；条数模式会先并发检查必需文件并补足有效候选，`validate_workers` 默认 16；单文件重试次数 `file_retries` 默认 5，退避基数 `retry_delay_seconds` 默认 1 秒。`verify_md5` 默认开启；若 MinIO 使用 SSE 且 ETag 并非对象内容 MD5，可按实际情况关闭。
 
 ## 配置和运行
 
@@ -71,6 +71,6 @@ Go 对配置库只读，不会改写 Python Web 保存的配置。当前导入 M
 - 磁盘间同一文件系统检测。
 - 任务方案的高级差异预览和冲突逐项交互处理。
 - 完整 Python 状态库的所有历史兼容、精确实时速度 / ETA 汇总。
-- 动态磁盘预留锁、完整崩溃恢复与真实 MinIO / PostgreSQL 集成测试。
+- 跨主机共享文件系统的磁盘协调、完整崩溃恢复与真实 MinIO / PostgreSQL 集成测试。
 
 Go 可读取 Python 运行控制表中的 `stop_requested`（兼容 ISO 时间戳），`--stop` 和 Web `POST /api/stop` 都会写入同一控制表。要让 Python Web 控制台观察 Go 下载状态、进程和日志，请将两者的 `state_db`、`pid_file`、`log_dir` 指向同一位置。Go 使用 Python Web 预期的 `minio_task_downloader.log` 文件名，PID 文件包含兼容的 `pid` / `created` 字段。生产使用前应先在测试 bucket 验证。
