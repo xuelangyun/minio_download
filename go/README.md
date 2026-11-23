@@ -88,3 +88,5 @@ Episode 备份路径使用随机且尚不存在的同级路径，不创建临时
 跨进程磁盘锁文件位于配置的 `lock_file` 同级 `disk-locks` 目录。不同系统用户需要对该共享目录具有读写权限，并使用相同的 `lock_file` 路径，才能实现同机实例间协调。
 
 SQLite 完成状态校验：默认不再仅凭正式目录存在就认定 Episode 已完成；必须是非符号链接的普通目录，且包含普通文件 `task_info.json`。启用 `require_mcap` 时，还必须存在匹配 `mcap_pattern` 的普通文件。`trust_completed_records=true` 仍保留历史归档记录信任行为。
+
+SQLite 异常退出恢复：每次新一轮下载启动时，在选取任务前扫描遗留 `running` 记录。正式目录已满足完成文件要求的，恢复为 `completed`；否则重置为 `pending`，记录中断原因并保留 `partial_path`，供后续续传。该操作使用 SQLite 事务，重复执行安全，不删除临时文件。
