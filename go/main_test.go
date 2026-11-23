@@ -319,6 +319,15 @@ func TestExistingPartialBytesIgnoresInvalidOrCompleteTempFiles(t *testing.T) {
  if got:=existingPartialBytes(dst,100);got!=100{t.Fatalf("complete temp should be retained as resumable: got %d want 100",got)}
  if got:=remainingObjectBytes(dst,100);got!=0{t.Fatalf("complete temp remaining: got %d want 0",got)}
 }
+func TestExistingPartialBytesRejectsSymlinkTemp(t *testing.T) {
+ dir:=t.TempDir()
+ target:=filepath.Join(dir,"outside.bin")
+ if err:=os.WriteFile(target,[]byte("external-data"),0600);err!=nil{t.Fatal(err)}
+ temp:=filepath.Join(dir,"object.bin.minio-tmp")
+ if err:=os.Symlink(target,temp);err!=nil{t.Skipf("symlink unavailable: %v",err)}
+ if got:=existingPartialBytes(filepath.Join(dir,"object.bin"),100);got!=0{t.Fatalf("symlink temp must not be treated as resumable: got %d",got)}
+}
+
 func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
  dir:=t.TempDir();dst:=filepath.Join(dir,"object.bin")
  if got:=remainingObjectBytes(dst,100);got!=100{t.Fatalf("missing partial: got %d want 100",got)}
