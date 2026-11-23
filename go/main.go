@@ -1410,7 +1410,10 @@ func existingPartialBytes(dst string,expected int64)int64{
 }
 func resumeOffset(have,expected int64,firstAttempt bool)int64{
  if have<0||have>expected{return 0}
- if firstAttempt&&have>resumeBackoffBytes{return have-resumeBackoffBytes}
+ if firstAttempt{
+  if have>resumeBackoffBytes{return have-resumeBackoffBytes}
+  return 0
+ }
  return have
 }
 func truncateResumeFile(name string,size int64)error{
