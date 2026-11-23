@@ -288,8 +288,11 @@ func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
 }
 func(a *WebAPI)stop(w http.ResponseWriter,r *http.Request){
  var body struct{Force bool `json:"force"`};if err:=json.NewDecoder(io.LimitReader(r.Body,4096)).Decode(&body);err!=nil&&err!=io.EOF{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
- if body.Force{writeJSONStatus(w,400,map[string]any{"error":"Go Web API 暂未实现强制结束；请使用安全暂停"});return}
  pid,running,_:=a.activeDownloader();if !running||pid<=0{writeJSONStatus(w,409,map[string]any{"error":"当前没有运行中的下载器"});return}
+ if body.Force{
+  if err:=killProcessTree(int32(pid));err!=nil{writeJSONStatus(w,500,map[string]any{"error":"强制结束下载进程失败: "+err.Error()});return}
+  writeJSON(w,map[string]any{"ok":true,"mode":"force_stop","pid":pid});return
+ }
  if err:=writeStopRequest(a.db);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"写入暂停请求失败: "+err.Error()});return}
  writeJSON(w,map[string]any{"ok":true,"mode":"pause"})
 }
