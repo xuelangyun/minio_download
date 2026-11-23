@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"path/filepath"
 	"testing"
 	"time"
@@ -587,5 +588,33 @@ func TestWebAPITokenFailureLockout(t *testing.T) {
 	valid.Header.Set("Authorization", "Bearer secret")
 	if api.authorized(valid) {
 		t.Fatal("valid token should be temporarily blocked after eight failures")
+	}
+}
+
+func TestWebStopWritesSharedPauseRequest(t *testing.T) {
+	root := t.TempDir()
+	pidFile := filepath.Join(root, "minio_download.pid")
+	if err := writePIDFile(pidFile, "count"); err != nil {
+		t.Fatal(err)
+	}
+	defer removePIDFile(pidFile)
+	db, err := sql.Open("sqlite", filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	api := &WebAPI{cfg: Config{PIDFile: pidFile}, db: db}
+	request := httptest.NewRequest(http.MethodPost, "/api/stop", strings.NewReader("{}"))
+	recorder := httptest.NewRecorder()
+	api.stop(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected stop response %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var value string
+	if err := db.QueryRow("SELECT value FROM control WHERE key='stop_requested'").Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	if value != "1" {
+		t.Fatalf("expected shared stop request value 1, got %q", value)
 	}
 }
