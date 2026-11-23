@@ -222,8 +222,8 @@ func(a *WebAPI)config(w http.ResponseWriter,r *http.Request) {
  secretKeys:=map[string]bool{"minio.secret_key":true,"pg.password":true}
  secretsSet:=[]string{}
  schema:=webConfigSchema()
- for _,item:=range schema { values[item["key"].(string)]=item["default"] }
- values["minio.endpoint"]=a.cfg.Endpoint;values["minio.access_key"]=a.cfg.AccessKey;values["minio.bucket"]=a.cfg.Bucket;values["minio.region"]=a.cfg.Region;values["minio.secure"]=a.cfg.SSL
+ for _,item:=range schema { values[item["key"].(string)]=item["default"];if _,ok:=item["help"];!ok{item["help"]=""};if _,ok:=item["min"];!ok{item["min"]=nil};if _,ok:=item["max"];!ok{item["max"]=nil};if _,ok:=item["placeholder"];!ok{item["placeholder"]=""} }
+ values["minio.endpoint"]=a.cfg.Endpoint;values["minio.access_key"]=a.cfg.AccessKey;values["minio.bucket"]=a.cfg.Bucket;values["minio.region"]=a.cfg.Region;values["minio.secure"]=a.cfg.SSL;values["minio.cert_check"]=!a.cfg.MinioSkipVerify
  values["pg.host"]=a.cfg.PGHost;values["pg.port"]=a.cfg.PGPort;values["pg.database"]=a.cfg.PGDB;values["pg.user"]=a.cfg.PGUser
  values["minio.secret_key"]="";values["pg.password"]=""
  values["run.min_free_gb"]=a.cfg.MinFreeGB;values["run.space_safety_factor"]=a.cfg.SafetyFactor;values["run.max_writes_per_disk"]=a.cfg.Workers;values["run.require_mcap"]=a.cfg.RequireMCAP;values["run.include_null_quality"]=a.cfg.IncludeNull;values["run.mcap_pattern"]=a.cfg.MCAPPattern;values["run.validate_workers"]=a.cfg.ValidateWorkers
