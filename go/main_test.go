@@ -336,6 +336,27 @@ func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
  if err:=os.WriteFile(dst+".minio-tmp",make([]byte,100),0600);err!=nil{t.Fatal(err)}
  if got:=remainingObjectBytes(dst,100);got!=0{t.Fatalf("complete temp remaining: got %d want 0",got)}
 }
+func TestReplaceDownloadedFileForWindowsReplacesExistingFile(t *testing.T) {
+ dir:=t.TempDir()
+ dst:=filepath.Join(dir,"final.bin")
+ src:=filepath.Join(dir,"final.bin.minio-tmp")
+ if err:=os.WriteFile(dst,[]byte("old-complete"),0600);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(src,[]byte("new-complete"),0600);err!=nil{t.Fatal(err)}
+ if err:=replaceDownloadedFileForOS(src,dst,true);err!=nil{t.Fatal(err)}
+ got,err:=os.ReadFile(dst);if err!=nil{t.Fatal(err)}
+ if string(got)!="new-complete"{t.Fatalf("destination=%q",got)}
+ if _,err=os.Stat(src);!os.IsNotExist(err){t.Fatalf("source should be moved, stat err=%v",err)}
+ entries,err:=os.ReadDir(dir);if err!=nil{t.Fatal(err)}
+ if len(entries)!=1||entries[0].Name()!="final.bin"{t.Fatalf("unexpected leftovers: %+v",entries)}
+}
+func TestReplaceDownloadedFileForWindowsCreatesNewFile(t *testing.T) {
+ dir:=t.TempDir();dst:=filepath.Join(dir,"new.bin");src:=filepath.Join(dir,"new.tmp")
+ if err:=os.WriteFile(src,[]byte("complete"),0600);err!=nil{t.Fatal(err)}
+ if err:=replaceDownloadedFileForOS(src,dst,true);err!=nil{t.Fatal(err)}
+ got,err:=os.ReadFile(dst);if err!=nil{t.Fatal(err)}
+ if string(got)!="complete"{t.Fatalf("destination=%q",got)}
+}
+
 func TestSameObjectVersionChecksSizeETagAndLastModified(t *testing.T) {
  modified:=time.Date(2026,1,2,3,4,5,0,time.UTC)
  expected:=minio.ObjectInfo{Size:128,ETag:"abc123",LastModified:modified}
