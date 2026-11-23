@@ -836,3 +836,38 @@ func TestWebPlanApplyReplaceAndMerge(t *testing.T) {
 	if merged.Code != http.StatusOK { t.Fatalf("merge apply failed: %d %s", merged.Code, merged.Body.String()) }
 	if len(api.cfg.Tasks) != 2 || api.cfg.Tasks[1].Name != "邮件归档" { t.Fatalf("merge did not append only new task: %#v", api.cfg.Tasks) }
 }
+
+func TestValidatePlanPayloadAllowsEmptyDataVersion(t *testing.T) {
+	raw := json.RawMessage(`{"data_version":"","scenes":[{"scene":"Office","tasks":[{"name":"文件整理","count":2}]}]}`)
+	p, err := validatePlanPayload(raw)
+	if err != nil {
+		t.Fatalf("Python-compatible plan may omit data_version: %v", err)
+	}
+	if p.DataVersion != "" || len(p.Scenes) != 1 {
+		t.Fatalf("unexpected normalized plan: %#v", p)
+	}
+}
+
+func TestPlanReplaceInheritsCurrentDataVersion(t *testing.T) {
+	api := newPlanTestAPI(t)
+	api.cfg.DataVersion = "current-version"
+	payload := `{"data_version":"","scenes":[{"scene":"Office","tasks":[{"name":"文件整理","count":2,"dir":"文件整理","aliases":[],"tags":[]}]}]}`
+	created := httptest.NewRecorder()
+	api.planCreate(created, httptest.NewRequest(http.MethodPost, "/api/plans", strings.NewReader(`{"name":"空版本方案","payload":`+payload+`}`)))
+	if created.Code != http.StatusOK {
+		t.Fatalf("create empty-version plan failed: %d %s", created.Code, created.Body.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(created.Body.Bytes(), &result); err != nil { t.Fatal(err) }
+	id := strconv.FormatInt(int64(result["id"].(float64)), 10)
+	req := httptest.NewRequest(http.MethodPost, "/api/plans/"+id+"/apply", strings.NewReader(`{"mode":"replace"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	api.planApply(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("replace should inherit current version: %d %s", rec.Code, rec.Body.String())
+	}
+	if api.cfg.DataVersion != "current-version" {
+		t.Fatalf("expected current version to be inherited, got %q", api.cfg.DataVersion)
+	}
+}
