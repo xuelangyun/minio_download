@@ -117,6 +117,7 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("GET /api/plans/{id}/export",api.planExport)
  mux.HandleFunc("POST /api/plans/import",api.planImport)
  mux.HandleFunc("POST /api/plans/{id}/apply",api.planApply)
+ mux.HandleFunc("PUT /api/config/tasks",api.configTasks)
  mux.HandleFunc("PUT /api/config/disks",api.configDisks)
  mux.HandleFunc("GET /api/config",api.config)
  mux.HandleFunc("GET /api/status",api.status)
@@ -439,6 +440,19 @@ func(a *WebAPI)planImport(w http.ResponseWriter,r *http.Request){
  writeJSON(w,map[string]any{"ok":true,"id":id,"name":name})
 }
 
+func(a *WebAPI)configTasks(w http.ResponseWriter,r *http.Request){
+ var raw json.RawMessage
+ if err:=json.NewDecoder(io.LimitReader(r.Body,10<<20)).Decode(&raw);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"任务配置 JSON 无效"});return}
+ p,err:=validatePlanPayload(raw);if err!=nil{writeJSONStatus(w,400,map[string]any{"error":err.Error()});return}
+ if p.DataVersion==""{writeJSONStatus(w,400,map[string]any{"error":"版本目录不能为空"});return}
+ db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
+ if err=persistPlanPayload(db,p);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"保存任务配置失败："+err.Error()});return}
+ tasks:=[]Task{}
+ for _,scene:=range p.Scenes{for _,t:=range scene.Tasks{tasks=append(tasks,Task{Scene:scene.Scene,Name:t.Name,TargetCount:t.Count,Aliases:append([]string{},t.Aliases...),Dir:t.Dir,Tags:append([]string{},t.Tags...)})}}
+ a.cfg.Tasks=tasks;a.cfg.DataVersion=p.DataVersion
+ _,running,_:=a.activeDownloader()
+ writeJSON(w,map[string]any{"ok":true,"running":running})
+}
 func(a *WebAPI)configDisks(w http.ResponseWriter,r *http.Request){
  var body struct{Disks []DiskConfig `json:"disks"`}
  if err:=json.NewDecoder(io.LimitReader(r.Body,1<<20)).Decode(&body);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
