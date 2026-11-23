@@ -1325,20 +1325,43 @@ func episodePaths(version string,t Task,d DiskConfig,parentKey string)(string,st
  leaf:=safe(path.Base(strings.Trim(parentKey,"/")))
  return filepath.Join(root,leaf),filepath.Join(root,"."+leaf+".partial")
 }
-func(a *App)reserveObjectSpace(d DiskConfig,size int64)(func(),error){
+type spaceReservation struct { app *App; diskName string; mu sync.Mutex; remaining uint64 }
+func(a *App)reserveObjectSpace(d DiskConfig,size int64)(*spaceReservation,error){
  if size<0{return nil,fmt.Errorf("对象大小无效: %d",size)}
  a.spaceMu.Lock()
  usage,err:=disk.Usage(d.Path)
  if err!=nil{a.spaceMu.Unlock();return nil,fmt.Errorf("动态读取磁盘空间失败 %s: %w",d.Name,err)}
+ if a.spaceInFlight==nil{a.spaceInFlight=map[string]uint64{}}
  reserved:=a.spaceInFlight[d.Name]
  minFree:=uint64(math.Ceil(a.cfg.MinFreeGB*1024*1024*1024))
  next,ok:=addSpaceReservations(reserved,uint64(size),minFree)
  if !ok||usage.Free<next{a.spaceMu.Unlock();return nil,fmt.Errorf("动态磁盘空间不足，暂停启动新对象: disk=%s free=%d reserved=%d object=%d min_free=%d",d.Name,usage.Free,reserved,size,minFree)}
  a.spaceInFlight[d.Name]=reserved+uint64(size)
  a.spaceMu.Unlock()
- var once sync.Once
- release:=func(){once.Do(func(){a.spaceMu.Lock();current:=a.spaceInFlight[d.Name];amount:=uint64(size);if current<=amount{delete(a.spaceInFlight,d.Name)}else{a.spaceInFlight[d.Name]=current-amount};a.spaceMu.Unlock()})}
- return release,nil
+ return &spaceReservation{app:a,diskName:d.Name,remaining:uint64(size)},nil
+}
+func(r *spaceReservation)Consume(n int64){
+ if r==nil||n<=0{return}
+ r.mu.Lock();defer r.mu.Unlock()
+ amount:=uint64(n);if amount>r.remaining{amount=r.remaining}
+ if amount==0{return}
+ r.app.spaceMu.Lock();current:=r.app.spaceInFlight[r.diskName]
+ if current<=amount{delete(r.app.spaceInFlight,r.diskName)}else{r.app.spaceInFlight[r.diskName]=current-amount}
+ r.app.spaceMu.Unlock();r.remaining-=amount
+}
+func(r *spaceReservation)Release(){
+ if r==nil{return}
+ r.mu.Lock();defer r.mu.Unlock()
+ if r.remaining==0{return}
+ r.app.spaceMu.Lock();current:=r.app.spaceInFlight[r.diskName]
+ if current<=r.remaining{delete(r.app.spaceInFlight,r.diskName)}else{r.app.spaceInFlight[r.diskName]=current-r.remaining}
+ r.app.spaceMu.Unlock();r.remaining=0
+}
+type progressWriter struct { writer io.Writer; onWrite func(int64) }
+func(w progressWriter)Write(p []byte)(int,error){
+ n,err:=w.writer.Write(p)
+ if n>0&&w.onWrite!=nil{w.onWrite(int64(n))}
+ return n,err
 }
 func remainingObjectBytes(dst string,expected int64)int64{
  remaining:=expected
@@ -1388,8 +1411,8 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
    dst,err:=safeJoin(partial,rel)
    if err==nil{err=os.MkdirAll(filepath.Dir(dst),0755)}
    if err==nil{
-    releaseSpace,spaceErr:=a.reserveObjectSpace(d,remainingObjectBytes(dst,item.Size))
-    if spaceErr!=nil{err=spaceErr}else{defer releaseSpace();err=a.fetchObject(item.Key,dst,item)}
+    reservation,spaceErr:=a.reserveObjectSpace(d,remainingObjectBytes(dst,item.Size))
+    if spaceErr!=nil{err=spaceErr}else{defer reservation.Release();err=a.fetchObject(item.Key,dst,item,reservation.Consume)}
    }
    if err!=nil{mu.Lock();if first==nil{first=err};mu.Unlock();return}
    total.Add(item.Size)
@@ -1421,7 +1444,7 @@ func sweepPartial(root,parent string,objects []minio.ObjectInfo)error{
 func syncDirectory(dir string){
  f,err:=os.Open(dir);if err!=nil{return};_=f.Sync();_=f.Close()
 }
-func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
+func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,onProgress func(int64))error{
  tmp:=dst+".minio-tmp"
  attempts:=a.cfg.FileRetries
  for attempt:=1;attempt<=attempts;attempt++{
@@ -1452,7 +1475,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
     out,err=os.OpenFile(tmp,flags,0644)
     if err==nil{
      var n int64
-     n,copyErr:=io.Copy(out,obj)
+     n,copyErr:=io.Copy(progressWriter{writer:out,onWrite:onProgress},struct{io.Reader}{obj})
      var syncErr error
      if *a.cfg.Fsync{syncErr=out.Sync()}
      closeErr:=out.Close()
