@@ -503,6 +503,28 @@ func TestPathIsDirIncludesEmptyFinalDirectory(t *testing.T) {
 	}
 }
 
+func TestCompletedEpisodeDirDoesNotFollowSymlinkedRequiredFile(t *testing.T) {
+ parent:=t.TempDir();dir:=filepath.Join(parent,"episode");outside:=filepath.Join(parent,"outside.json")
+ if err:=os.Mkdir(dir,0755);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(outside,[]byte("{}"),0600);err!=nil{t.Fatal(err)}
+ if err:=os.Symlink(outside,filepath.Join(dir,"task_info.json"));err!=nil{t.Skipf("symlink unavailable: %v",err)}
+ if completedEpisodeDir(dir,false,""){t.Fatal("symlinked task_info.json must not validate the episode")}
+}
+func TestFindExistingTaskDiskHonorsRequiredMCAP(t *testing.T) {
+ diskPath:=t.TempDir();task:=Task{Name:"task",Scene:"scene",Dir:"task"}
+ disk:=DiskConfig{Name:"disk1",Path:diskPath}
+ ep:=Episode{ID:"ep",ParentKey:"parent"}
+ final,_:=episodePaths("",task,disk,ep.ParentKey)
+ if err:=os.MkdirAll(final,0755);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(final,"task_info.json"),[]byte("{}"),0600);err!=nil{t.Fatal(err)}
+ got,err:=findExistingTaskDisk("",task,[]DiskConfig{disk},[]Episode{ep},true,"*.mcap")
+ if err!=nil{t.Fatal(err)}
+ if got!=""{t.Fatalf("incomplete episode should not pin disk, got %q",got)}
+ if err:=os.WriteFile(filepath.Join(final,"x.mcap"),[]byte("mcap"),0600);err!=nil{t.Fatal(err)}
+ got,err=findExistingTaskDisk("",task,[]DiskConfig{disk},[]Episode{ep},true,"*.mcap")
+ if err!=nil{t.Fatal(err)}
+ if got!="disk1"{t.Fatalf("valid episode disk=%q",got)}
+}
 func TestCompletedEpisodeDirRequiresTaskInfo(t *testing.T) {
  dir:=t.TempDir()
  if completedEpisodeDir(dir,false,""){t.Fatal("empty directory must not count as completed")}
