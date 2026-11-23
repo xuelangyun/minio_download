@@ -1374,6 +1374,12 @@ func(r *spaceReservation)Restore(n int64){
  r.app.spaceMu.Unlock()
  r.remaining+=amount;r.consumed-=amount
 }
+func(r *spaceReservation)ConsumedBytes()int64{
+ if r==nil{return 0}
+ r.mu.Lock();defer r.mu.Unlock()
+ if r.consumed>uint64(math.MaxInt64){return math.MaxInt64}
+ return int64(r.consumed)
+}
 func(r *spaceReservation)Release(){
  if r==nil{return}
  r.mu.Lock();defer r.mu.Unlock()
@@ -1500,7 +1506,7 @@ func syncDirectory(dir string){
 func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *spaceReservation)error{
  if existingObjectComplete(dst,expected){return nil}
  tmp:=dst+".minio-tmp"
- var writtenThisCall int64=int64(reservation.consumed)
+ var writtenThisCall int64=reservation.ConsumedBytes()
  onProgress:=func(n int64){if n>0{reservation.Consume(n);writtenThisCall+=n}}
  restoreWritten:=func(){if writtenThisCall>0{reservation.Restore(writtenThisCall);writtenThisCall=0}}
  discardTemp:=func()error{
