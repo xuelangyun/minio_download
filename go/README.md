@@ -1,6 +1,52 @@
 # MinIO Download - Go 版本
 
-Go 实现与 Python 版本并行维护，提供 Windows / Linux 命令行下载器。条数模式可以读取 Python Web 控制台使用的 SQLite 配置库和下载状态库；时长模式使用独立 JSON 配置。
+Go 版本采用 **Web 首次配置 + 单文件 SQLite 存储**。无需准备 JSON 配置文件，下载程序启动后直接打开网页，完成 MinIO、PostgreSQL、磁盘和任务配置，再从网页启动下载。
+
+- Windows amd64、Linux amd64、Linux arm64。
+- 首次启动自动创建 `minio_download.sqlite3`，并写入内置任务清单。
+- MinIO / PostgreSQL 参数、任务、磁盘、任务方案、运行状态、下载台账、暂停控制和日志统一保存在同一个 SQLite 文件。
+- 不另外生成 `config.json`、日志文件、PID 文件或锁文件。
+- 下载的视频和必要的临时续传数据仍写入网页设置的目标磁盘目录。
+
+## 启动与首次配置
+
+直接执行程序：
+
+Windows PowerShell：
+
+    .\minio-download.exe
+
+Linux：
+
+    chmod +x ./minio-download
+    ./minio-download
+
+默认打开 `http://127.0.0.1:8765`。第一次启动会自动创建 SQLite 数据库；没有配置 MinIO / PostgreSQL 密钥和目标磁盘时，网页会提示需要补齐的配置，不会启动下载。
+
+网页操作顺序：
+
+1. 在“连接配置”填写 MinIO Endpoint、Access Key、Secret Key、Bucket，以及 PostgreSQL 连接信息；保存并分别测试连接。
+2. 在“磁盘配置”填写下载目录与实际挂载点，先检查磁盘再保存。
+3. 在“任务配置”检查内置任务清单、数据版本目录和每个任务的目标条数，按需修改。
+4. 在“运行参数”调整磁盘预留空间、并发、校验和重试参数。
+5. 返回“运行状态”，点击“开始下载”；日志和运行状态直接从 SQLite 读取。
+
+默认只监听本机 `127.0.0.1:8765`。需要局域网访问时，先在本机“运行参数”页设置访问口令，再将 `web.host` 改成 `0.0.0.0` 并重启程序。不要在没有访问口令的情况下对公网开放控制台。
+
+## SQLite 数据库
+
+默认数据库文件：`minio_download.sqlite3`，位于程序启动时的当前工作目录。可用 `--db <路径>` 指定其他位置：
+
+    ./minio-download --db /data/minio_download.sqlite3
+
+数据表包括设置、任务 / 别名、磁盘、任务方案、运行控制、下载状态、下载完成台账、进程状态和运行日志。SQLite 使用 DELETE journal 模式，避免长期保留 WAL / SHM 辅助文件。数据库是唯一的程序配置与运行记录文件；不要手动删除运行中的数据库。
+
+安全暂停通过 SQLite 控制表写入，不需要 PID 文件：
+
+    ./minio-download --stop --db /data/minio_download.sqlite3
+
+Web 页面也提供开始、暂停和强制停止操作。强制停止后保留有效临时数据，下次运行按 Range 续传。
+
 
 ## 功能
 
@@ -58,16 +104,10 @@ Windows PowerShell：
     Copy-Item config.count.example.json config.json
     .\minio-download.exe --config config.json --mode count
 
-## Python SQLite 配置库
+## 旧版 Python 配置库兼容
 
-条数模式可直接读取 `py_sample` 的配置库，不需要再复制 MinIO / PostgreSQL / 磁盘 / 任务参数：
+当前新 Go 版本默认使用自己的单文件 SQLite 数据库，不需要依赖或复制 Python 版本的配置库。原有 `--config <JSON>` 入口仅保留作旧版兼容，不作为新安装方式；新部署请直接启动程序并在网页配置。
 
-1. 先在 Python Web 控制台完成配置并停止正在运行的下载器。
-2. 复制 `config.count.example.json` 为 `config.json`。
-3. 将 `config_db` 设置为 Python 的 `minio_downloader_config.sqlite3` 文件路径；`state_db` 设置为 Go 独立状态库路径（例如 `go/minio_download_state.sqlite3`）；若希望 Python Web 识别 Go 进程和读取日志，还要把 `pid_file`、`log_dir` 分别指向 Python 的 `minio_download.pid` 和 `logs` 目录。Go 状态库与 Python 状态库并非完全兼容，生产环境应使用独立的 `state_db`。如确实需要共享 `control.stop_requested` 暂停信号，必须先备份并验证，不建议直接共用整个状态库。
-4. 运行 `./minio-download --config config.json`，未指定 `--mode` 时会自动识别为 `count`。
-
-Go 对配置库只读，不会改写 Python Web 保存的配置。当前导入 MinIO、PostgreSQL、TLS 证书校验策略、磁盘、任务顺序、别名、条数目标、校验/传输参数及 fsync 策略。`config_db` 目前只支持 `count` 模式；时长模式仍使用 `config.example.json` 中的 `target_hours`，避免把 Python 条数目标误解释为时长目标。
 
 ## Go Web API 当前范围
 
@@ -75,7 +115,7 @@ Go 对配置库只读，不会改写 Python Web 保存的配置。当前导入 M
 
 ## 当前限制
 
-目前 Go Web 已实现基础状态页、配置查询与批量设置、任务和磁盘配置更新、MinIO / PostgreSQL 连接测试、任务方案 API（CRUD、应用、JSON 导入 / 导出）及访问口令设置 / 轮换 / 清除。`PUT /api/auth/token` 使用 `{ "action":"set", "token":"至少 12 字节的新口令" }` 设置或轮换口令，使用 `{ "action":"clear" }` 清除；口令只以 PBKDF2-SHA256 摘要保存，不返回明文。该接口仍受当前 API 鉴权保护：已设置口令时必须先携带旧口令完成认证；未设置口令时仅允许本机访问。清除后，非本机监听的既有服务会拒绝远程 API 请求；重启时若仍无口令则禁止绑定非本机地址。磁盘检查目前覆盖挂载状态、路径包含关系、可写性与可用空间；未挂载时不会向其上级系统目录写探测文件。
+目前 Go Web 提供完整的首次配置页面、状态与日志页面、配置查询与保存、任务和磁盘配置更新、MinIO / PostgreSQL 连接测试、任务方案 API（CRUD、应用、JSON 导入 / 导出）及访问口令设置 / 轮换 / 清除。`PUT /api/auth/token` 使用 `{ "action":"set", "token":"至少 12 字节的新口令" }` 设置或轮换口令，使用 `{ "action":"clear" }` 清除；口令只以 PBKDF2-SHA256 摘要保存，不返回明文。该接口仍受当前 API 鉴权保护：已设置口令时必须先携带旧口令完成认证；未设置口令时仅允许本机访问。清除后，非本机监听的既有服务会拒绝远程 API 请求；重启时若仍无口令则禁止绑定非本机地址。磁盘检查目前覆盖挂载状态、路径包含关系、可写性与可用空间；未挂载时不会向其上级系统目录写探测文件。
 
 - 磁盘间同一文件系统检测：Linux 通过内核设备号识别，能够识别 bind mount / 设备别名；Windows 使用系统分区表中的卷设备标识，拒绝重复挂载同一卷。
 - 任务方案的高级差异预览和冲突逐项交互处理。
