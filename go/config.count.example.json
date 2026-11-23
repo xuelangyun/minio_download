@@ -418,5 +418,6 @@
   "file_retries": 5,
   "retry_delay_seconds": 1,
   "validate_workers": 16,
-  "pid_file": "minio_download.pid"
+  "pid_file": "minio_download.pid",
+  "config_db": ""
 }
