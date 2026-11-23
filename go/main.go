@@ -32,7 +32,7 @@ type Config struct {
  Endpoint string `json:"minio_endpoint"`; AccessKey string `json:"minio_access_key"`; SecretKey string `json:"minio_secret_key"`; Bucket string `json:"minio_bucket"`; Region string `json:"minio_region"`; SSL bool `json:"minio_use_ssl"`
  PGHost string `json:"pg_host"`; PGPort int `json:"pg_port"`; PGDB string `json:"pg_database"`; PGUser string `json:"pg_user"`; PGPassword string `json:"pg_password"`
  DataVersion string `json:"data_version"`; StateDB string `json:"state_db"`; LogDir string `json:"log_dir"`; MinFreeGB float64 `json:"min_free_gb"`; SafetyFactor float64 `json:"space_safety_factor"`
- Workers int `json:"max_writes_per_disk"`; RequireMCAP bool `json:"require_mcap"`; MCAPPattern string `json:"mcap_pattern"`; IncludeNull bool `json:"include_null_quality"`
+ Workers int `json:"max_writes_per_disk"`; RequireMCAP bool `json:"require_mcap"`; MCAPPattern string `json:"mcap_pattern"`; IncludeNull bool `json:"include_null_quality"`; TrustCompletedRecords bool `json:"trust_completed_records"`
  Disks []DiskConfig `json:"disks"`; Tasks []Task `json:"tasks"`
 }
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
@@ -93,8 +93,8 @@ func(a *App)set(e Episode,d DiskConfig,final,partial,status,msg string)error{
  e.ID,e.Task,e.ParentKey,d.Name,nullable(final),nullable(partial),e.Size,status,nullable(msg),time.Now().UTC().Format(time.RFC3339Nano));return err
 }
 func nullable(s string)any{if s==""{return nil};return s}
-func(a *App)completed(id string)bool{var p sql.NullString;err:=a.db.QueryRow("SELECT target_path FROM downloads WHERE episode_id=? AND status='completed'",id).Scan(&p);return err==nil&&p.Valid&&dirHasFiles(p.String)}
-func(a *App)stats(task string)(float64,int){rows,err:=a.db.Query("SELECT content_time,target_path FROM downloaded_episodes WHERE task_name=?",task);if err!=nil{return 0,0};defer rows.Close();var seconds float64;count:=0;for rows.Next(){var v sql.NullFloat64;var p sql.NullString;if rows.Scan(&v,&p)!=nil{continue};if p.Valid&&dirHasFiles(p.String){seconds+=v.Float64;count++}};return seconds,count}
+func(a *App)completed(id string)bool{var p sql.NullString;err:=a.db.QueryRow("SELECT target_path FROM downloads WHERE episode_id=? AND status='completed'",id).Scan(&p);if err!=nil{return false};if a.cfg.TrustCompletedRecords{return true};return p.Valid&&dirHasFiles(p.String)}
+func(a *App)stats(task string)(float64,int){rows,err:=a.db.Query("SELECT content_time,target_path FROM downloaded_episodes WHERE task_name=?",task);if err!=nil{return 0,0};defer rows.Close();var seconds float64;count:=0;for rows.Next(){var v sql.NullFloat64;var p sql.NullString;if rows.Scan(&v,&p)!=nil{continue};if a.cfg.TrustCompletedRecords||(p.Valid&&dirHasFiles(p.String)){seconds+=v.Float64;count++}};return seconds,count}
 func(a *App)assign(task,disk string){tx,err:=a.db.Begin();if err!=nil{return};_,_=tx.Exec("DELETE FROM task_disk_assignments WHERE task_name=?",task);_,_=tx.Exec("INSERT INTO task_disk_assignments(task_name,disk_name,last_used_at) VALUES(?,?,?)",task,disk,time.Now().UTC().Format(time.RFC3339Nano));_=tx.Commit()}
 func(a *App)assigned(task string)string{var d string;_=a.db.QueryRow("SELECT disk_name FROM task_disk_assignments WHERE task_name=? ORDER BY last_used_at DESC LIMIT 1",task).Scan(&d);return d}
 func(a *App)record(e Episode,d DiskConfig,final string)error{
