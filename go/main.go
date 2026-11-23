@@ -103,7 +103,7 @@ func(a *App)open()error{
  p,e:=sql.Open("pgx",pg);if e!=nil{return e};defer p.Close();ctx,cancel:=context.WithTimeout(a.ctx,15*time.Second);defer cancel();if e=p.PingContext(ctx);e!=nil{return fmt.Errorf("PostgreSQL 连接失败: %w",e)}
  ok,e:=mc.BucketExists(ctx,a.cfg.Bucket);if e!=nil{return e};if !ok{return fmt.Errorf("MinIO bucket 不存在: %s",a.cfg.Bucket)}
  a.db,e=sql.Open("sqlite",a.cfg.StateDB);if e!=nil{return e};a.db.SetMaxOpenConns(8)
- _,e=a.db.Exec("PRAGMA journal_mode=WAL;"+
+ _,e=a.db.Exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=30000;"+
  "CREATE TABLE IF NOT EXISTS downloads(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,parent_key TEXT,disk_name TEXT,target_path TEXT,partial_path TEXT,expected_bytes INTEGER,status TEXT NOT NULL DEFAULT 'pending',error TEXT,updated_at TEXT NOT NULL);"+
  "CREATE INDEX IF NOT EXISTS idx_download_task_status ON downloads(task_name,status);"+
  "CREATE TABLE IF NOT EXISTS task_disk_assignments(task_name TEXT NOT NULL,disk_name TEXT NOT NULL,last_used_at TEXT NOT NULL,PRIMARY KEY(task_name,disk_name));"+
@@ -152,15 +152,23 @@ func(a *App)fetch()([]Episode,error){
  "FROM public.minio_galbot_scene_task_jobs j WHERE j.del_flag=0 AND "+quality+
  " AND j.job_id IN (SELECT t.job_id FROM public.minio_galbot_scene_task t WHERE t.task_name=ANY($1)) ORDER BY j.task_name,j.create_time NULLS LAST,j.episode_id"
  rows,e:=db.QueryContext(a.ctx,q,names);if e!=nil{return nil,e};defer rows.Close()
- out:=[]Episode{};ids:=map[string]bool{};keys:=map[string]bool{}
+ out:=[]Episode{}
  for rows.Next(){var x Episode;var src string;var key sql.NullString;var duration sql.NullFloat64
   if e=rows.Scan(&x.ID,&x.JobID,&src,&x.SN,&key,&x.Size,&duration,&x.Created);e!=nil{return nil,e}
   x.SourceTask=src;x.Task=src;if v,ok:=aliases[src];ok{x.Task=v};x.ParentKey=strings.Trim(key.String,"/");x.Duration=duration.Float64
-  if x.ID==""||x.ParentKey==""||ids[x.ID]||keys[x.ParentKey]{continue};ids[x.ID]=true;keys[x.ParentKey]=true;out=append(out,x)
+  if x.ID==""||x.ParentKey==""{continue};out=append(out,x)
  }
- if e=rows.Err();e!=nil{return nil,e};order:=map[string]int{};for i,t:=range a.cfg.Tasks{order[t.Name]=i}
- sort.SliceStable(out,func(i,j int)bool{if order[out[i].Task]!=order[out[j].Task]{return order[out[i].Task]<order[out[j].Task]};if !out[i].Created.Valid{return false};if !out[j].Created.Valid{return true};return out[i].Created.Time.Before(out[j].Created.Time)})
- log.Printf("查询并去重后 %d 条候选",len(out));return out,nil
+ if e=rows.Err();e!=nil{return nil,e}
+ order:=map[string]int{};for i,t:=range a.cfg.Tasks{order[t.Name]=i}
+ sort.SliceStable(out,func(i,j int)bool{
+  if order[out[i].Task]!=order[out[j].Task]{return order[out[i].Task]<order[out[j].Task]}
+  if out[i].Created.Valid!=out[j].Created.Valid{return out[i].Created.Valid}
+  if out[i].Created.Valid&&!out[i].Created.Time.Equal(out[j].Created.Time){return out[i].Created.Time.Before(out[j].Created.Time)}
+  return out[i].ID<out[j].ID
+ })
+ ids:=map[string]bool{};keys:=map[string]bool{};unique:=make([]Episode,0,len(out))
+ for _,x:=range out{if ids[x.ID]||keys[x.ParentKey]{continue};ids[x.ID]=true;keys[x.ParentKey]=true;unique=append(unique,x)}
+ log.Printf("查询并去重后 %d 条候选",len(unique));return unique,nil
 }
 func(a *App)run(all []Episode,nround int)error{
  groups:=map[string][]Episode{};for _,e:=range all{groups[e.Task]=append(groups[e.Task],e)}
