@@ -33,6 +33,7 @@ import (
  "github.com/minio/minio-go/v7"
  "github.com/minio/minio-go/v7/pkg/credentials"
  "github.com/shirou/gopsutil/v4/disk"
+ "github.com/shirou/gopsutil/v4/process"
  _ "modernc.org/sqlite"
 )
 
@@ -137,10 +138,12 @@ func(c *Config)normalize(m string)error{
  }
  _=m;return nil
 }
-type pidRecord struct{PID int `json:"pid"`;Mode string `json:"mode"`;CreatedAt string `json:"created_at"`}
+type pidRecord struct{PID int `json:"pid"`;Mode string `json:"mode"`;Created float64 `json:"created"`;CreatedAt string `json:"created_at"`}
 func writePIDFile(name,runMode string)error{
  if err:=os.MkdirAll(filepath.Dir(name),0755);err!=nil{return err}
- data,err:=json.Marshal(pidRecord{PID:os.Getpid(),Mode:runMode,CreatedAt:controlTimestamp()});if err!=nil{return err}
+ created:=float64(time.Now().UnixNano())/1e9
+ if proc,e:=process.NewProcess(int32(os.Getpid()));e==nil{if ms,e:=proc.CreateTime();e==nil&&ms>0{created=float64(ms)/1000}}
+ data,err:=json.Marshal(pidRecord{PID:os.Getpid(),Mode:runMode,Created:created,CreatedAt:controlTimestamp()});if err!=nil{return err}
  tmp:=name+".tmp"
  f,err:=os.OpenFile(tmp,os.O_CREATE|os.O_TRUNC|os.O_WRONLY,0600);if err!=nil{return err}
  if _,err=f.Write(data);err!=nil{f.Close();os.Remove(tmp);return err}
