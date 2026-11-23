@@ -29,6 +29,7 @@ import (
  "runtime"
  "sort"
  "strings"
+ "syscall"
  "sync"
  "sync/atomic"
  "time"
@@ -1538,11 +1539,17 @@ func sweepPartial(root,parent string,objects []minio.ObjectInfo)error{
 func syncDirectory(dir string){
  f,err:=os.Open(dir);if err!=nil{return};_=f.Sync();_=f.Close()
 }
+func isTransientWindowsFileError(err error,windows bool)bool{
+ if !windows||err==nil{return false}
+ // Windows ERROR_SHARING_VIOLATION (32) and ERROR_LOCK_VIOLATION (33)
+ // are not consistently classified as os.IsPermission by all Go versions.
+ return os.IsPermission(err)||errors.Is(err,syscall.Errno(32))||errors.Is(err,syscall.Errno(33))
+}
 func retryFileOperation(operation func()error,windows bool)error{
  for attempt:=0;attempt<6;attempt++{
   err:=operation()
   if err==nil{return nil}
-  if !windows||!os.IsPermission(err)||attempt==5{return err}
+  if !isTransientWindowsFileError(err,windows)||attempt==5{return err}
   time.Sleep(time.Duration(attempt+1)*200*time.Millisecond)
  }
  return nil
