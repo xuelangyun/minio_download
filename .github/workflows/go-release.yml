@@ -21,7 +21,9 @@ jobs:
           cache: false
       - name: Check formatting
         working-directory: go
-        run: test -z "$(gofmt -l *.go)"
+        run: |
+          gofmt -l *.go | tee /tmp/gofmt-files
+          test ! -s /tmp/gofmt-files
       - name: Run focused unit tests
         working-directory: go
         run: |
