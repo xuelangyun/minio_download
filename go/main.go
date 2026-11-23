@@ -205,6 +205,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
   if obj.IsDir||strings.HasSuffix(obj.Key,"/"){continue}
   objects=append(objects,obj)
  }
+ if err:=sweepPartial(partial,e.ParentKey,objects);err!=nil{return a.fail(e,d,final,partial,err)}
  sem:=make(chan struct{},a.cfg.FileWorkers);var wg sync.WaitGroup;var total atomic.Int64;var mu sync.Mutex;var first error
  for _,item:=range objects{
   item:=item
@@ -224,8 +225,27 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  if first!=nil{return a.fail(e,d,final,partial,first)}
  if a.ctx.Err()!=nil{return a.fail(e,d,final,partial,a.ctx.Err())}
  if total.Load()==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
- if err:=os.RemoveAll(final);err!=nil{return a.fail(e,d,final,partial,err)};if err:=os.Rename(partial,final);err!=nil{return a.fail(e,d,final,partial,err)}
+ if err:=os.RemoveAll(final);err!=nil{return a.fail(e,d,final,partial,err)};if err:=os.Rename(partial,final);err!=nil{return a.fail(e,d,final,partial,err)};syncDirectory(filepath.Dir(final))
  if err:=a.record(e,d,final);err!=nil{return err};return a.set(e,d,final,"","completed","")
+}
+func sweepPartial(root,parent string,objects []minio.ObjectInfo)error{
+ info,err:=os.Lstat(root);if err!=nil{return err};if info.Mode()&os.ModeSymlink!=0||!info.IsDir(){return fmt.Errorf("暂存路径不是普通目录: %s",root)}
+ keep:=make(map[string]bool,len(objects)*2)
+ for _,obj:=range objects{
+  rel:=strings.TrimPrefix(obj.Key,parent+"/")
+  dst,err:=safeJoin(root,rel);if err!=nil{return err}
+  keep[dst]=true;keep[dst+".minio-tmp"]=true
+ }
+ return filepath.Walk(root,func(p string,info os.FileInfo,walkErr error)error{
+  if walkErr!=nil{return walkErr};if p==root{return nil}
+  if info.Mode()&os.ModeSymlink!=0{return os.Remove(p)}
+  if info.IsDir(){return nil}
+  if !keep[p]{return os.Remove(p)}
+  return nil
+ })
+}
+func syncDirectory(dir string){
+ f,err:=os.Open(dir);if err!=nil{return};_=f.Sync();_=f.Close()
 }
 func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
  tmp:=dst+".minio-tmp"
@@ -277,7 +297,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
   }
   if err==nil{
    _=os.Remove(dst)
-   if err=os.Rename(tmp,dst);err==nil&&!expected.LastModified.IsZero(){_=os.Chtimes(dst,expected.LastModified,expected.LastModified)}
+   if err=os.Rename(tmp,dst);err==nil{if !expected.LastModified.IsZero(){_=os.Chtimes(dst,expected.LastModified,expected.LastModified)};syncDirectory(filepath.Dir(dst))}
    if err==nil{return nil}
   }
   if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded){return err}
