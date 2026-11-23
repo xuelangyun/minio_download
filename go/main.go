@@ -1474,7 +1474,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
     if spaceErr!=nil{err=spaceErr}else{defer reservation.Release();err=a.fetchObject(item.Key,dst,item,reservation)}
    }
    if err!=nil{mu.Lock();if first==nil{first=err};mu.Unlock();return}
-   total.Add(item.Size)
+   completedObjects.Add(1)
   }()
  }
  wg.Wait()
