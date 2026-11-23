@@ -16,7 +16,11 @@ Go 实现与 Python 版本并行维护。当前首版提供 Windows / Linux 命�
 
 ## 配置和运行
 
-复制 config.example.json 为 config.json，填写 MinIO、PostgreSQL、磁盘路径和任务目标。不要提交真实密钥。target_hours 按小时配置，content_time 按秒累计；target_count 按条数配置。
+Go 版本按 Python 的两个 py_shell 脚本拆分了任务配置模板：
+- `config.example.json`：按时长任务清单，对应 `minio_task_downloader.py`。
+- `config.count.example.json`：按条数任务清单，对应 `minio_task_downloader_by_count.py`（43 个任务，默认每个任务 40 条）。
+
+将所需模板复制为 `config.json`，填写 MinIO、PostgreSQL、磁盘路径。不要提交真实密钥。时长模式的 `target_hours` 单位为小时，数据库 `content_time` 按秒累计；条数模式使用 `target_count`。两种模式必须使用各自对应的任务配置，避免历史别名和任务目录发生冲突。
 
 需要 Go 1.23+：
 
@@ -25,6 +29,9 @@ Go 实现与 Python 版本并行维护。当前首版提供 Windows / Linux 命�
     go build -o minio-download .
     cp config.example.json config.json
     ./minio-download --config config.json --mode duration
+
+    # 条数模式：使用独立的 43 任务配置
+    cp config.count.example.json config.json
     ./minio-download --config config.json --mode count
 
 Windows PowerShell：
@@ -34,4 +41,4 @@ Windows PowerShell：
 
 ## 当前首版限制
 
-暂存目录失败时保留，但文件级 Range 断点续传、ETag/MD5 校验、Python Web 控制台、配置 SQLite、任务方案/标签、Web 暂停控制尚未移植。生产使用前应先在测试 bucket 验证。
+已实现文件级 Range 续传、ETag 条件请求、标准 MD5 ETag 校验、下载后远端元数据复核和 Windows 对象文件名检查。仍未移植 Python Web 控制台、配置 SQLite、任务方案/标签、跨进程暂停控制、PID/单实例锁、完整崩溃恢复与 Python 状态库兼容层。Go 使用自己的 SQLite 状态表，不会直接复用 Python 状态库。生产使用前应先在测试 bucket 验证。
