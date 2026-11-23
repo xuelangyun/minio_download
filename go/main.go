@@ -1246,9 +1246,12 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
  if waitingSpace{return errors.New("部分任务因磁盘空间不足未启动；请释放空间后重新运行")}
  return nil
 }
+func acquireSemaphore(ctx context.Context,sem chan struct{})bool{
+ select{case sem<-struct{}{}:return true;case <-ctx.Done():return false}
+}
 func(a *App)downloadTask(b batch)error{
  sem:=make(chan struct{},a.cfg.Workers);var wg sync.WaitGroup;var mu sync.Mutex;var first error
- for _,ep:=range b.rows{if a.ctx.Err()!=nil{break};sem<-struct{}{};wg.Add(1);go func(e Episode){defer wg.Done();defer func(){<-sem}();if err:=a.downloadOne(b.t,b.d,e);err!=nil{mu.Lock();if first==nil{first=err};mu.Unlock()}}(ep)}
+ for _,ep:=range b.rows{if !acquireSemaphore(a.ctx,sem){break};wg.Add(1);go func(e Episode){defer wg.Done();defer func(){<-sem}();if err:=a.downloadOne(b.t,b.d,e);err!=nil{mu.Lock();if first==nil{first=err};mu.Unlock()}}(ep)}
  wg.Wait();return first
 }
 func episodePaths(version string,t Task,d DiskConfig,parentKey string)(string,string){
@@ -1291,8 +1294,8 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  sem:=make(chan struct{},a.cfg.FileWorkers);var wg sync.WaitGroup;var total atomic.Int64;var mu sync.Mutex;var first error
  for _,item:=range objects{
   item:=item
-  if a.ctx.Err()!=nil{break}
-  sem<-struct{}{};wg.Add(1)
+  if !acquireSemaphore(a.ctx,sem){break}
+  wg.Add(1)
   go func(){
    defer wg.Done();defer func(){<-sem}()
    rel:=strings.TrimPrefix(item.Key,e.ParentKey+"/")
