@@ -159,15 +159,16 @@ func writeJSON(w http.ResponseWriter,v any){writeJSONStatus(w,http.StatusOK,v)}
 func writeJSONStatus(w http.ResponseWriter,status int,v any){w.Header().Set("Content-Type","application/json; charset=utf-8");w.WriteHeader(status);_ = json.NewEncoder(w).Encode(v)}
 func(a *WebAPI)authorized(r *http.Request)bool{
  if origin:=r.Header.Get("Origin");origin!=""{u,err:=url.Parse(origin);if err!=nil||!strings.EqualFold(u.Host,r.Host){return false}}
- if a.tokenHash==""{return isLoopbackHost(r.Hostname())&&isLoopbackRemote(r.RemoteAddr)&&r.Header.Get("X-Forwarded-For")==""}
  supplied:=strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"),"Bearer "));addr:=r.RemoteAddr;now:=time.Now()
  a.authMu.Lock()
+ tokenHash:=a.tokenHash
+ if tokenHash==""{a.authMu.Unlock();return isLoopbackHost(r.Hostname())&&isLoopbackRemote(r.RemoteAddr)&&r.Header.Get("X-Forwarded-For")==""}
  if a.lockouts!=nil{if until:=a.lockouts[addr];now.Before(until){a.authMu.Unlock();return false}}
  if a.failures==nil{a.failures=map[string][]time.Time{}};if a.lockouts==nil{a.lockouts=map[string]time.Time{}}
  attempts:=a.failures[addr];kept:=attempts[:0];for _,at:=range attempts{if now.Sub(at)<=5*time.Minute{kept=append(kept,at)}};attempts=kept
  if len(attempts)>=8&&now.Sub(attempts[len(attempts)-1])<60*time.Second{a.lockouts[addr]=attempts[len(attempts)-1].Add(60*time.Second);a.authMu.Unlock();return false}
  a.authMu.Unlock()
- parts:=strings.Split(a.tokenHash,"$");if len(parts)!=4||parts[0]!="pbkdf2_sha256"{return false}
+ parts:=strings.Split(tokenHash,"$");if len(parts)!=4||parts[0]!="pbkdf2_sha256"{return false}
  iterations,err:=strconv.Atoi(parts[1]);if err!=nil||iterations<1||iterations>200000{return false}
  salt,err:=hex.DecodeString(parts[2]);if err!=nil{return false};want,err:=hex.DecodeString(parts[3]);if err!=nil{return false}
  got:=pbkdf2SHA256([]byte(supplied),salt,iterations,len(want));valid:=hmac.Equal(got,want)
@@ -197,9 +198,15 @@ func(a *WebAPI)authToken(w http.ResponseWriter,r *http.Request){
  tx,err:=db.Begin();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"开始口令更新事务失败"});return};defer tx.Rollback()
  if _,err=tx.Exec("INSERT INTO settings(key,value,updated_at) VALUES('web.token_hash',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",encoded,controlTimestamp());err!=nil{writeJSONStatus(w,500,map[string]any{"error":"保存口令摘要失败"});return}
  if err=tx.Commit();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"提交口令更新失败"});return}
- if body.Action=="clear"{a.tokenHash=""}else{var hash string;if err=json.Unmarshal([]byte(encoded),&hash);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取口令摘要失败"});return};a.tokenHash=hash}
- a.authMu.Lock();a.failures=map[string][]time.Time{};a.lockouts=map[string]time.Time{};a.authMu.Unlock()
- writeJSON(w,map[string]any{"ok":true,"token_set":a.tokenHash!="","action":body.Action})
+ var hash string
+ if body.Action!="clear"{if err=json.Unmarshal([]byte(encoded),&hash);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取口令摘要失败"});return}}
+ a.authMu.Lock()
+ a.tokenHash=hash
+ a.failures=map[string][]time.Time{}
+ a.lockouts=map[string]time.Time{}
+ tokenSet:=a.tokenHash!=""
+ a.authMu.Unlock()
+ writeJSON(w,map[string]any{"ok":true,"token_set":tokenSet,"action":body.Action})
 }
 func newTokenHash(token string)(string,error){
  salt:=make([]byte,16);if _,err:=rand.Read(salt);err!=nil{return "",err}
