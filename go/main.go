@@ -1325,7 +1325,7 @@ func episodePaths(version string,t Task,d DiskConfig,parentKey string)(string,st
  leaf:=safe(path.Base(strings.Trim(parentKey,"/")))
  return filepath.Join(root,leaf),filepath.Join(root,"."+leaf+".partial")
 }
-type spaceReservation struct { app *App; diskName string; mu sync.Mutex; remaining uint64 }
+type spaceReservation struct { app *App; diskName string; mu sync.Mutex; remaining uint64; consumed uint64 }
 func(a *App)reserveObjectSpace(d DiskConfig,size int64)(*spaceReservation,error){
  if size<0{return nil,fmt.Errorf("对象大小无效: %d",size)}
  a.spaceMu.Lock()
@@ -1347,7 +1347,19 @@ func(r *spaceReservation)Consume(n int64){
  if amount==0{return}
  r.app.spaceMu.Lock();current:=r.app.spaceInFlight[r.diskName]
  if current<=amount{delete(r.app.spaceInFlight,r.diskName)}else{r.app.spaceInFlight[r.diskName]=current-amount}
- r.app.spaceMu.Unlock();r.remaining-=amount
+ r.app.spaceMu.Unlock();r.remaining-=amount;r.consumed+=amount
+}
+func(r *spaceReservation)Restore(n int64){
+ if r==nil||n<=0{return}
+ r.mu.Lock();defer r.mu.Unlock()
+ amount:=uint64(n);if amount>r.consumed{amount=r.consumed}
+ if amount==0{return}
+ r.app.spaceMu.Lock()
+ current:=r.app.spaceInFlight[r.diskName]
+ if ^uint64(0)-current<amount{current=^uint64(0)}else{current+=amount}
+ r.app.spaceInFlight[r.diskName]=current
+ r.app.spaceMu.Unlock()
+ r.remaining+=amount;r.consumed-=amount
 }
 func(r *spaceReservation)Release(){
  if r==nil{return}
@@ -1412,7 +1424,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
    if err==nil{err=os.MkdirAll(filepath.Dir(dst),0755)}
    if err==nil{
     reservation,spaceErr:=a.reserveObjectSpace(d,remainingObjectBytes(dst,item.Size))
-    if spaceErr!=nil{err=spaceErr}else{defer reservation.Release();err=a.fetchObject(item.Key,dst,item,reservation.Consume)}
+    if spaceErr!=nil{err=spaceErr}else{defer reservation.Release();err=a.fetchObject(item.Key,dst,item,reservation)}
    }
    if err!=nil{mu.Lock();if first==nil{first=err};mu.Unlock();return}
    total.Add(item.Size)
@@ -1444,8 +1456,12 @@ func sweepPartial(root,parent string,objects []minio.ObjectInfo)error{
 func syncDirectory(dir string){
  f,err:=os.Open(dir);if err!=nil{return};_=f.Sync();_=f.Close()
 }
-func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,onProgress func(int64))error{
+func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *spaceReservation)error{
  tmp:=dst+".minio-tmp"
+ var writtenThisCall int64
+ onProgress:=func(n int64){if n>0{reservation.Consume(n);writtenThisCall+=n}}
+ restoreWritten:=func(){if writtenThisCall>0{reservation.Restore(writtenThisCall);writtenThisCall=0}}
+ discardTemp:=func(){if err:=os.Remove(tmp);err==nil{restoreWritten()}}
  attempts:=a.cfg.FileRetries
  for attempt:=1;attempt<=attempts;attempt++{
   if a.ctx.Err()!=nil{return a.ctx.Err()}
@@ -1458,7 +1474,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,onProgress func
    current,statErr:=a.mc.StatObject(a.ctx,a.cfg.Bucket,key,minio.StatObjectOptions{})
    if statErr!=nil{if attempt<attempts{select{case <-a.ctx.Done():return a.ctx.Err();case <-time.After(time.Duration(float64(time.Second)*a.cfg.RetryDelaySeconds*float64(attempt))):};continue};return statErr}
    changed:=current.Size!=expected.Size||(expected.ETag!=""&&!sameETag(current.ETag,expected.ETag))||(!expected.LastModified.IsZero()&&!current.LastModified.Equal(expected.LastModified))
-   if changed{_=os.Remove(tmp);return fmt.Errorf("续传前发现远端对象已变化，已丢弃旧临时文件: %s",key)}
+   if changed{discardTemp();return fmt.Errorf("续传前发现远端对象已变化，已丢弃旧临时文件: %s",key)}
   }
   opts:=minio.GetObjectOptions{}
   if expected.ETag!=""{if err:=opts.SetMatchETag(strings.Trim(expected.ETag,"\""));err!=nil{return err}}
@@ -1505,7 +1521,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,onProgress func
    if err==nil{return nil}
   }
   if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded){return err}
-  if err!=nil&&strings.Contains(err.Error(),"远端对象被修改"){_=os.Remove(tmp)}
+  if err!=nil&&strings.Contains(err.Error(),"远端对象被修改"){discardTemp()}
   if attempt<attempts{
    log.Printf("对象下载重试 %d/%d: %s: %v",attempt,attempts,key,err)
    select{case <-a.ctx.Done():return a.ctx.Err();case <-time.After(time.Duration(float64(time.Second)*a.cfg.RetryDelaySeconds*float64(attempt))):}
