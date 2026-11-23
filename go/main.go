@@ -1461,20 +1461,25 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
  var writtenThisCall int64
  onProgress:=func(n int64){if n>0{reservation.Consume(n);writtenThisCall+=n}}
  restoreWritten:=func(){if writtenThisCall>0{reservation.Restore(writtenThisCall);writtenThisCall=0}}
- discardTemp:=func(){if err:=os.Remove(tmp);err==nil{restoreWritten()}}
+ discardTemp:=func()error{
+  err:=os.Remove(tmp)
+  if err==nil{restoreWritten();return nil}
+  if os.IsNotExist(err){return nil}
+  return err
+ }
  attempts:=a.cfg.FileRetries
  for attempt:=1;attempt<=attempts;attempt++{
   if a.ctx.Err()!=nil{return a.ctx.Err()}
   offset:=int64(0)
   if st,err:=os.Stat(tmp);err==nil{
-   if st.Size()>expected.Size{_=os.Remove(tmp)}else{offset=st.Size()}
+   if st.Size()>expected.Size{if err:=discardTemp();err!=nil{return err}}else{offset=st.Size()}
   }else if !os.IsNotExist(err){return err}
-  if offset>=expected.Size&&offset>0{_=os.Remove(tmp);offset=0}
+  if offset>=expected.Size&&offset>0{if err:=discardTemp();err!=nil{return err};offset=0}
   if offset>0{
    current,statErr:=a.mc.StatObject(a.ctx,a.cfg.Bucket,key,minio.StatObjectOptions{})
    if statErr!=nil{if attempt<attempts{select{case <-a.ctx.Done():return a.ctx.Err();case <-time.After(time.Duration(float64(time.Second)*a.cfg.RetryDelaySeconds*float64(attempt))):};continue};return statErr}
    changed:=current.Size!=expected.Size||(expected.ETag!=""&&!sameETag(current.ETag,expected.ETag))||(!expected.LastModified.IsZero()&&!current.LastModified.Equal(expected.LastModified))
-   if changed{discardTemp();return fmt.Errorf("续传前发现远端对象已变化，已丢弃旧临时文件: %s",key)}
+   if changed{if discardErr:=discardTemp();discardErr!=nil{return fmt.Errorf("远端对象已变化且删除暂存文件失败 %s: %w",key,discardErr)};return fmt.Errorf("续传前发现远端对象已变化，已丢弃旧临时文件: %s",key)}
   }
   opts:=minio.GetObjectOptions{}
   if expected.ETag!=""{if err:=opts.SetMatchETag(strings.Trim(expected.ETag,"\""));err!=nil{return err}}
@@ -1521,7 +1526,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
    if err==nil{return nil}
   }
   if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded){return err}
-  if err!=nil&&strings.Contains(err.Error(),"远端对象被修改"){discardTemp()}
+  if err!=nil&&strings.Contains(err.Error(),"远端对象被修改"){if discardErr:=discardTemp();discardErr!=nil{log.Printf("删除已失效暂存文件失败 %s: %v",key,discardErr)}}
   if attempt<attempts{
    log.Printf("对象下载重试 %d/%d: %s: %v",attempt,attempts,key,err)
    select{case <-a.ctx.Done():return a.ctx.Err();case <-time.After(time.Duration(float64(time.Second)*a.cfg.RetryDelaySeconds*float64(attempt))):}
