@@ -225,6 +225,7 @@ func(a *WebAPI)config(w http.ResponseWriter,r *http.Request) {
  for _,item:=range schema { values[item["key"].(string)]=item["default"] }
  values["minio.endpoint"]=a.cfg.Endpoint;values["minio.access_key"]=a.cfg.AccessKey;values["minio.bucket"]=a.cfg.Bucket;values["minio.region"]=a.cfg.Region;values["minio.secure"]=a.cfg.SSL
  values["pg.host"]=a.cfg.PGHost;values["pg.port"]=a.cfg.PGPort;values["pg.database"]=a.cfg.PGDB;values["pg.user"]=a.cfg.PGUser
+ values["minio.secret_key"]="";values["pg.password"]=""
  values["run.min_free_gb"]=a.cfg.MinFreeGB;values["run.space_safety_factor"]=a.cfg.SafetyFactor;values["run.max_writes_per_disk"]=a.cfg.Workers;values["run.require_mcap"]=a.cfg.RequireMCAP;values["run.include_null_quality"]=a.cfg.IncludeNull;values["run.mcap_pattern"]=a.cfg.MCAPPattern;values["run.validate_workers"]=a.cfg.ValidateWorkers
  values["transfer.file_workers"]=a.cfg.FileWorkers;values["transfer.file_retries"]=a.cfg.FileRetries;values["transfer.retry_delay"]=a.cfg.RetryDelaySeconds
  if a.cfg.VerifyMD5!=nil {values["transfer.verify_md5"]=*a.cfg.VerifyMD5};if a.cfg.Fsync!=nil {values["transfer.fsync"]=*a.cfg.Fsync}
