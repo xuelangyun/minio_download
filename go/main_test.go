@@ -1166,3 +1166,26 @@ func TestMaxInt64(t *testing.T) {
  if got:=maxInt64(-1,0);got!=0{t.Fatalf("maxInt64(-1,0)=%d",got)}
  if got:=maxInt64(5,3);got!=5{t.Fatalf("maxInt64(5,3)=%d",got)}
 }
+
+func TestFilesystemIdentityDetectsDirectoriesOnSameFilesystem(t *testing.T) {
+	root:=t.TempDir()
+	first:=filepath.Join(root,"first")
+	second:=filepath.Join(root,"second")
+	if err:=os.MkdirAll(first,0755);err!=nil{t.Fatal(err)}
+	if err:=os.MkdirAll(second,0755);err!=nil{t.Fatal(err)}
+	a,err:=filesystemIdentity(first);if err!=nil{t.Fatal(err)}
+	b,err:=filesystemIdentity(second);if err!=nil{t.Fatal(err)}
+	if a==""||b=="" { t.Skip("platform uses partition-device identity instead of a stat device id") }
+	if a!=b { t.Fatalf("directories on one filesystem returned different identities: %q != %q",a,b) }
+}
+
+func TestFilesystemIdentityFollowsSymlinkTarget(t *testing.T) {
+	root:=t.TempDir()
+	target:=filepath.Join(root,"target")
+	link:=filepath.Join(root,"link")
+	if err:=os.MkdirAll(target,0755);err!=nil{t.Fatal(err)}
+	if err:=os.Symlink(target,link);err!=nil{t.Skipf("symlink unavailable: %v",err)}
+	a,err:=filesystemIdentity(target);if err!=nil{t.Fatal(err)}
+	b,err:=filesystemIdentity(link);if err!=nil{t.Fatal(err)}
+	if a!=""&&a!=b { t.Fatalf("symlink should resolve to target filesystem: %q != %q",a,b) }
+}
