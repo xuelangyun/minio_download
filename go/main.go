@@ -85,12 +85,29 @@ func(a *App)open()error{
  "CREATE TABLE IF NOT EXISTS task_disk_assignments(task_name TEXT NOT NULL,disk_name TEXT NOT NULL,last_used_at TEXT NOT NULL,PRIMARY KEY(task_name,disk_name));"+
  "CREATE TABLE IF NOT EXISTS downloaded_episodes(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,source_task_name TEXT,job_id INTEGER,sn_code TEXT,parent_key TEXT,disk_name TEXT,target_path TEXT,file_size INTEGER,content_time REAL,create_time TEXT,downloaded_at TEXT NOT NULL);"+
  "CREATE TABLE IF NOT EXISTS control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL);")
- if e==nil{log.Printf("MinIO=%s bucket=%s；PostgreSQL=%s:%d/%s；SQLite=%s",a.cfg.Endpoint,a.cfg.Bucket,a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.StateDB)};return e
+ if e==nil{
+  if e=ensureColumn(a.db,"downloads","started_at","TEXT");e!=nil{return e}
+  if e=ensureColumn(a.db,"downloads","completed_at","TEXT");e!=nil{return e}
+  log.Printf("MinIO=%s bucket=%s；PostgreSQL=%s:%d/%s；SQLite=%s",a.cfg.Endpoint,a.cfg.Bucket,a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.StateDB)
+ };return e
 }
 func(a *App)set(e Episode,d DiskConfig,final,partial,status,msg string)error{
- _,err:=a.db.Exec("INSERT INTO downloads(episode_id,task_name,parent_key,disk_name,target_path,partial_path,expected_bytes,status,error,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) "+
- "ON CONFLICT(episode_id) DO UPDATE SET task_name=excluded.task_name,parent_key=excluded.parent_key,disk_name=excluded.disk_name,target_path=excluded.target_path,partial_path=excluded.partial_path,expected_bytes=excluded.expected_bytes,status=excluded.status,error=excluded.error,updated_at=excluded.updated_at",
- e.ID,e.Task,e.ParentKey,d.Name,nullable(final),nullable(partial),e.Size,status,nullable(msg),time.Now().UTC().Format(time.RFC3339Nano));return err
+ now:=time.Now().UTC().Format(time.RFC3339Nano)
+ _,err:=a.db.Exec("INSERT INTO downloads(episode_id,task_name,parent_key,disk_name,target_path,partial_path,expected_bytes,status,error,started_at,completed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "+
+ "ON CONFLICT(episode_id) DO UPDATE SET task_name=excluded.task_name,parent_key=excluded.parent_key,disk_name=excluded.disk_name,target_path=excluded.target_path,partial_path=excluded.partial_path,expected_bytes=excluded.expected_bytes,status=excluded.status,error=excluded.error,"+
+ "started_at=CASE WHEN excluded.status='running' THEN excluded.updated_at ELSE downloads.started_at END,"+
+ "completed_at=CASE WHEN excluded.status='completed' THEN excluded.updated_at ELSE downloads.completed_at END,updated_at=excluded.updated_at",
+ e.ID,e.Task,e.ParentKey,d.Name,nullable(final),nullable(partial),e.Size,status,nullable(msg),nullableTime(status=="running",now),nullableTime(status=="completed",now),now)
+ return err
+}
+func nullableTime(ok bool,v string)any{if ok{return v};return nil}
+func ensureColumn(db *sql.DB,table,column,typ string)error{
+ rows,err:=db.Query("PRAGMA table_info("+table+")");if err!=nil{return err}
+ found:=false
+ for rows.Next(){var cid,notnull,pk int;var name,kind string;var def sql.NullString;if err=rows.Scan(&cid,&name,&kind,&notnull,&def,&pk);err!=nil{rows.Close();return err};if name==column{found=true}}
+ if err=rows.Err();err!=nil{rows.Close();return err};if err=rows.Close();err!=nil{return err}
+ if !found{_,err=db.Exec("ALTER TABLE "+table+" ADD COLUMN "+column+" "+typ)}
+ return err
 }
 func nullable(s string)any{if s==""{return nil};return s}
 func(a *App)completed(id string)bool{var p sql.NullString;err:=a.db.QueryRow("SELECT target_path FROM downloads WHERE episode_id=? AND status='completed'",id).Scan(&p);if err!=nil{return false};if a.cfg.TrustCompletedRecords{return true};return p.Valid&&dirHasFiles(p.String)}
