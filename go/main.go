@@ -2,6 +2,8 @@ package main
 
 import (
  "context"
+ "crypto/md5"
+ "encoding/hex"
  "database/sql"
  "encoding/json"
  "errors"
@@ -17,6 +19,7 @@ import (
  "sort"
  "strings"
  "sync"
+ "sync/atomic"
  "time"
 
  _ "github.com/jackc/pgx/v5/stdlib"
@@ -52,7 +55,7 @@ func main(){
  b,e:=os.ReadFile(*configPath);if e!=nil{log.Fatalf("读取配置失败: %v；请复制 config.example.json 为 config.json",e)}
  var c Config;if e=json.Unmarshal(b,&c);e!=nil{log.Fatalf("配置 JSON 无效: %v",e)}
  if e=c.normalize(*mode);e!=nil{log.Fatal(e)}
- _=os.MkdirAll(filepath.Dir(c.StateDB),0755);_=os.MkdirAll(c.LogDir,0755)
+ _=os.MkdirAll(filepath.Dir(c.StateDB),0755);_=os.MkdirAll(filepath.Dir(c.LockFile),0755);_=os.MkdirAll(c.LogDir,0755)
  f,e:=os.OpenFile(filepath.Join(c.LogDir,"go-downloader.log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0644);if e!=nil{log.Fatal(e)};defer f.Close()
  log.SetOutput(io.MultiWriter(os.Stdout,f));log.SetFlags(log.Ldate|log.Ltime|log.Lmicroseconds)
  ctx,stop:=signal.NotifyContext(context.Background(),os.Interrupt);defer stop()
