@@ -741,4 +741,4 @@ func safeJoin(root,rel string)(string,error){
  return p,nil
 }
 func taskDir(t Task)string{if t.Dir!=""{return t.Dir};return t.Name}
-func taskFolderKey(t Task)string{return safe(t.Scene)+"\\x00"+safe(taskDir(t))}
+func taskFolderKey(t Task)string{return safe(t.Scene)+"\x00"+safe(taskDir(t))}
