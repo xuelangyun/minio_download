@@ -34,3 +34,27 @@ func TestSafeJoinAllowsNestedObject(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+func TestMD5ETagRecognition(t *testing.T) {
+	if !isMD5ETag("d41d8cd98f00b204e9800998ecf8427e") {
+		t.Fatal("standard MD5 ETag should be recognized")
+	}
+	if isMD5ETag("d41d8cd98f00b204e9800998ecf8427e-2") {
+		t.Fatal("multipart ETag must not be treated as MD5")
+	}
+	if !sameETag("\"abcd\"", "abcd") {
+		t.Fatal("quoted and unquoted ETags should match")
+	}
+}
+
+func TestWindowsObjectNameRules(t *testing.T) {
+	if !windowsReserved("CON.txt") || !windowsReserved("lpt1") {
+		t.Fatal("Windows reserved device names were not recognized")
+	}
+	if invalidWindowsObjectPart("bad:name") == false {
+		t.Fatal("Windows-invalid object name should be rejected")
+	}
+	if invalidWindowsObjectPart("camera_left.mp4") {
+		t.Fatal("normal object filename should be accepted")
+	}
+}
