@@ -242,5 +242,6 @@
   "validate_workers": 8,
   "pid_file": "minio_download.pid",
   "config_db": "",
-  "minio_skip_verify": false
+  "minio_skip_verify": false,
+  "fsync": true
 }
