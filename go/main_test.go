@@ -234,6 +234,22 @@ func TestReserveObjectSpaceRejectsInsufficientCapacity(t *testing.T) {
  _,err:=app.reserveObjectSpace(DiskConfig{Name:"disk-a",Path:t.TempDir()},int64(^uint64(0)>>1))
  if err==nil{t.Fatal("expected reservation larger than available capacity to fail")}
 }
+func TestExistingObjectCompleteSkipsMatchingFile(t *testing.T) {
+ dir:=t.TempDir()
+ dst:=filepath.Join(dir,"camera.mp4")
+ modified:=time.Date(2026,11,23,10,0,0,0,time.UTC)
+ if err:=os.WriteFile(dst,[]byte("12345"),0600);err!=nil{t.Fatal(err)}
+ if err:=os.Chtimes(dst,modified,modified);err!=nil{t.Fatal(err)}
+ expected:=minio.ObjectInfo{Size:5,LastModified:modified}
+ if !existingObjectComplete(dst,expected){t.Fatal("matching size and modification time should be treated as complete")}
+ expected.Size=6
+ if existingObjectComplete(dst,expected){t.Fatal("different size must not be treated as complete")}
+ expected.Size=5
+ expected.LastModified=modified.Add(5*time.Second)
+ if existingObjectComplete(dst,expected){t.Fatal("stale modification time must not be treated as complete")}
+ expected.LastModified=time.Time{}
+ if !existingObjectComplete(dst,expected){t.Fatal("matching size with unavailable remote modification time should be treated as complete")}
+}
 func TestExistingPartialBytesIgnoresInvalidOrCompleteTempFiles(t *testing.T) {
  dir:=t.TempDir();dst:=filepath.Join(dir,"object.bin")
  if got:=existingPartialBytes(dst,100);got!=0{t.Fatalf("missing temp: got %d want 0",got)}
