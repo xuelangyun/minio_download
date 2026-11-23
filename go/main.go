@@ -109,6 +109,13 @@ func serveWeb(c Config,host string,port int)error{
  mux:=http.NewServeMux()
  mux.HandleFunc("GET /healthz",func(w http.ResponseWriter,r *http.Request){writeJSON(w,map[string]any{"ok":true,"version":"go-dev"})})
  mux.HandleFunc("GET /",func(w http.ResponseWriter,r *http.Request){w.Header().Set("Content-Type","text/html; charset=utf-8");_,_=io.WriteString(w,"<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>MinIO Go Downloader</title><body style='font:15px system-ui;max-width:1100px;margin:40px auto;padding:0 20px'><h2>MinIO Go Downloader API</h2><p>只读 API：<a href='/api/status'>状态</a> · <a href='/api/logs'>日志</a> · <a href='/healthz'>健康检查</a></p><pre id='out'>正在读取状态…</pre><script>async function tick(){try{let r=await fetch('/api/status');document.querySelector('#out').textContent=JSON.stringify(await r.json(),null,2)}catch(e){document.querySelector('#out').textContent=String(e)}}tick();setInterval(tick,5000)</script></body></html>")})
+ mux.HandleFunc("GET /api/plans",api.plansList)
+ mux.HandleFunc("POST /api/plans",api.planCreate)
+ mux.HandleFunc("GET /api/plans/{id}",api.planGet)
+ mux.HandleFunc("PUT /api/plans/{id}",api.planUpdate)
+ mux.HandleFunc("DELETE /api/plans/{id}",api.planDelete)
+ mux.HandleFunc("GET /api/plans/{id}/export",api.planExport)
+ mux.HandleFunc("POST /api/plans/import",api.planImport)
  mux.HandleFunc("GET /api/config",api.config)
  mux.HandleFunc("GET /api/status",api.status)
  mux.HandleFunc("POST /api/run",api.run)
@@ -215,6 +222,160 @@ func webConfigSchema() []map[string]any {
   {"key":"web.host","kind":"str","group":"web","label":"监听地址","secret":false,"default":"127.0.0.1"},
   {"key":"web.port","kind":"int","group":"web","label":"监听端口","secret":false,"min":1,"max":65535,"default":8765},
  }
+}
+
+type planTask struct {
+ Name string `json:"name"`
+ Count int `json:"count"`
+ Aliases []string `json:"aliases"`
+ Dir string `json:"dir"`
+ Tags []string `json:"tags"`
+}
+type planScene struct {
+ Scene string `json:"scene"`
+ Tasks []planTask `json:"tasks"`
+}
+type planPayload struct {
+ DataVersion string `json:"data_version"`
+ Scenes []planScene `json:"scenes"`
+}
+func currentPlanPayload(c Config) planPayload {
+ out:=planPayload{DataVersion:c.DataVersion,Scenes:[]planScene{}}
+ index:=map[string]int{}
+ for _,t:=range c.Tasks {
+  i,ok:=index[t.Scene];if !ok{i=len(out.Scenes);index[t.Scene]=i;out.Scenes=append(out.Scenes,planScene{Scene:t.Scene,Tasks:[]planTask{}})}
+  aliases:=append([]string{},t.Aliases...);tags:=append([]string{},t.Tags...)
+  out.Scenes[i].Tasks=append(out.Scenes[i].Tasks,planTask{Name:t.Name,Count:t.TargetCount,Aliases:aliases,Dir:taskDir(t),Tags:tags})
+ }
+ return out
+}
+func validatePlanPayload(raw json.RawMessage)(planPayload,error){
+ var p planPayload
+ if err:=json.Unmarshal(raw,&p);err!=nil{return p,fmt.Errorf("任务内容 JSON 无效：%w",err)}
+ p.DataVersion=strings.TrimSpace(p.DataVersion)
+ if p.DataVersion==""{return p,errors.New("版本目录不能为空")}
+ if p.Scenes==nil{return p,errors.New("任务内容格式不对（需要 data_version 和 scenes）")}
+ seenTasks:=map[string]bool{};seenAliases:=map[string]string{}
+ for si:=range p.Scenes {
+  scene:=&p.Scenes[si];scene.Scene=strings.TrimSpace(scene.Scene)
+  if scene.Scene==""{return p,fmt.Errorf("第 %d 个场景名称不能为空",si+1)}
+  if scene.Tasks==nil{scene.Tasks=[]planTask{}}
+  for ti:=range scene.Tasks {
+   t:=&scene.Tasks[ti];t.Name=strings.TrimSpace(t.Name)
+   if t.Name==""{return p,fmt.Errorf("场景 %q 中存在空任务名",scene.Scene)}
+   if seenTasks[t.Name]{return p,fmt.Errorf("任务名重复：%q（任务名必须全局唯一）",t.Name)}
+   seenTasks[t.Name]=true
+   if t.Count<0{return p,fmt.Errorf("任务 %q 的目标条数必须是非负整数",t.Name)}
+   t.Dir=strings.TrimSpace(t.Dir)
+   if t.Aliases==nil{t.Aliases=[]string{}};if t.Tags==nil{t.Tags=[]string{}}
+   aliasSeen:=map[string]bool{}
+   for i,a:=range t.Aliases {a=strings.TrimSpace(a);if a==""{return p,fmt.Errorf("任务 %q 存在空别名",t.Name)};if aliasSeen[a]{return p,fmt.Errorf("任务 %q 的别名重复：%q",t.Name,a)};aliasSeen[a]=true;if owner,ok:=seenAliases[a];ok&&owner!=t.Name{return p,fmt.Errorf("别名冲突：%q 同时属于 %q 和 %q",a,owner,t.Name)};seenAliases[a]=t.Name;t.Aliases[i]=a}
+   tagSeen:=map[string]bool{}
+   for i,tag:=range t.Tags {tag=strings.TrimSpace(tag);if tag==""{continue};if len([]rune(tag))>24{return p,fmt.Errorf("标签太长（最多 24 个字符）：%s",tag)};if !tagSeen[tag]{tagSeen[tag]=true}else{t.Tags[i]=""}}
+   clean:=make([]string,0,len(t.Tags));for _,tag:=range t.Tags{if tag!=""{clean=append(clean,tag)}};t.Tags=clean
+   if len(t.Tags)>12{return p,fmt.Errorf("任务 %q 一个任务最多 12 个标签",t.Name)}
+  }
+ }
+ return p,nil
+}
+func planSummary(p planPayload)map[string]any{
+ tags:=[]string{};seen:=map[string]bool{};tasks:=0;target:=0
+ for _,scene:=range p.Scenes{for _,t:=range scene.Tasks{tasks++;target+=t.Count;for _,tag:=range t.Tags{if !seen[tag]{seen[tag]=true;tags=append(tags,tag)}}}}
+ return map[string]any{"scene_count":len(p.Scenes),"task_count":tasks,"total_target":target,"tags":tags}
+}
+func(a *WebAPI)openPlanDB()(*sql.DB,error){
+ if strings.TrimSpace(a.cfg.ConfigDB)==""{return nil,errors.New("未配置 SQLite 配置库")}
+ db,err:=sql.Open("sqlite",a.cfg.ConfigDB);if err!=nil{return nil,err};db.SetMaxOpenConns(1);_,_=db.Exec("PRAGMA busy_timeout=30000")
+ _,err=db.Exec("CREATE TABLE IF NOT EXISTS plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,note TEXT NOT NULL DEFAULT '',payload TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)")
+ if err!=nil{db.Close();return nil,err};return db,nil
+}
+func planName(raw string)(string,error){
+ name:=strings.TrimSpace(raw);if name==""{return "",errors.New("方案名称不能为空")};if len([]rune(name))>60{return "",errors.New("方案名称最长 60 个字符")};return name,nil
+}
+func(a *WebAPI)plansList(w http.ResponseWriter,r *http.Request){
+ db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
+ rows,err:=db.Query("SELECT id,name,note,payload,created_at,updated_at FROM plans ORDER BY updated_at DESC,id DESC")
+ if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取方案失败："+err.Error()});return};defer rows.Close()
+ plans:=[]map[string]any{}
+ for rows.Next(){var id int64;var name,note,raw,created,updated string;if err=rows.Scan(&id,&name,&note,&raw,&created,&updated);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取方案失败："+err.Error()});return}
+  p,e:=validatePlanPayload(json.RawMessage(raw));if e!=nil{continue};item:=map[string]any{"id":id,"name":name,"note":note,"created_at":created,"updated_at":updated};for k,v:=range planSummary(p){item[k]=v};plans=append(plans,item)
+ }
+ if err=rows.Err();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取方案失败："+err.Error()});return}
+ current:=currentPlanPayload(a.cfg)
+ writeJSON(w,map[string]any{"plans":plans,"current":planSummary(current)})
+}
+func(a *WebAPI)planGet(w http.ResponseWriter,r *http.Request){
+ id,err:=strconv.ParseInt(r.PathValue("id"),10,64);if err!=nil||id<=0{writeJSONStatus(w,400,map[string]any{"error":"方案 ID 无效"});return}
+ db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
+ var name,note,raw,created,updated string;err=db.QueryRow("SELECT name,note,payload,created_at,updated_at FROM plans WHERE id=?",id).Scan(&name,&note,&raw,&created,&updated)
+ if err==sql.ErrNoRows{writeJSONStatus(w,404,map[string]any{"error":"方案不存在"});return};if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取方案失败："+err.Error()});return}
+ p,err:=validatePlanPayload(json.RawMessage(raw));if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"方案内容损坏："+err.Error()});return}
+ out:=map[string]any{"id":id,"name":name,"note":note,"created_at":created,"updated_at":updated,"payload":p};for k,v:=range planSummary(p){out[k]=v};writeJSON(w,out)
+}
+func(a *WebAPI)planCreate(w http.ResponseWriter,r *http.Request){
+ var body struct{Name string `json:"name"`;Note string `json:"note"`;Payload json.RawMessage `json:"payload"`;Overwrite bool `json:"overwrite"`}
+ if err:=json.NewDecoder(io.LimitReader(r.Body,10<<20)).Decode(&body);err!=nil&&err!=io.EOF{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
+ name,err:=planName(body.Name);if err!=nil{writeJSONStatus(w,400,map[string]any{"error":err.Error()});return}
+ p:=currentPlanPayload(a.cfg);if len(body.Payload)>0&&string(body.Payload)!="null"{p,err=validatePlanPayload(body.Payload);if err!=nil{writeJSONStatus(w,400,map[string]any{"error":err.Error()});return}}
+ payload,err:=json.Marshal(p);if err!=nil{writeJSONStatus(w,400,map[string]any{"error":"序列化任务内容失败"});return}
+ db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
+ now:=time.Now().UTC().Format(time.RFC3339)
+ tx,err:=db.Begin();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer tx.Rollback()
+ var id int64
+ e:=tx.QueryRow("SELECT id FROM plans WHERE name=?",name).Scan(&id)
+ if e==nil{
+  if !body.Overwrite{writeJSONStatus(w,409,map[string]any{"error":"已有同名方案："+name,"code":"exists"});return}
+  note:=strings.TrimSpace(body.Note);_,err=tx.Exec("UPDATE plans SET payload=?,note=CASE WHEN ?<>'' THEN ? ELSE note END,updated_at=? WHERE id=?",string(payload),note,note,now,id)
+ }else if e==sql.ErrNoRows{
+  res,e2:=tx.Exec("INSERT INTO plans(name,note,payload,created_at,updated_at) VALUES(?,?,?,?,?)",name,strings.TrimSpace(body.Note),string(payload),now,now);err=e2;if err==nil{id,_=res.LastInsertId()}
+ }else{err=e}
+ if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"保存方案失败："+err.Error()});return}
+ if err=tx.Commit();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"保存方案失败："+err.Error()});return}
+ writeJSON(w,map[string]any{"ok":true,"id":id})
+}
+func(a *WebAPI)planUpdate(w http.ResponseWriter,r *http.Request){
+ id,err:=strconv.ParseInt(r.PathValue("id"),10,64);if err!=nil||id<=0{writeJSONStatus(w,400,map[string]any{"error":"方案 ID 无效"});return}
+ var body struct{Name *string `json:"name"`;Note *string `json:"note"`;Payload json.RawMessage `json:"payload"`;FromCurrent bool `json:"from_current"`}
+ if err=json.NewDecoder(io.LimitReader(r.Body,10<<20)).Decode(&body);err!=nil&&err!=io.EOF{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
+ sets:=[]string{};args:=[]any{}
+ if body.Name!=nil{name,e:=planName(*body.Name);if e!=nil{writeJSONStatus(w,400,map[string]any{"error":e.Error()});return};sets=append(sets,"name=?");args=append(args,name)}
+ if body.Note!=nil{sets=append(sets,"note=?");args=append(args,strings.TrimSpace(*body.Note))}
+ var payload planPayload;hasPayload:=false
+ if len(body.Payload)>0&&string(body.Payload)!="null"{payload,err=validatePlanPayload(body.Payload);hasPayload=true}else if body.FromCurrent{payload=currentPlanPayload(a.cfg);hasPayload=true}
+ if err!=nil{writeJSONStatus(w,400,map[string]any{"error":err.Error()});return}
+ if hasPayload{raw,_:=json.Marshal(payload);sets=append(sets,"payload=?");args=append(args,string(raw))}
+ if len(sets)==0{writeJSONStatus(w,400,map[string]any{"error":"没有提供需要修改的字段"});return}
+ sets=append(sets,"updated_at=?");args=append(args,time.Now().UTC().Format(time.RFC3339));args=append(args,id)
+ db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
+ res,err:=db.Exec("UPDATE plans SET "+strings.Join(sets,",")+" WHERE id=?",args...)
+ if err!=nil{if strings.Contains(strings.ToLower(err.Error()),"unique"){writeJSONStatus(w,409,map[string]any{"error":"已有同名方案"});return};writeJSONStatus(w,500,map[string]any{"error":"更新方案失败："+err.Error()});return}
+ n,_:=res.RowsAffected();if n==0{var exists int;if db.QueryRow("SELECT 1 FROM plans WHERE id=?",id).Scan(&exists)==sql.ErrNoRows{writeJSONStatus(w,404,map[string]any{"error":"方案不存在或已被删除"});return}}
+ writeJSON(w,map[string]any{"ok":true})
+}
+func(a *WebAPI)planDelete(w http.ResponseWriter,r *http.Request){
+ id,err:=strconv.ParseInt(r.PathValue("id"),10,64);if err!=nil||id<=0{writeJSONStatus(w,400,map[string]any{"error":"方案 ID 无效"});return}
+ db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
+ res,err:=db.Exec("DELETE FROM plans WHERE id=?",id);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"删除方案失败："+err.Error()});return};n,_:=res.RowsAffected();if n==0{writeJSONStatus(w,404,map[string]any{"error":"方案不存在或已被删除"});return};writeJSON(w,map[string]any{"ok":true})
+}
+func(a *WebAPI)planExport(w http.ResponseWriter,r *http.Request){
+ id,err:=strconv.ParseInt(r.PathValue("id"),10,64);if err!=nil||id<=0{writeJSONStatus(w,400,map[string]any{"error":"方案 ID 无效"});return}
+ db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
+ var name,note,raw string;err=db.QueryRow("SELECT name,note,payload FROM plans WHERE id=?",id).Scan(&name,&note,&raw);if err==sql.ErrNoRows{writeJSONStatus(w,404,map[string]any{"error":"方案不存在"});return};if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"导出方案失败："+err.Error()});return}
+ p,err:=validatePlanPayload(json.RawMessage(raw));if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"方案内容损坏："+err.Error()});return}
+ doc:=map[string]any{"format":"minio-downloader-plan","version":1,"name":name,"note":note,"payload":p};w.Header().Set("Content-Type","application/json; charset=utf-8");w.Header().Set("Content-Disposition","attachment; filename*=UTF-8''"+url.QueryEscape("方案-"+name)+".json");_ = json.NewEncoder(w).Encode(doc)
+}
+func(a *WebAPI)planImport(w http.ResponseWriter,r *http.Request){
+ var doc struct{Format string `json:"format"`;Version int `json:"version"`;Name string `json:"name"`;Note string `json:"note"`;Payload json.RawMessage `json:"payload"`;Plan json.RawMessage `json:"plan"`}
+ if err:=json.NewDecoder(io.LimitReader(r.Body,10<<20)).Decode(&doc);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"方案 JSON 无效"});return}
+ if len(doc.Plan)>0&&string(doc.Plan)!="null"{if err:=json.Unmarshal(doc.Plan,&doc);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"方案 JSON 无效"});return}}
+ if len(doc.Payload)==0||string(doc.Payload)=="null"{writeJSONStatus(w,400,map[string]any{"error":"不是有效的方案文件（缺少 payload）"});return}
+ p,err:=validatePlanPayload(doc.Payload);if err!=nil{writeJSONStatus(w,400,map[string]any{"error":err.Error()});return}
+ base:=strings.TrimSpace(doc.Name);if base==""{base="导入的方案"};runes:=[]rune(base);if len(runes)>54{base=string(runes[:54])}
+ db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
+ name:=base;for n:=2;n<100000;n++{var exists int;e:=db.QueryRow("SELECT 1 FROM plans WHERE name=?",name).Scan(&exists);if e==sql.ErrNoRows{break};if e!=nil{writeJSONStatus(w,500,map[string]any{"error":"检查方案名称失败："+e.Error()});return};suffix:=fmt.Sprintf(" (%d)",n);max:=60-len([]rune(suffix));rr:=[]rune(base);if len(rr)>max{rr=rr[:max]};name=string(rr)+suffix}
+ payload,_:=json.Marshal(p);now:=time.Now().UTC().Format(time.RFC3339)
+ res,err:=db.Exec("INSERT INTO plans(name,note,payload,created_at,updated_at) VALUES(?,?,?,?,?)",name,strings.TrimSpace(doc.Note),string(payload),now,now);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"导入方案失败："+err.Error()});return};id,_:=res.LastInsertId()
+ writeJSON(w,map[string]any{"ok":true,"id":id,"name":name})
 }
 func(a *WebAPI)config(w http.ResponseWriter,r *http.Request) {
  groups:=map[string]string{"minio":"MinIO 连接","pg":"PostgreSQL（任务元数据）","run":"运行与空间","transfer":"传输与校验","web":"Web 控制台"}
