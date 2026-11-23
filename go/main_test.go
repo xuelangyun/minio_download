@@ -248,32 +248,19 @@ func TestChooseTaskDiskKeepsSharedOutputFolderTogether(t *testing.T) {
 }
 
 func TestSQLiteStopRequestCanBeSetAndCleared(t *testing.T) {
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "control.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-	if err := writeStopRequest(db); err != nil {
-		t.Fatal(err)
-	}
-	var value string
-	if err := db.QueryRow("SELECT value FROM control WHERE key='stop_requested'").Scan(&value); err != nil {
-		t.Fatal(err)
-	}
-	if value != "1" {
-		t.Fatalf("expected stop_requested=1, got %q", value)
-	}
-	app := &App{db: db}
-	if err := app.clearStopRequest(); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.QueryRow("SELECT value FROM control WHERE key='stop_requested'").Scan(&value); err != nil {
-		t.Fatal(err)
-	}
-	if value != "0" {
-		t.Fatalf("expected stop_requested=0 after startup cleanup, got %q", value)
-	}
+ db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "control.db"))
+ if err != nil { t.Fatal(err) }
+ defer db.Close()
+ db.SetMaxOpenConns(1)
+ if err := writeStopRequest(db); err != nil { t.Fatal(err) }
+ var value string
+ if err := db.QueryRow("SELECT value FROM control WHERE key='stop_requested'").Scan(&value); err != nil { t.Fatal(err) }
+ if value != "1" { t.Fatalf("expected stop_requested=1, got %q", value) }
+ app := &App{db: db}
+ if err := app.clearStopRequest(); err != nil { t.Fatal(err) }
+ if err := db.QueryRow("SELECT value FROM control WHERE key='stop_requested'").Scan(&value); err != sql.ErrNoRows {
+  t.Fatalf("expected pause control row to be deleted, value=%q err=%v", value, err)
+ }
 }
 
 func TestStopWatcherCancelsApplicationContext(t *testing.T) {
