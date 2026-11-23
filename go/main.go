@@ -39,6 +39,7 @@ import (
  "github.com/shirou/gopsutil/v4/disk"
  "github.com/shirou/gopsutil/v4/process"
  _ "modernc.org/sqlite"
+ _ "embed"
 )
 
 type Task struct { Name string `json:"name"`; Scene string `json:"scene"`; Dir string `json:"dir"`; Aliases []string `json:"aliases"`; Tags []string `json:"tags"`; TargetHours float64 `json:"target_hours"`; TargetCount int `json:"target_count"` }
@@ -54,6 +55,9 @@ type Config struct {
 }
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
 type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool }
+//go:embed config.count.example.json
+var defaultCountConfigJSON []byte
+
 var configPath=flag.String("config","config.json","JSON 配置文件")
 var mode=flag.String("mode","","duration 或 count；未指定时根据配置自动选择")
 var rounds=flag.Int("max-rounds",0,"缺少必需文件后的补选轮数；默认使用配置项 run.default_rounds")
@@ -121,6 +125,7 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("PUT /api/config/settings",api.configSettings)
  mux.HandleFunc("POST /api/config/test",api.configTest)
  mux.HandleFunc("PUT /api/config/tasks",api.configTasks)
+ mux.HandleFunc("POST /api/config/tasks/reset",api.configTasksReset)
  mux.HandleFunc("PUT /api/config/disks",api.configDisks)
  mux.HandleFunc("POST /api/config/disks/check",api.configDisksCheck)
  mux.HandleFunc("GET /api/config",api.config)
@@ -544,6 +549,26 @@ func(a *WebAPI)configTest(w http.ResponseWriter,r *http.Request){
  if e==nil{var exists bool;e=db.QueryRowContext(ctx,"SELECT to_regclass('public.minio_galbot_scene_task_jobs') IS NOT NULL").Scan(&exists);if e==nil&&!exists{writeJSON(w,map[string]any{"ok":false,"message":"连接成功，但没有找到表 public.minio_galbot_scene_task_jobs"});return}}
  if e!=nil{writeJSON(w,map[string]any{"ok":false,"message":fmt.Sprintf("%T: %v",e,e)});return}
  writeJSON(w,map[string]any{"ok":true,"message":"连接成功，已找到任务数据表"})
+}
+func(a *WebAPI)configTasksReset(w http.ResponseWriter,r *http.Request){
+ var defaults Config
+ if err:=json.Unmarshal(defaultCountConfigJSON,&defaults);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取内置默认任务失败"});return}
+ if defaults.DataVersion==""||len(defaults.Tasks)==0{writeJSONStatus(w,500,map[string]any{"error":"内置默认任务配置不完整"});return}
+ oldTags:=map[string][]string{}
+ for _,task:=range a.cfg.Tasks{if len(task.Tags)>0{oldTags[task.Name]=append([]string{},task.Tags...)}}
+ scenes:=[]planScene{};sceneIndex:=map[string]int{}
+ for _,task:=range defaults.Tasks{
+  idx,ok:=sceneIndex[task.Scene]
+  if !ok{idx=len(scenes);sceneIndex[task.Scene]=idx;scenes=append(scenes,planScene{Scene:task.Scene,Tasks:[]planTask{}})}
+  scenes[idx].Tasks=append(scenes[idx].Tasks,planTask{Name:task.Name,Count:task.TargetCount,Aliases:append([]string{},task.Aliases...),Dir:task.Dir,Tags:append([]string{},oldTags[task.Name]...)})
+ }
+ payload:=planPayload{DataVersion:defaults.DataVersion,Scenes:scenes}
+ db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
+ if err=persistPlanPayload(db,payload);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"恢复默认任务失败："+err.Error()});return}
+ a.cfg.Tasks=[]Task{}
+ for _,scene:=range payload.Scenes{for _,task:=range scene.Tasks{a.cfg.Tasks=append(a.cfg.Tasks,Task{Scene:scene.Scene,Name:task.Name,TargetCount:task.Count,Aliases:append([]string{},task.Aliases...),Dir:task.Dir,Tags:append([]string{},task.Tags...)})}}
+ a.cfg.DataVersion=payload.DataVersion
+ writeJSON(w,map[string]any{"ok":true})
 }
 func(a *WebAPI)configTasks(w http.ResponseWriter,r *http.Request){
  var raw json.RawMessage
