@@ -1122,7 +1122,43 @@ func(a *App)isMissingStatus(id string)bool{
  err:=a.db.QueryRow("SELECT status FROM downloads WHERE episode_id=?",id).Scan(&status)
  return err==nil&&(status=="missing_task_info"||status=="missing_mcap")
 }
+func(a *App)reconcileInterruptedDownloads()error{
+ tx,err:=a.db.Begin()
+ if err!=nil{return err}
+ defer tx.Rollback()
+ rows,err:=tx.Query("SELECT episode_id,target_path FROM downloads WHERE status='running'")
+ if err!=nil{return err}
+ type staleDownload struct{id string;target sql.NullString}
+ stale:=[]staleDownload{}
+ for rows.Next(){
+  var item staleDownload
+  if err=rows.Scan(&item.id,&item.target);err!=nil{rows.Close();return err}
+  stale=append(stale,item)
+ }
+ if err=rows.Err();err!=nil{rows.Close();return err}
+ if err=rows.Close();err!=nil{return err}
+ now:=time.Now().UTC().Format(time.RFC3339Nano)
+ recovered,reset:=0,0
+ for _,item:=range stale{
+  status:="pending"
+  message:="检测到上次运行异常中断；保留临时文件，等待续传"
+  completedAt:=any(nil)
+  if item.target.Valid&&a.completedPath(item.target.String){
+   status="completed"
+   message=""
+   completedAt=now
+   recovered++
+  }else{reset++}
+  _,err=tx.Exec("UPDATE downloads SET status=?,error=?,completed_at=?,updated_at=? WHERE episode_id=? AND status='running'",
+   status,nullable(message),completedAt,now,item.id)
+  if err!=nil{return fmt.Errorf("恢复中断下载记录 %s 失败: %w",item.id,err)}
+ }
+ if err=tx.Commit();err!=nil{return err}
+ if len(stale)>0{log.Printf("SQLite 中断任务恢复：已完成目录 %d 条，重置为待续传 %d 条",recovered,reset)}
+ return nil
+}
 func(a *App)run(all []Episode,nround int)error{
+ if err:=a.reconcileInterruptedDownloads();err!=nil{return fmt.Errorf("恢复上次中断的下载状态失败: %w",err)}
  groups:=map[string][]Episode{};for _,e:=range all{groups[e.Task]=append(groups[e.Task],e)}
  if err:=a.syncLocalCopies(groups);err!=nil{return err}
  if a.mode=="count"{var err error;groups,err=a.prevalidateCount(groups);if err!=nil{if a.ctx.Err()!=nil{return nil};return err}}
