@@ -400,5 +400,6 @@
       "target_count": 40
     }
   ],
-  "trust_completed_records": true
+  "trust_completed_records": true,
+  "file_workers": 4
 }
