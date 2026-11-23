@@ -560,7 +560,7 @@ func TestReconcileInterruptedDownloadsPreservesPartialAndRecoversFinal(t *testin
  if err=os.WriteFile(filepath.Join(partial,"part.bin"),[]byte("partial"),0600);err!=nil{t.Fatal(err)}
  _,err=db.Exec("INSERT INTO downloads(episode_id,status,target_path,partial_path) VALUES('done','running',?,'')",complete);if err!=nil{t.Fatal(err)}
  _,err=db.Exec("INSERT INTO downloads(episode_id,status,target_path,partial_path) VALUES('resume','running',?,?)",filepath.Join(root,"missing-final"),partial);if err!=nil{t.Fatal(err)}
- app:=&App{db:db,cfg:Config{}}
+ app:=&App{db:db,cfg:Config{TrustCompletedRecords:true}}
  if err=app.reconcileInterruptedDownloads();err!=nil{t.Fatal(err)}
  var status,partialPath string
  if err=db.QueryRow("SELECT status,COALESCE(partial_path,'') FROM downloads WHERE episode_id='done'").Scan(&status,&partialPath);err!=nil{t.Fatal(err)}
