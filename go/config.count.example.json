@@ -401,5 +401,6 @@
     }
   ],
   "trust_completed_records": true,
-  "file_workers": 4
+  "file_workers": 4,
+  "lock_file": "minio_download.lock"
 }
