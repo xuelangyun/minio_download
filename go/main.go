@@ -220,10 +220,29 @@ func(a *App)downloadTask(b batch)error{
  for _,ep:=range b.rows{if a.ctx.Err()!=nil{break};sem<-struct{}{};wg.Add(1);go func(e Episode){defer wg.Done();defer func(){<-sem}();if err:=a.downloadOne(b.t,b.d,e);err!=nil{mu.Lock();if first==nil{first=err};mu.Unlock()}}(ep)}
  wg.Wait();return first
 }
+func episodePaths(version string,t Task,d DiskConfig,parentKey string)(string,string){
+ root:=filepath.Join(d.Path,safe(version),safe(t.Scene),safe(taskDir(t)))
+ leaf:=safe(path.Base(strings.Trim(parentKey,"/")))
+ return filepath.Join(root,leaf),filepath.Join(root,"."+leaf+".partial")
+}
 func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  if a.ctx.Err()!=nil{return nil};if e.Size<=0{_=a.set(e,d,"","","invalid_size","file_size 无效");return nil}
- root:=filepath.Join(d.Path,safe(a.cfg.DataVersion),safe(t.Scene),safe(taskDir(t)));final:=filepath.Join(root,safe(e.ID));partial:=filepath.Join(root,"."+safe(e.ID)+".partial")
- if dirHasFiles(final){if err:=a.record(e,d,final);err!=nil{return err};return a.set(e,d,final,"","completed","")}
+ var existing *DiskConfig;var existingPath string
+ for i:=range a.cfg.Disks{
+  candidate:=&a.cfg.Disks[i];candidateFinal,_:=episodePaths(a.cfg.DataVersion,t,*candidate,e.ParentKey)
+  if dirHasFiles(candidateFinal){
+   if existing!=nil{return fmt.Errorf("episode %s 在多个磁盘存在正式目录，违反单副本规则",e.ID)}
+   existing=candidate;existingPath=candidateFinal
+  }
+ }
+ if existing!=nil{
+  pinned:=a.assigned(t.Name)
+  if pinned!=""&&pinned!=existing.Name{return fmt.Errorf("任务 %s 固定在磁盘 %s，但 episode 已存在于 %s",t.Name,pinned,existing.Name)}
+  if pinned==""{if err:=a.assign(t.Name,existing.Name);err!=nil{return err}}
+  if err:=a.record(e,*existing,existingPath);err!=nil{return err}
+  return a.set(e,*existing,existingPath,"","completed","")
+ }
+ final,partial:=episodePaths(a.cfg.DataVersion,t,d,e.ParentKey)
  if err:=os.MkdirAll(partial,0755);err!=nil{return a.fail(e,d,final,partial,err)}
  direct:=map[string]bool{};for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:false}){if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)};if !obj.IsDir{direct[path.Base(obj.Key)]=true}}
  if !direct["task_info.json"]{_=a.set(e,d,final,partial,"missing_task_info","缺少 task_info.json");return nil}
