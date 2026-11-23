@@ -116,6 +116,7 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("DELETE /api/plans/{id}",api.planDelete)
  mux.HandleFunc("GET /api/plans/{id}/export",api.planExport)
  mux.HandleFunc("POST /api/plans/import",api.planImport)
+ mux.HandleFunc("POST /api/plans/{id}/apply",api.planApply)
  mux.HandleFunc("GET /api/config",api.config)
  mux.HandleFunc("GET /api/status",api.status)
  mux.HandleFunc("POST /api/run",api.run)
@@ -363,6 +364,59 @@ func(a *WebAPI)planExport(w http.ResponseWriter,r *http.Request){
  var name,note,raw string;err=db.QueryRow("SELECT name,note,payload FROM plans WHERE id=?",id).Scan(&name,&note,&raw);if err==sql.ErrNoRows{writeJSONStatus(w,404,map[string]any{"error":"方案不存在"});return};if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"导出方案失败："+err.Error()});return}
  p,err:=validatePlanPayload(json.RawMessage(raw));if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"方案内容损坏："+err.Error()});return}
  doc:=map[string]any{"format":"minio-downloader-plan","version":1,"name":name,"note":note,"payload":p};w.Header().Set("Content-Type","application/json; charset=utf-8");w.Header().Set("Content-Disposition","attachment; filename*=UTF-8''"+url.QueryEscape("方案-"+name)+".json");_ = json.NewEncoder(w).Encode(doc)
+}
+
+func persistPlanPayload(db *sql.DB,p planPayload)error{
+ tx,err:=db.Begin();if err!=nil{return err};defer tx.Rollback()
+ if _,err=tx.Exec("DELETE FROM task_aliases");err!=nil{return err}
+ if _,err=tx.Exec("DELETE FROM tasks");err!=nil{return err}
+ if _,err=tx.Exec("DELETE FROM scenes");err!=nil{return err}
+ for si,scene:=range p.Scenes{
+  res,e:=tx.Exec("INSERT INTO scenes(position,name) VALUES(?,?)",si,scene.Scene);if e!=nil{return e};sceneID,e:=res.LastInsertId();if e!=nil{return e}
+  for ti,t:=range scene.Tasks{
+   tags,_:=json.Marshal(t.Tags)
+   res,e=tx.Exec("INSERT INTO tasks(scene_id,position,name,target_count,directory,tags) VALUES(?,?,?,?,?,?)",sceneID,ti,t.Name,t.Count,t.Dir,string(tags));if e!=nil{return e};taskID,e:=res.LastInsertId();if e!=nil{return e}
+   for ai,alias:=range t.Aliases{if _,e=tx.Exec("INSERT INTO task_aliases(task_id,position,alias) VALUES(?,?,?)",taskID,ai,alias);e!=nil{return e}}
+  }
+ }
+ now:=time.Now().UTC().Format(time.RFC3339)
+ if _,err=tx.Exec("INSERT INTO settings(key,value,updated_at) VALUES('tasks.data_version',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",mustJSON(p.DataVersion),now);err!=nil{return err}
+ return tx.Commit()
+}
+func mustJSON(v any)string{b,_:=json.Marshal(v);return string(b)}
+func planHasTasks(p planPayload)bool{for _,s:=range p.Scenes{if len(s.Tasks)>0{return true}};return false}
+func(a *WebAPI)planApply(w http.ResponseWriter,r *http.Request){
+ id,err:=strconv.ParseInt(r.PathValue("id"),10,64);if err!=nil||id<=0{writeJSONStatus(w,400,map[string]any{"error":"方案 ID 无效"});return}
+ var body struct{Mode string `json:"mode"`;Tags []string `json:"tags"`}
+ if err=json.NewDecoder(io.LimitReader(r.Body,1<<20)).Decode(&body);err!=nil&&err!=io.EOF{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
+ if body.Mode==""{body.Mode="replace"};if body.Mode!="replace"&&body.Mode!="merge"{writeJSONStatus(w,400,map[string]any{"error":"mode 只能是 replace 或 merge"});return}
+ db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
+ var raw string;if err=db.QueryRow("SELECT payload FROM plans WHERE id=?",id).Scan(&raw);err==sql.ErrNoRows{writeJSONStatus(w,404,map[string]any{"error":"方案不存在或已被删除"});return}else if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取方案失败："+err.Error()});return}
+ incoming,err:=validatePlanPayload(json.RawMessage(raw));if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"方案内容损坏："+err.Error()});return}
+ wanted:=map[string]bool{};for _,tag:=range body.Tags{tag=strings.TrimSpace(tag);if tag!=""{wanted[tag]=true}}
+ if len(wanted)>0{filtered:=planPayload{DataVersion:incoming.DataVersion,Scenes:[]planScene{}};for _,scene:=range incoming.Scenes{kept:=[]planTask{};for _,t:=range scene.Tasks{match:=false;for _,tag:=range t.Tags{if wanted[tag]{match=true}};if match{kept=append(kept,t)}};if len(kept)>0{filtered.Scenes=append(filtered.Scenes,planScene{Scene:scene.Scene,Tasks:kept})}};incoming=filtered}
+ if !planHasTasks(incoming){msg:="这个方案是空的";if len(wanted)>0{msg="方案里没有符合所选标签的任务"};writeJSONStatus(w,400,map[string]any{"error":msg});return}
+ result:=incoming;added:=[]string{};skipped:=[]map[string]string{}
+ if body.Mode=="merge"{
+  current:=currentPlanPayload(a.cfg);result=planPayload{DataVersion:current.DataVersion,Scenes:append([]planScene{},current.Scenes...)}
+  existing:=map[string]bool{};for _,scene:=range result.Scenes{for _,t:=range scene.Tasks{existing[t.Name]=true}}
+  for _,scene:=range incoming.Scenes{for _,task:=range scene.Tasks{
+   if existing[task.Name]{skipped=append(skipped,map[string]string{"name":task.Name,"reason":"当前配置里已有同名任务"});continue}
+   candidate:=planPayload{DataVersion:result.DataVersion,Scenes:append([]planScene{},result.Scenes...)}
+   target:=-1;for i:=range candidate.Scenes{if candidate.Scenes[i].Scene==scene.Scene{target=i;break}}
+   if target<0{candidate.Scenes=append(candidate.Scenes,planScene{Scene:scene.Scene,Tasks:[]planTask{}});target=len(candidate.Scenes)-1}
+   candidate.Scenes[target].Tasks=append(candidate.Scenes[target].Tasks,task)
+   if _,e:=validatePlanPayload(mustJSON(candidate));e!=nil{skipped=append(skipped,map[string]string{"name":task.Name,"reason":e.Error()});continue}
+   result=candidate;existing[task.Name]=true;added=append(added,task.Name)
+  }}
+ }else{for _,scene:=range incoming.Scenes{for _,task:=range scene.Tasks{added=append(added,task.Name)}}}
+ if err=validatePlanPayload(mustJSON(result));err!=nil{writeJSONStatus(w,400,map[string]any{"error":err.Error()});return}
+ if body.Mode=="replace"||len(added)>0{
+  if err=persistPlanPayload(db,result);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"应用方案失败："+err.Error()});return}
+  tasks:=[]Task{};for _,scene:=range result.Scenes{for _,t:=range scene.Tasks{tasks=append(tasks,Task{Scene:scene.Scene,Name:t.Name,TargetCount:t.Count,Aliases:append([]string{},t.Aliases...),Dir:t.Dir,Tags:append([]string{},t.Tags...)})}};a.cfg.Tasks=tasks;a.cfg.DataVersion=result.DataVersion
+ }
+ total:=0;for _,scene:=range result.Scenes{total+=len(scene.Tasks)}
+ writeJSON(w,map[string]any{"ok":true,"mode":body.Mode,"added":len(added),"skipped":skipped,"total_tasks":total,"running":func()bool{_,running,_:=a.activeDownloader();return running}()})
 }
 func(a *WebAPI)planImport(w http.ResponseWriter,r *http.Request){
  var doc struct{Format string `json:"format"`;Version int `json:"version"`;Name string `json:"name"`;Note string `json:"note"`;Payload json.RawMessage `json:"payload"`;Plan json.RawMessage `json:"plan"`}
