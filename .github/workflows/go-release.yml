@@ -11,51 +11,50 @@ permissions:
 
 jobs:
   build:
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { goos: windows, goarch: amd64, runner: windows-latest, ext: .exe }
-          - { goos: linux, goarch: amd64, runner: ubuntu-latest, ext: "" }
-          - { goos: linux, goarch: arm64, runner: ubuntu-24.04-arm, ext: "" }
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23.x"
           cache: false
-      - name: Build binary
-        shell: bash
+      - name: Resolve dependencies
+        working-directory: go
+        run: go mod tidy
+      - name: Test
+        working-directory: go
+        run: go test ./...
+      - name: Build Windows amd64
+        working-directory: go
+        run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/windows-amd64/minio-download.exe .
+      - name: Build Linux amd64
         working-directory: go
         run: |
-          go mod tidy
-          mkdir -p dist
-          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="-s -w" -o dist/minio-download${{ matrix.ext }} .
-          cp config.example.json README.md dist/
-      - name: Package Windows
-        if: matrix.goos == 'windows'
-        shell: pwsh
+          mkdir -p dist/linux-amd64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/linux-amd64/minio-download .
+      - name: Build Linux arm64
         working-directory: go
-        run: Compress-Archive -Path dist/* -DestinationPath ../minio-download-windows-amd64.zip -Force
-      - name: Package Linux
-        if: matrix.goos == 'linux'
-        shell: bash
+        run: |
+          mkdir -p dist/linux-arm64
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/linux-arm64/minio-download .
+      - name: Add templates and documentation
         working-directory: go
-        run: tar -C dist -czf ../minio-download-linux-${{ matrix.goarch }}.tar.gz .
+        run: |
+          cp config.example.json README.md dist/windows-amd64/
+          cp config.example.json README.md dist/linux-amd64/
+          cp config.example.json README.md dist/linux-arm64/
+      - name: Package artifacts
+        run: |
+          cd go/dist
+          zip -qr ../../minio-download-windows-amd64.zip windows-amd64
+          tar -czf ../../minio-download-linux-amd64.tar.gz linux-amd64
+          tar -czf ../../minio-download-linux-arm64.tar.gz linux-arm64
       - uses: actions/upload-artifact@v4
         with:
-          name: minio-download-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: minio-download-cross-platform
           path: minio-download-*.*
-  release:
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
-          path: release-assets
-          merge-multiple: true
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/*
+          files: minio-download-*.*
