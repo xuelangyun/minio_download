@@ -407,7 +407,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
   if err!=nil&&strings.Contains(err.Error(),"远端对象被修改"){_=os.Remove(tmp)}
   if attempt<attempts{
    log.Printf("对象下载重试 %d/%d: %s: %v",attempt,attempts,key,err)
-   select{case <-a.ctx.Done():return a.ctx.Err();case <-time.After(time.Duration(attempt)*time.Second):}
+   select{case <-a.ctx.Done():return a.ctx.Err();case <-time.After(time.Duration(float64(time.Second)*a.cfg.RetryDelaySeconds*float64(attempt))):}
   }
  }
  return fmt.Errorf("对象下载重试 %d 次仍失败: %s",attempts,key)
