@@ -1102,6 +1102,22 @@ func TestWebConfigMasksSecretsAndReturnsTaskTags(t *testing.T) {
 	if len(response["schema"].([]any)) < 20 { t.Fatalf("configuration schema incomplete: %d", len(response["schema"].([]any))) }
 }
 
+func TestWebChildProcessStateConcurrentAccess(t *testing.T) {
+ api := &WebAPI{}
+ var wg sync.WaitGroup
+ for worker := 0; worker < 4; worker++ {
+  wg.Add(1)
+  go func(id int) {
+   defer wg.Done()
+   for i := 0; i < 1000; i++ {
+    api.setChildProcess(int32(id+i), float64(i))
+    _, _ = api.childProcessSnapshot()
+   }
+  }(worker)
+ }
+ wg.Wait()
+}
+
 func TestForceStopRejectsNoActiveDownloader(t *testing.T) {
 	api := &WebAPI{cfg: Config{PIDFile: filepath.Join(t.TempDir(), "missing.pid")}}
 	req := httptest.NewRequest(http.MethodPost, "/api/stop", strings.NewReader(`{"force":true}`))
