@@ -1766,7 +1766,7 @@ func TestFirstRunUsesSingleSQLiteDatabase(t *testing.T) {
 	}
 	defer db.Close()
 	writer := &sqliteLogWriter{db: db}
-	if _, err = writer.Write([]byte("first-run log entry\\n")); err != nil {
+	if _, err = writer.Write([]byte("first-run log entry\n")); err != nil {
 		t.Fatal(err)
 	}
 	var savedLog string
