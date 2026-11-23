@@ -391,6 +391,25 @@ func TestReplaceEpisodeDirectoryRejectsInvalidSourceBeforeMovingFinal(t *testing
  if _,err:=os.Stat(filepath.Join(final,"keep.txt"));err!=nil{t.Fatalf("existing final directory was changed: %v",err)}
 }
 
+func TestIsTransientWindowsFileError(t *testing.T) {
+ for _,code:=range []syscall.Errno{syscall.Errno(32),syscall.Errno(33)}{
+  err:=&os.PathError{Op:"rename",Path:"file",Err:code}
+  if !isTransientWindowsFileError(err,true){t.Fatalf("Windows error %d should be retried",code)}
+  if isTransientWindowsFileError(err,false){t.Fatalf("non-Windows error %d must not be retried",code)}
+ }
+ if isTransientWindowsFileError(errors.New("permanent failure"),true){t.Fatal("permanent errors must not be retried")}
+}
+func TestRetryFileOperationRetriesWindowsSharingViolation(t *testing.T) {
+ calls:=0
+ err:=retryFileOperation(func()error{
+  calls++
+  if calls==1{return &os.PathError{Op:"rename",Path:"file",Err:syscall.Errno(32)}}
+  return nil
+ },true)
+ if err!=nil{t.Fatal(err)}
+ if calls!=2{t.Fatalf("operation calls=%d, want 2",calls)}
+}
+
 func TestReplaceDownloadedFileForWindowsReplacesExistingFile(t *testing.T) {
  dir:=t.TempDir()
  dst:=filepath.Join(dir,"final.bin")
