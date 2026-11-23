@@ -2,7 +2,7 @@ name: Go cross-platform release
 
 on:
   push:
-    branches: ["main", "feature/go-downloader"]
+    branches: ["main", "feature/go-downloader", "feature/sqlite-web-first-run"]
     tags: ["go-v*", "v*"]
   workflow_dispatch:
 
@@ -41,12 +41,12 @@ jobs:
         run: |
           mkdir -p dist/linux-arm64
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/linux-arm64/minio-download .
-      - name: Add templates and documentation
+      - name: Add documentation
         working-directory: go
         run: |
-          cp config.example.json config.count.example.json README.md dist/windows-amd64/
-          cp config.example.json config.count.example.json README.md dist/linux-amd64/
-          cp config.example.json config.count.example.json README.md dist/linux-arm64/
+          cp README.md dist/windows-amd64/
+          cp README.md dist/linux-amd64/
+          cp README.md dist/linux-arm64/
       - name: Package artifacts
         run: |
           cd go/dist
