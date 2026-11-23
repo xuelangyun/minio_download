@@ -253,8 +253,8 @@ func currentPlanPayload(c Config) planPayload {
 func validatePlanPayload(raw json.RawMessage)(planPayload,error){
  var p planPayload
  if err:=json.Unmarshal(raw,&p);err!=nil{return p,fmt.Errorf("任务内容 JSON 无效：%w",err)}
+ // Python plans allow an empty data_version; apply(replace) inherits the current value.
  p.DataVersion=strings.TrimSpace(p.DataVersion)
- if p.DataVersion==""{return p,errors.New("版本目录不能为空")}
  if p.Scenes==nil{return p,errors.New("任务内容格式不对（需要 data_version 和 scenes）")}
  seenTasks:=map[string]bool{};seenAliases:=map[string]string{};dirOwners:=map[string]string{};sceneSeen:=map[string]bool{}
  for si:=range p.Scenes {
@@ -399,6 +399,8 @@ func(a *WebAPI)planApply(w http.ResponseWriter,r *http.Request){
  wanted:=map[string]bool{};for _,tag:=range body.Tags{tag=strings.TrimSpace(tag);if tag!=""{wanted[tag]=true}}
  if len(wanted)>0{filtered:=planPayload{DataVersion:incoming.DataVersion,Scenes:[]planScene{}};for _,scene:=range incoming.Scenes{kept:=[]planTask{};for _,t:=range scene.Tasks{match:=false;for _,tag:=range t.Tags{if wanted[tag]{match=true}};if match{kept=append(kept,t)}};if len(kept)>0{filtered.Scenes=append(filtered.Scenes,planScene{Scene:scene.Scene,Tasks:kept})}};incoming=filtered}
  if !planHasTasks(incoming){msg:="这个方案是空的";if len(wanted)>0{msg="方案里没有符合所选标签的任务"};writeJSONStatus(w,400,map[string]any{"error":msg});return}
+ if body.Mode=="replace"&&incoming.DataVersion==""{incoming.DataVersion=strings.TrimSpace(a.cfg.DataVersion)}
+ if body.Mode=="replace"&&incoming.DataVersion==""{writeJSONStatus(w,400,map[string]any{"error":"版本目录不能为空（方案未设置，当前配置也为空）"});return}
  result:=incoming;added:=[]string{};skipped:=[]map[string]string{}
  if body.Mode=="merge"{
   current:=currentPlanPayload(a.cfg);result=planPayload{DataVersion:current.DataVersion,Scenes:append([]planScene{},current.Scenes...)}
