@@ -49,7 +49,7 @@ type Config struct {
  Endpoint string `json:"minio_endpoint"`; AccessKey string `json:"minio_access_key"`; SecretKey string `json:"minio_secret_key"`; Bucket string `json:"minio_bucket"`; Region string `json:"minio_region"`; SSL bool `json:"minio_use_ssl"`; MinioSkipVerify bool `json:"minio_skip_verify"`
  PGHost string `json:"pg_host"`; PGPort int `json:"pg_port"`; PGDB string `json:"pg_database"`; PGUser string `json:"pg_user"`; PGPassword string `json:"pg_password"`
  DataVersion string `json:"data_version"`; ConfigDB string `json:"config_db"`; LockFile string `json:"lock_file"`; PIDFile string `json:"pid_file"`; StateDB string `json:"state_db"`; LogDir string `json:"log_dir"`; MinFreeGB float64 `json:"min_free_gb"`; SafetyFactor float64 `json:"space_safety_factor"`
- Workers int `json:"max_writes_per_disk"`; FileWorkers int `json:"file_workers"`; FileRetries int `json:"file_retries"`; RetryDelaySeconds float64 `json:"retry_delay_seconds"`; ValidateWorkers int `json:"validate_workers"`; RequireMCAP bool `json:"require_mcap"`; MCAPPattern string `json:"mcap_pattern"`; IncludeNull bool `json:"include_null_quality"`; VerifyMD5 *bool `json:"verify_md5"`; Fsync *bool `json:"fsync"`; TrustCompletedRecords bool `json:"trust_completed_records"`
+ Workers int `json:"max_writes_per_disk"`; FileWorkers int `json:"file_workers"`; FileRetries int `json:"file_retries"`; RetryDelaySeconds float64 `json:"retry_delay_seconds"`; ValidateWorkers int `json:"validate_workers"`; DefaultRounds int `json:"default_rounds"`; ConnectTimeout int `json:"connect_timeout"`; ReadTimeout int `json:"read_timeout"`; WebHost string `json:"web_host"`; WebPort int `json:"web_port"`; RequireMCAP bool `json:"require_mcap"`; MCAPPattern string `json:"mcap_pattern"`; IncludeNull bool `json:"include_null_quality"`; VerifyMD5 *bool `json:"verify_md5"`; Fsync *bool `json:"fsync"`; TrustCompletedRecords bool `json:"trust_completed_records"`
  Disks []DiskConfig `json:"disks"`; Tasks []Task `json:"tasks"`
 }
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
@@ -489,6 +489,11 @@ func applyWebSetting(c *Config,key string,v any){
  case "run.include_null_quality":c.IncludeNull=v.(bool)
  case "run.mcap_pattern":c.MCAPPattern=v.(string)
  case "run.validate_workers":c.ValidateWorkers=v.(int)
+ case "run.default_rounds":c.DefaultRounds=v.(int)
+ case "transfer.connect_timeout":c.ConnectTimeout=v.(int)
+ case "transfer.read_timeout":c.ReadTimeout=v.(int)
+ case "web.host":c.WebHost=v.(string)
+ case "web.port":c.WebPort=v.(int)
  case "transfer.file_workers":c.FileWorkers=v.(int)
  case "transfer.file_retries":c.FileRetries=v.(int)
  case "transfer.retry_delay":c.RetryDelaySeconds=v.(float64)
@@ -670,7 +675,7 @@ func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
  var body struct{Mode string `json:"mode"`;MaxRounds int `json:"max_rounds"`;RecheckMissing bool `json:"recheck_missing"`}
  if err:=json.NewDecoder(io.LimitReader(r.Body,4096)).Decode(&body);err!=nil&&err!=io.EOF{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
  if body.Mode==""{body.Mode="download"};if body.Mode!="download"{writeJSONStatus(w,400,map[string]any{"error":"当前 Go Web API 只支持 download 模式"});return}
- if body.MaxRounds==0{body.MaxRounds=1};if body.MaxRounds<1||body.MaxRounds>50{writeJSONStatus(w,400,map[string]any{"error":"补齐轮数范围 1–50"});return}
+ if body.MaxRounds==0{body.MaxRounds=a.cfg.DefaultRounds;if body.MaxRounds<=0{body.MaxRounds=1}};if body.MaxRounds<1||body.MaxRounds>50{writeJSONStatus(w,400,map[string]any{"error":"补齐轮数范围 1–50"});return}
  if len(a.cfg.Tasks)==0||len(a.cfg.Disks)==0||a.cfg.Endpoint==""||a.cfg.AccessKey==""||a.cfg.SecretKey==""||a.cfg.PGHost==""{writeJSONStatus(w,400,map[string]any{"error":"配置未补全：需要 MinIO、PostgreSQL、任务和磁盘配置"});return}
  a.runMu.Lock();defer a.runMu.Unlock()
  if pid,running,_:=a.activeDownloader();running{writeJSONStatus(w,409,map[string]any{"error":fmt.Sprintf("下载器已在运行（PID %d）",pid)});return}
@@ -723,7 +728,7 @@ func loadConfigDB(c *Config,runMode string)error{
  getString("minio.endpoint",&c.Endpoint);getString("minio.access_key",&c.AccessKey);getString("minio.secret_key",&c.SecretKey);getString("minio.bucket",&c.Bucket);getString("minio.region",&c.Region)
  getBool("minio.secure",&c.SSL);certCheck:=true;getBool("minio.cert_check",&certCheck);c.MinioSkipVerify=!certCheck;getString("pg.host",&c.PGHost);getInt("pg.port",&c.PGPort);getString("pg.database",&c.PGDB);getString("pg.user",&c.PGUser);getString("pg.password",&c.PGPassword)
  getFloat("run.min_free_gb",&c.MinFreeGB);getFloat("run.space_safety_factor",&c.SafetyFactor);getInt("run.max_writes_per_disk",&c.Workers);getBool("run.require_mcap",&c.RequireMCAP);getBool("run.include_null_quality",&c.IncludeNull);getInt("run.validate_workers",&c.ValidateWorkers);getString("run.mcap_pattern",&c.MCAPPattern)
- getInt("transfer.file_workers",&c.FileWorkers);getInt("transfer.file_retries",&c.FileRetries);getFloat("transfer.retry_delay",&c.RetryDelaySeconds)
+ getInt("transfer.file_workers",&c.FileWorkers);getInt("transfer.file_retries",&c.FileRetries);getFloat("transfer.retry_delay",&c.RetryDelaySeconds);getInt("run.default_rounds",&c.DefaultRounds);getInt("transfer.connect_timeout",&c.ConnectTimeout);getInt("transfer.read_timeout",&c.ReadTimeout);getString("web.host",&c.WebHost);getInt("web.port",&c.WebPort)
  if raw,ok:=settings["transfer.verify_md5"];ok{var v bool;if json.Unmarshal([]byte(raw),&v)==nil{c.VerifyMD5=&v}}
  if raw,ok:=settings["transfer.fsync"];ok{var v bool;if json.Unmarshal([]byte(raw),&v)==nil{c.Fsync=&v}}
  if raw,ok:=settings["tasks.data_version"];ok{var v string;if json.Unmarshal([]byte(raw),&v)==nil&&v!=""{c.DataVersion=v}}
@@ -738,7 +743,7 @@ func(c *Config)normalize(m string)error{
  if c.Endpoint==""||c.AccessKey==""||c.SecretKey==""||c.Bucket==""{return errors.New("MinIO endpoint/access_key/secret_key/bucket 必须填写")}
  if c.PGHost==""||c.PGDB==""||c.PGUser==""||c.PGPassword==""{return errors.New("PostgreSQL 连接参数必须填写")}
  if c.PGPort==0{c.PGPort=5432};if c.DataVersion==""{c.DataVersion="银河2.2数据"};if c.LockFile==""{c.LockFile="minio_download.lock"};if c.PIDFile==""{c.PIDFile="minio_download.pid"};if c.StateDB==""{c.StateDB="minio_download_state.sqlite3"};if c.LogDir==""{c.LogDir="logs"}
- if c.MinFreeGB==0&&!c.fromConfigDB{c.MinFreeGB=3};if c.SafetyFactor==0{c.SafetyFactor=1.15};if c.Workers<=0{c.Workers=2};if c.FileWorkers<=0{c.FileWorkers=4};if c.FileRetries<=0{c.FileRetries=5};if c.RetryDelaySeconds<=0&&!c.fromConfigDB{c.RetryDelaySeconds=1};if c.ValidateWorkers<=0{c.ValidateWorkers=16};if c.Workers>16||c.FileWorkers>16||c.ValidateWorkers>32||c.FileRetries>20{return errors.New("并发数不能超过 16，文件重试次数不能超过 20")};if c.MinFreeGB<0||c.MinFreeGB>1_000_000{return errors.New("min_free_gb 必须在 0 到 1000000 之间")};if c.SafetyFactor<1||c.SafetyFactor>5{return errors.New("space_safety_factor 必须在 1 到 5 之间")};if c.RetryDelaySeconds<0||c.RetryDelaySeconds>60{return errors.New("retry_delay_seconds 必须在 0 到 60 之间")};if c.PGPort<1||c.PGPort>65535{return errors.New("pg_port 必须在 1 到 65535 之间")};if c.MCAPPattern==""{c.MCAPPattern="*.SYNC.mcap"};if c.VerifyMD5==nil{v:=true;c.VerifyMD5=&v};if c.Fsync==nil{v:=true;c.Fsync=&v}
+ if c.MinFreeGB==0&&!c.fromConfigDB{c.MinFreeGB=3};if c.SafetyFactor==0{c.SafetyFactor=1.15};if c.Workers<=0{c.Workers=2};if c.FileWorkers<=0{c.FileWorkers=4};if c.FileRetries<=0{c.FileRetries=5};if c.RetryDelaySeconds<=0&&!c.fromConfigDB{c.RetryDelaySeconds=1};if c.ValidateWorkers<=0{c.ValidateWorkers=16};if c.DefaultRounds<=0{c.DefaultRounds=1};if c.ConnectTimeout<=0{c.ConnectTimeout=10};if c.ReadTimeout<=0{c.ReadTimeout=120};if c.WebHost==""{c.WebHost="127.0.0.1"};if c.WebPort<=0{c.WebPort=8765};if c.Workers>16||c.FileWorkers>16||c.ValidateWorkers>32||c.FileRetries>20{return errors.New("并发数不能超过 16，文件重试次数不能超过 20")};if c.MinFreeGB<0||c.MinFreeGB>1_000_000{return errors.New("min_free_gb 必须在 0 到 1000000 之间")};if c.SafetyFactor<1||c.SafetyFactor>5{return errors.New("space_safety_factor 必须在 1 到 5 之间")};if c.RetryDelaySeconds<0||c.RetryDelaySeconds>60{return errors.New("retry_delay_seconds 必须在 0 到 60 之间")};if c.PGPort<1||c.PGPort>65535{return errors.New("pg_port 必须在 1 到 65535 之间")};if c.DefaultRounds<1||c.DefaultRounds>50||c.ConnectTimeout<1||c.ConnectTimeout>300||c.ReadTimeout<5||c.ReadTimeout>3600||c.WebPort<1||c.WebPort>65535{return errors.New("default_rounds / connect_timeout / read_timeout / web_port 超出允许范围")};if c.MCAPPattern==""{c.MCAPPattern="*.SYNC.mcap"};if c.VerifyMD5==nil{v:=true;c.VerifyMD5=&v};if c.Fsync==nil{v:=true;c.Fsync=&v}
  if len(c.Disks)==0||len(c.Tasks)==0{return errors.New("disks/tasks 不能为空")}
  seen:=map[string]bool{};aliases:=map[string]string{};dirs:=map[string]string{}
  for _,t:=range c.Tasks{
