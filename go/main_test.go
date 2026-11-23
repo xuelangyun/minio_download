@@ -319,11 +319,21 @@ func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
  if got:=remainingObjectBytes(dst,100);got!=0{t.Fatalf("complete temp remaining: got %d want 0",got)}
 }
 func TestResumeOffsetBacksOffOnlyOnFirstAttempt(t *testing.T) {
- if got:=resumeOffset(200,300,true);got!=200-resumeBackoffBytes&&200>resumeBackoffBytes{t.Fatalf("backoff offset=%d",got)}
+ if got:=resumeOffset(resumeBackoffBytes+200,resumeBackoffBytes+300,true);got!=200{t.Fatalf("backoff offset=%d want 200",got)}
  if got:=resumeOffset(resumeBackoffBytes+10,300,true);got!=10{t.Fatalf("first-attempt offset=%d want 10",got)}
  if got:=resumeOffset(resumeBackoffBytes+10,300,false);got!=resumeBackoffBytes+10{t.Fatalf("retry offset=%d",got)}
  if got:=resumeOffset(100,90,true);got!=0{t.Fatalf("oversized partial offset=%d want 0",got)}
  if got:=resumeOffset(10,100,true);got!=10{t.Fatalf("small partial offset=%d want 10",got)}
+}
+func TestResumeBackoffRestoresReleasedSpaceReservation(t *testing.T) {
+ app:=&App{cfg:Config{MinFreeGB:0}}
+ reservation,err:=app.reserveObjectSpace(DiskConfig{Name:"disk-a",Path:t.TempDir()},100)
+ if err!=nil{t.Fatal(err)}
+ reservation.Consume(100)
+ if got:=app.spaceInFlight["disk-a"];got!=0{t.Fatalf("after consuming partial=%d want 0",got)}
+ reservation.Restore(40)
+ if got:=app.spaceInFlight["disk-a"];got!=40{t.Fatalf("backoff must re-reserve truncated bytes: got %d want 40",got)}
+ reservation.Release()
 }
 func TestAddSpaceReservations(t *testing.T) {
 	got, ok := addSpaceReservations(100, 200, 30)
