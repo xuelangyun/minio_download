@@ -81,9 +81,9 @@ func main(){
  watcherDone:=a.startStopWatcher();defer func(){cancel();<-watcherDone}()
  if e=validateDiskSet(a.cfg.Disks);e!=nil{log.Fatal(e)}
  if *cleanup{n,err:=a.cleanup(*dry);if err!=nil{log.Fatal(err)};log.Printf("清理结束：%d 条",n);if *dry{return}}else if *dry{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
- rows,e:=a.fetch();if e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停（候选查询期间收到暂停请求）");return};log.Fatal(e)}
- if e=a.run(rows,*rounds);e!=nil{log.Fatal(e)}
- if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传")}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH)}
+ rows,e:=a.fetch();if e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停（候选查询期间收到暂停请求）");a.saveLastRun("paused",nil);return};log.Printf("候选查询失败: %v",e);a.saveLastRun("error",e);return}
+ if e=a.run(rows,*rounds);e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil);return};log.Printf("下载执行失败: %v",e);a.saveLastRun("error",e);return}
+ if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil)}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH);a.saveLastRun("completed",nil)}
 }
 func loadConfigDB(c *Config,runMode string)error{
  if strings.TrimSpace(c.ConfigDB)==""{return nil}
@@ -172,6 +172,13 @@ func requestStop(c Config) error {
  db.SetMaxOpenConns(1)
  if _,err=db.Exec("PRAGMA busy_timeout=30000");err!=nil{return err}
  return writeStopRequest(db)
+}
+func(a *App)saveLastRun(result string,runErr error){
+ payload:=map[string]any{"result":result,"at":controlTimestamp(),"mode":a.mode}
+ if runErr!=nil{payload["error"]=runErr.Error()}
+ raw,err:=json.Marshal(payload);if err!=nil{log.Printf("保存上次运行结果失败: %v",err);return}
+ _,err=a.db.Exec("INSERT INTO control(key,value,updated_at) VALUES('last_run',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",string(raw),controlTimestamp())
+ if err!=nil{log.Printf("保存上次运行结果失败: %v",err)}
 }
 func(a *App)clearStopRequest()error{
  _,err:=a.db.Exec("DELETE FROM control WHERE key='stop_requested'")
