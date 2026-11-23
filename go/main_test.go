@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -427,5 +428,30 @@ func TestLoadConfigDBRejectsDurationMode(t *testing.T) {
 	cfg := Config{ConfigDB: filepath.Join(t.TempDir(), "config.sqlite3")}
 	if err := loadConfigDB(&cfg, "duration"); err == nil {
 		t.Fatal("duration mode must not silently replace hour targets with count targets")
+	}
+}
+
+func TestSaveLastRunForPythonWeb(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "last-run.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{db: db, mode: "count"}
+	app.saveLastRun("error", errors.New("simulated failure"))
+	var raw string
+	if err := db.QueryRow("SELECT value FROM control WHERE key='last_run'").Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["result"] != "error" || result["error"] != "simulated failure" || result["mode"] != "count" || result["at"] == "" {
+		t.Fatalf("unexpected last_run record: %#v", result)
 	}
 }
