@@ -990,14 +990,29 @@ func(a *App)open()error{
   log.Printf("MinIO=%s bucket=%s；PostgreSQL=%s:%d/%s；SQLite=%s",a.cfg.Endpoint,a.cfg.Bucket,a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.StateDB)
  };return e
 }
-func(a *App)set(e Episode,d DiskConfig,final,partial,status,msg string)error{
- now:=time.Now().UTC().Format(time.RFC3339Nano)
- _,err:=a.db.Exec("INSERT INTO downloads(episode_id,task_name,parent_key,disk_name,target_path,partial_path,expected_bytes,status,error,started_at,completed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "+
+type sqlExecer interface{Exec(string,...any)(sql.Result,error)}
+func setWithExec(db sqlExecer,e Episode,d DiskConfig,final,partial,status,msg string)error{ now:=time.Now().UTC().Format(time.RFC3339Nano)
+ _,err:=db.Exec("INSERT INTO downloads(episode_id,task_name,parent_key,disk_name,target_path,partial_path,expected_bytes,status,error,started_at,completed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "+
  "ON CONFLICT(episode_id) DO UPDATE SET task_name=excluded.task_name,parent_key=excluded.parent_key,disk_name=excluded.disk_name,target_path=excluded.target_path,partial_path=excluded.partial_path,expected_bytes=excluded.expected_bytes,status=excluded.status,error=excluded.error,"+
  "started_at=CASE WHEN excluded.status='running' THEN excluded.updated_at ELSE downloads.started_at END,"+
  "completed_at=CASE WHEN excluded.status='completed' THEN excluded.updated_at WHEN excluded.status='running' THEN NULL ELSE downloads.completed_at END,updated_at=excluded.updated_at",
  e.ID,e.Task,e.ParentKey,d.Name,nullable(final),nullable(partial),e.Size,status,nullable(msg),nullableTime(status=="running",now),nullableTime(status=="completed",now),now)
  return err
+}}
+func(a *App)set(e Episode,d DiskConfig,final,partial,status,msg string)error{return setWithExec(a.db,e,d,final,partial,status,msg)}
+func recordWithExec(db sqlExecer,e Episode,d DiskConfig,final string)error{ _,err:=db.Exec("INSERT INTO downloaded_episodes(episode_id,task_name,source_task_name,job_id,sn_code,parent_key,disk_name,target_path,file_size,content_time,create_time,downloaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "+
+ "ON CONFLICT(episode_id) DO UPDATE SET task_name=excluded.task_name,source_task_name=excluded.source_task_name,job_id=excluded.job_id,sn_code=excluded.sn_code,parent_key=excluded.parent_key,disk_name=excluded.disk_name,target_path=excluded.target_path,file_size=excluded.file_size,content_time=excluded.content_time,create_time=excluded.create_time,downloaded_at=excluded.downloaded_at",
+ e.ID,e.Task,e.SourceTask,e.JobID,e.SN,e.ParentKey,d.Name,final,e.Size,e.Duration,e.Created,time.Now().UTC().Format(time.RFC3339Nano));return err
+}}
+func(a *App)record(e Episode,d DiskConfig,final string)error{return recordWithExec(a.db,e,d,final)}
+func(a *App)recordAndSet(e Episode,d DiskConfig,final string)error{
+ tx,err:=a.db.Begin()
+ if err!=nil{return err}
+ defer tx.Rollback()
+ if err=recordWithExec(tx,e,d,final);err!=nil{return fmt.Errorf("写入完成台账失败: %w",err)}
+ if err=setWithExec(tx,e,d,final,"","completed","");err!=nil{return fmt.Errorf("更新下载完成状态失败: %w",err)}
+ if err=tx.Commit();err!=nil{return fmt.Errorf("提交下载完成记录失败: %w",err)}
+ return nil
 }
 func nullableTime(ok bool,v string)any{if ok{return v};return nil}
 func ensureColumn(db *sql.DB,table,column,typ string)error{
@@ -1052,11 +1067,7 @@ func(a *App)stats(task string)(float64,int,error){
 }
 func(a *App)assign(task,disk string)error{tx,err:=a.db.Begin();if err!=nil{return err};defer tx.Rollback();if _,err=tx.Exec("DELETE FROM task_disk_assignments WHERE task_name=?",task);err!=nil{return err};if _,err=tx.Exec("INSERT INTO task_disk_assignments(task_name,disk_name,last_used_at) VALUES(?,?,?)",task,disk,time.Now().UTC().Format(time.RFC3339Nano));err!=nil{return err};return tx.Commit()}
 func(a *App)assigned(task string)string{var d string;_=a.db.QueryRow("SELECT disk_name FROM task_disk_assignments WHERE task_name=? ORDER BY last_used_at DESC LIMIT 1",task).Scan(&d);return d}
-func(a *App)record(e Episode,d DiskConfig,final string)error{
- _,err:=a.db.Exec("INSERT INTO downloaded_episodes(episode_id,task_name,source_task_name,job_id,sn_code,parent_key,disk_name,target_path,file_size,content_time,create_time,downloaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "+
- "ON CONFLICT(episode_id) DO UPDATE SET task_name=excluded.task_name,source_task_name=excluded.source_task_name,job_id=excluded.job_id,sn_code=excluded.sn_code,parent_key=excluded.parent_key,disk_name=excluded.disk_name,target_path=excluded.target_path,file_size=excluded.file_size,content_time=excluded.content_time,create_time=excluded.create_time,downloaded_at=excluded.downloaded_at",
- e.ID,e.Task,e.SourceTask,e.JobID,e.SN,e.ParentKey,d.Name,final,e.Size,e.Duration,e.Created,time.Now().UTC().Format(time.RFC3339Nano));return err
-}
+
 func(a *App)fetch()([]Episode,error){
  names:=[]string{};aliases:=map[string]string{};for _,t:=range a.cfg.Tasks{names=append(names,t.Name);for _,x:=range t.Aliases{names=append(names,x);aliases[x]=t.Name}}
  pg:=postgresDSN(a.cfg)
@@ -1116,8 +1127,7 @@ func(a *App)syncLocalCopies(groups map[string][]Episode)error{
     stateErr:=a.db.QueryRow("SELECT status,target_path,disk_name FROM downloads WHERE episode_id=?",ep.ID).Scan(&state,&statePath,&stateDisk)
     if stateErr==nil&&state=="completed"&&statePath.Valid&&a.completedPath(statePath.String){
      d:=DiskConfig{Name:stateDisk.String}
-     if err:=a.record(ep,d,statePath.String);err!=nil{return err}
-     if err:=a.set(ep,d,statePath.String,"","completed","");err!=nil{return err}
+     if err:=a.recordAndSet(ep,d,statePath.String);err!=nil{return err}
     }
    }
    diskName,err:=findExistingTaskDisk(a.cfg.DataVersion,task,a.cfg.Disks,[]Episode{ep},a.cfg.RequireMCAP,a.cfg.MCAPPattern)
@@ -1129,8 +1139,7 @@ func(a *App)syncLocalCopies(groups map[string][]Episode)error{
    if pinned!=""&&pinned!=diskName{return fmt.Errorf("任务 %s 固定在磁盘 %s，但 episode %s 已存在于 %s",task.Name,pinned,ep.ID,diskName)}
    if pinned==""{if err:=a.assign(task.Name,diskName);err!=nil{return err}}
    final,_:=episodePaths(a.cfg.DataVersion,task,*chosen,ep.ParentKey)
-   if err:=a.record(ep,*chosen,final);err!=nil{return err}
-   if err:=a.set(ep,*chosen,final,"","completed","");err!=nil{return err}
+   if err:=a.recordAndSet(ep,*chosen,final);err!=nil{return err}
   }
  }
  return nil
@@ -1576,8 +1585,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
   pinned:=a.assigned(t.Name)
   if pinned!=""&&pinned!=existing.Name{return fmt.Errorf("任务 %s 固定在磁盘 %s，但 episode 已存在于 %s",t.Name,pinned,existing.Name)}
   if pinned==""{if err:=a.assign(t.Name,existing.Name);err!=nil{return err}}
-  if err:=a.record(e,*existing,existingPath);err!=nil{return err}
-  return a.set(e,*existing,existingPath,"","completed","")
+  return a.recordAndSet(e,*existing,existingPath)
  }
  final,partial:=episodePaths(a.cfg.DataVersion,t,d,e.ParentKey)
  if err:=os.MkdirAll(partial,0755);err!=nil{return a.fail(e,d,final,partial,err)}
@@ -1634,7 +1642,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  if a.ctx.Err()!=nil{return a.fail(e,d,final,partial,a.ctx.Err())}
  if completedObjects.Load()==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
  if err:=replaceEpisodeDirectory(partial,final);err!=nil{return a.fail(e,d,final,partial,err)};if *a.cfg.Fsync{syncDirectory(filepath.Dir(final))}
- if err:=a.record(e,d,final);err!=nil{return err};return a.set(e,d,final,"","completed","")
+ return a.recordAndSet(e,d,final)
 }
 func sweepPartial(root,parent string,objects []minio.ObjectInfo)error{
  info,err:=os.Lstat(root);if err!=nil{return err};if info.Mode()&os.ModeSymlink!=0||!info.IsDir(){return fmt.Errorf("暂存路径不是普通目录: %s",root)}
