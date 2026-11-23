@@ -104,7 +104,7 @@ func main(){
  if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil)}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH);a.saveLastRun("finished",nil)}
 }
 
-type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time}
+type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time}
 func serveWeb(c Config,host string,port int)error{
  if port<1||port>65535{return errors.New("web-port 必须在 1 到 65535 之间")}
  if err:=os.MkdirAll(filepath.Dir(c.StateDB),0755);err!=nil{return err}
@@ -734,8 +734,20 @@ func(a *WebAPI)config(w http.ResponseWriter,r *http.Request) {
   "platform":platform,"running":running,
  })
 }
+func(a *WebAPI)setChildProcess(pid int32,created float64){
+ a.childMu.Lock()
+ a.childPID=pid
+ a.childCreated=created
+ a.childMu.Unlock()
+}
+func(a *WebAPI)childProcessSnapshot()(int32,float64){
+ a.childMu.RLock()
+ defer a.childMu.RUnlock()
+ return a.childPID,a.childCreated
+}
 func(a *WebAPI)activeDownloader()(int,bool,bool){
- if a.childPID>0{if proc,err:=process.NewProcess(a.childPID);err==nil{alive,_:=proc.IsRunning();if alive{created,err:=proc.CreateTime();if err!=nil||a.childCreated==0||math.Abs(float64(created)/1000-a.childCreated)<2{return int(a.childPID),true,true}}}}
+ childPID,childCreated:=a.childProcessSnapshot()
+ if childPID>0{if proc,err:=process.NewProcess(childPID);err==nil{alive,_:=proc.IsRunning();if alive{created,err:=proc.CreateTime();if err!=nil||childCreated==0||math.Abs(float64(created)/1000-childCreated)<2{return int(childPID),true,true}}}}
  raw,err:=os.ReadFile(a.cfg.PIDFile);if err!=nil{return 0,false,false}
  var record pidRecord;if json.Unmarshal(raw,&record)!=nil||record.PID<=0{return 0,false,false}
  proc,err:=process.NewProcess(int32(record.PID));if err!=nil{return 0,false,false};alive,err:=proc.IsRunning();if err!=nil||!alive{return 0,false,false}
@@ -757,7 +769,7 @@ func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
  args:=[]string{"--config",a.configFile,"--mode",a.mode,"--max-rounds",strconv.Itoa(body.MaxRounds),"--preserve-stop-request"};if body.RecheckMissing{args=append(args,"--recheck-missing")}
  cmd:=exec.Command(executable,args...);configureDetached(cmd);cmd.Stdout=logFile;cmd.Stderr=logFile;cmd.Stdin=nil
  if err=cmd.Start();err!=nil{logFile.Close();writeJSONStatus(w,500,map[string]any{"error":"启动下载器失败: "+err.Error()});return}
- _=logFile.Close();go func(){_=cmd.Wait()}();a.childPID=int32(cmd.Process.Pid);if proc,e:=process.NewProcess(a.childPID);e==nil{if ms,e:=proc.CreateTime();e==nil{a.childCreated=float64(ms)/1000}}
+ _=logFile.Close();go func(){_=cmd.Wait()}();created:=float64(0);if proc,e:=process.NewProcess(int32(cmd.Process.Pid));e==nil{if ms,e:=proc.CreateTime();e==nil{created=float64(ms)/1000}};a.setChildProcess(int32(cmd.Process.Pid),created)
  writeJSON(w,map[string]any{"ok":true,"pid":cmd.Process.Pid})
 }
 func(a *WebAPI)stop(w http.ResponseWriter,r *http.Request){
