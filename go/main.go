@@ -197,9 +197,8 @@ type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode
 func(a *WebAPI)completedPath(path string)bool{return a.cfg.TrustCompletedRecords||completedEpisodeDir(path,a.cfg.RequireMCAP,a.cfg.MCAPPattern)}
 func serveWeb(c Config,host string,port int)error{
  if port<1||port>65535{return errors.New("web-port 必须在 1 到 65535 之间")}
- if err:=os.MkdirAll(filepath.Dir(c.StateDB),0755);err!=nil{return err}
  state,err:=sql.Open("sqlite",c.StateDB);if err!=nil{return err};state.SetMaxOpenConns(4);_,_=state.Exec("PRAGMA busy_timeout=30000");defer state.Close()
- configFile,_:=filepath.Abs(*configPath);api:=&WebAPI{cfg:c,db:state,configFile:configFile,mode:*mode}
+ api:=&WebAPI{cfg:c,db:state,mode:*mode}
  if c.ConfigDB!=""{
   db,e:=sql.Open("sqlite",c.ConfigDB);if e!=nil{return e};defer db.Close()
   if e=db.QueryRow("SELECT CASE WHEN value='null' THEN '' ELSE trim(value,char(34)) END FROM settings WHERE key='web.token_hash'").Scan(&api.tokenHash);e!=nil&&e!=sql.ErrNoRows{return e}
@@ -207,7 +206,7 @@ func serveWeb(c Config,host string,port int)error{
  if !isLoopbackHost(host)&&api.tokenHash==""{return errors.New("监听非本机地址之前必须先在 Python Web 配置库设置访问口令")}
  mux:=http.NewServeMux()
  mux.HandleFunc("GET /healthz",func(w http.ResponseWriter,r *http.Request){writeJSON(w,map[string]any{"ok":true,"version":"go-dev"})})
- mux.HandleFunc("GET /",func(w http.ResponseWriter,r *http.Request){w.Header().Set("Content-Type","text/html; charset=utf-8");_,_=io.WriteString(w,"<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>MinIO Go Downloader</title><body style='font:15px system-ui;max-width:1100px;margin:40px auto;padding:0 20px'><h2>MinIO Go Downloader API</h2><p>只读 API：<a href='/api/status'>状态</a> · <a href='/api/logs'>日志</a> · <a href='/healthz'>健康检查</a></p><pre id='out'>正在读取状态…</pre><script>async function tick(){try{let r=await fetch('/api/status');document.querySelector('#out').textContent=JSON.stringify(await r.json(),null,2)}catch(e){document.querySelector('#out').textContent=String(e)}}tick();setInterval(tick,5000)</script></body></html>")})
+ mux.HandleFunc("GET /",func(w http.ResponseWriter,r *http.Request){if r.URL.Path!="/" {http.NotFound(w,r);return};w.Header().Set("Content-Type","text/html; charset=utf-8");_,_=io.WriteString(w,webUIHTML)})
  mux.HandleFunc("GET /api/plans",api.plansList)
  mux.HandleFunc("POST /api/plans",api.planCreate)
  mux.HandleFunc("GET /api/plans/{id}",api.planGet)
@@ -355,7 +354,7 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
  sampledAt:=time.Now();speedBps,etaSeconds,progressPercent:=a.updateTransferSample(sampledAt,runningBytes,expectedBytes)
  issues:=[]map[string]string{};if a.cfg.Endpoint==""||a.cfg.AccessKey==""||a.cfg.SecretKey==""{issues=append(issues,map[string]string{"page":"connection","text":"尚未配置 MinIO 连接"})};if len(a.cfg.Disks)==0{issues=append(issues,map[string]string{"page":"disks","text":"尚未配置目标磁盘"})};if len(a.cfg.Tasks)==0{issues=append(issues,map[string]string{"page":"tasks","text":"尚未配置下载任务"})}
  endpoint:=a.cfg.Endpoint;if u,e:=url.Parse(endpoint);e==nil&&u.Host!=""{endpoint=u.Scheme+"://"+u.Host}
- settings:=map[string]any{"min_free_gb":a.cfg.MinFreeGB,"writes_per_disk":a.cfg.Workers,"require_mcap":a.cfg.RequireMCAP,"mcap_pattern":a.cfg.MCAPPattern,"default_rounds":1}
+ settings:=map[string]any{"min_free_gb":a.cfg.MinFreeGB,"writes_per_disk":a.cfg.Workers,"require_mcap":a.cfg.RequireMCAP,"mcap_pattern":a.cfg.MCAPPattern,"default_rounds":a.cfg.DefaultRounds}
  writeJSON(w,map[string]any{"version":"go-dev","data_version":a.cfg.DataVersion,"downloader":state,"stop_requested":running&&isStopRequested(control["stop_requested"]),"setup_issues":issues,"minio":map[string]any{"endpoint":endpoint,"bucket":a.cfg.Bucket},"settings":settings,"last_run":last,"stale_records":staleRecords,"running_episodes":runningEpisodes,"transfer_progress":map[string]any{"downloaded_bytes":runningBytes,"expected_bytes":expectedBytes,"remaining_bytes":maxInt64(expectedBytes-runningBytes,0),"speed_bytes_per_second":math.Round(speedBps),"eta_seconds":etaSeconds,"progress_percent":progressPercent},"disks":disks,"scenes":scenes})
 }
 func webConfigSchema() []map[string]any {
@@ -843,7 +842,7 @@ func(a *WebAPI)config(w http.ResponseWriter,r *http.Request) {
  writeJSON(w,map[string]any{
   "schema":schema,"groups":groups,"values":values,"secrets_set":secretsSet,
   "tasks":map[string]any{"data_version":a.cfg.DataVersion,"scenes":scenes},"disks":a.cfg.Disks,
-  "token_set":tokenSet,"paths":map[string]any{"config_db":a.cfg.ConfigDB,"state_db":a.cfg.StateDB,"log_dir":a.cfg.LogDir},
+  "token_set":tokenSet,"paths":map[string]any{"sqlite_db":a.cfg.StateDB},
   "platform":platform,"running":running,
  })
 }
@@ -860,25 +859,26 @@ func(a *WebAPI)childProcessSnapshot()(int32,float64){
 }
 func(a *WebAPI)activeDownloader()(int,bool,bool){
  childPID,childCreated:=a.childProcessSnapshot()
- if childPID>0&&childCreated>0{
-  if proc,err:=process.NewProcess(childPID);err==nil{
-   alive,aliveErr:=proc.IsRunning()
-   if aliveErr==nil&&alive{
-    created,createdErr:=proc.CreateTime()
-    if createdErr==nil&&math.Abs(float64(created)/1000-childCreated)<2{return int(childPID),true,true}
-   }
-  }
- }
- raw,err:=os.ReadFile(a.cfg.PIDFile);if err!=nil{return 0,false,false}
- var record pidRecord;if json.Unmarshal(raw,&record)!=nil||record.PID<=0{return 0,false,false}
- proc,err:=process.NewProcess(int32(record.PID));if err!=nil{return 0,false,false}
- alive,err:=proc.IsRunning();if err!=nil||!alive{return 0,false,false}
- if record.Created>0{
-  created,err:=proc.CreateTime()
-  if err!=nil||math.Abs(float64(created)/1000-record.Created)>=2{return 0,false,false}
- }
- return record.PID,true,false
+ if childPID>0&&processIdentity(int(childPID),childCreated){return int(childPID),true,true}
+ var pid int;var created float64
+ if err:=a.db.QueryRow("SELECT pid,created FROM process_state WHERE id=1").Scan(&pid,&created);err!=nil{return 0,false,false}
+ if processIdentity(pid,created){return pid,true,false}
+ _,_=a.db.Exec("DELETE FROM process_state WHERE id=1 AND pid=?",pid)
+ return 0,false,false
 }
+func(a *App)registerProcess()error{
+ if _,err:=a.db.Exec("CREATE TABLE IF NOT EXISTS process_state(id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,created REAL NOT NULL,mode TEXT NOT NULL,updated_at TEXT NOT NULL)");err!=nil{return err}
+ var oldPID int;var oldCreated float64
+ err:=a.db.QueryRow("SELECT pid,created FROM process_state WHERE id=1").Scan(&oldPID,&oldCreated)
+ if err==nil&&processIdentity(oldPID,oldCreated){return fmt.Errorf("检测到下载进程已运行（PID %d）",oldPID)}
+ if err!=nil&&err!=sql.ErrNoRows{return err}
+ created:=float64(time.Now().UnixNano())/1e9
+ if proc,e:=process.NewProcess(int32(os.Getpid()));e==nil{if ms,e:=proc.CreateTime();e==nil&&ms>0{created=float64(ms)/1000}}
+ _,err=a.db.Exec("INSERT INTO process_state(id,pid,created,mode,updated_at) VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET pid=excluded.pid,created=excluded.created,mode=excluded.mode,updated_at=excluded.updated_at",os.Getpid(),created,a.mode,controlTimestamp())
+ return err
+}
+func(a *App)unregisterProcess(){if a.db!=nil{_,_=a.db.Exec("DELETE FROM process_state WHERE id=1 AND pid=?",os.Getpid())}}
+
 func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
  var body struct{Mode string `json:"mode"`;MaxRounds int `json:"max_rounds"`;RecheckMissing bool `json:"recheck_missing"`}
  if err:=json.NewDecoder(io.LimitReader(r.Body,4096)).Decode(&body);err!=nil&&err!=io.EOF{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
@@ -887,14 +887,13 @@ func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
  if len(a.cfg.Tasks)==0||len(a.cfg.Disks)==0||a.cfg.Endpoint==""||a.cfg.AccessKey==""||a.cfg.SecretKey==""||a.cfg.PGHost==""{writeJSONStatus(w,400,map[string]any{"error":"配置未补全：需要 MinIO、PostgreSQL、任务和磁盘配置"});return}
  a.runMu.Lock();defer a.runMu.Unlock()
  if pid,running,_:=a.activeDownloader();running{writeJSONStatus(w,409,map[string]any{"error":fmt.Sprintf("下载器已在运行（PID %d）",pid)});return}
- if err:=os.MkdirAll(a.cfg.LogDir,0755);err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return}
- logFile,err:=os.OpenFile(filepath.Join(a.cfg.LogDir,"minio_task_downloader.log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0644);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"打开日志失败: "+err.Error()});return}
- executable,err:=os.Executable();if err!=nil{logFile.Close();writeJSONStatus(w,500,map[string]any{"error":"定位下载器程序失败: "+err.Error()});return}
+ executable,err:=os.Executable();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"定位下载器程序失败: "+err.Error()});return}
  if err:=clearStopRequestDB(a.cfg.StateDB);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"清理旧暂停请求失败: "+err.Error()});return}
- args:=[]string{"--config",a.configFile,"--mode",a.mode,"--max-rounds",strconv.Itoa(body.MaxRounds),"--preserve-stop-request"};if body.RecheckMissing{args=append(args,"--recheck-missing")}
- cmd:=exec.Command(executable,args...);configureDetached(cmd);cmd.Stdout=logFile;cmd.Stderr=logFile;cmd.Stdin=nil
- if err=cmd.Start();err!=nil{logFile.Close();writeJSONStatus(w,500,map[string]any{"error":"启动下载器失败: "+err.Error()});return}
- _=logFile.Close();go func(){_=cmd.Wait()}();created:=float64(0);if proc,e:=process.NewProcess(int32(cmd.Process.Pid));e==nil{if ms,e:=proc.CreateTime();e==nil{created=float64(ms)/1000}};a.setChildProcess(int32(cmd.Process.Pid),created)
+ dbName,err:=filepath.Abs(a.cfg.StateDB);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"解析 SQLite 路径失败: "+err.Error()});return}
+ args:=[]string{"--worker","--db",dbName,"--mode",a.mode,"--max-rounds",strconv.Itoa(body.MaxRounds),"--preserve-stop-request"};if body.RecheckMissing{args=append(args,"--recheck-missing")}
+ cmd:=exec.Command(executable,args...);configureDetached(cmd);cmd.Stdout=os.Stdout;cmd.Stderr=os.Stdout;cmd.Stdin=nil
+ if err=cmd.Start();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"启动下载器失败: "+err.Error()});return}
+ go func(){_=cmd.Wait()}();created:=float64(0);if proc,e:=process.NewProcess(int32(cmd.Process.Pid));e==nil{if ms,e:=proc.CreateTime();e==nil{created=float64(ms)/1000}};a.setChildProcess(int32(cmd.Process.Pid),created)
  writeJSON(w,map[string]any{"ok":true,"pid":cmd.Process.Pid})
 }
 func(a *WebAPI)stop(w http.ResponseWriter,r *http.Request){
@@ -914,12 +913,15 @@ func(a *WebAPI)episodes(w http.ResponseWriter,r *http.Request){
  writeJSON(w,map[string]any{"episodes":episodes})
 }
 func(a *WebAPI)logs(w http.ResponseWriter,r *http.Request){
- name:=filepath.Join(a.cfg.LogDir,"minio_task_downloader.log");info,err:=os.Stat(name);if err!=nil{writeJSON(w,map[string]any{"text":"","offset":0,"reset":true});return};size:=info.Size()
- offset,err:=strconv.ParseInt(r.URL.Query().Get("offset"),10,64);initial:=err!=nil||offset<0||offset>size;start:=offset;if initial{start=size-96*1024;if start<0{start=0}}
- file,err:=os.Open(name);if err!=nil{writeJSON(w,map[string]any{"text":"","offset":0,"reset":true});return};defer file.Close();_,_=file.Seek(start,io.SeekStart)
- chunk,_:=io.ReadAll(io.LimitReader(file,512*1024));if initial&&start>0{if i:=bytes.IndexByte(chunk,'\n');i>=0{chunk=chunk[i+1:];start=size-int64(len(chunk))}}
- cut:=bytes.LastIndexByte(chunk,'\n')+1;if cut<0{cut=0};chunk=chunk[:cut]
- writeJSON(w,map[string]any{"text":string(chunk),"offset":start+int64(len(chunk)),"reset":initial})
+ offset,err:=strconv.ParseInt(r.URL.Query().Get("offset"),10,64);initial:=err!=nil||offset<0
+ if initial{offset=0}
+ query:="SELECT id,message FROM runtime_logs WHERE id>? ORDER BY id LIMIT 500"
+ args:=[]any{offset}
+ if initial{query="SELECT id,message FROM (SELECT id,message FROM runtime_logs ORDER BY id DESC LIMIT 500) ORDER BY id"}
+ rows,err:=a.db.Query(query,args...);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取 SQLite 日志失败: "+err.Error()});return};defer rows.Close()
+ lines:=[]string{};next:=offset
+ for rows.Next(){var id int64;var message string;if rows.Scan(&id,&message)==nil{lines=append(lines,message);if id>next{next=id}}}
+ writeJSON(w,map[string]any{"text":strings.Join(lines,"\n"),"offset":next,"reset":initial})
 }
 
 func loadConfigDB(c *Config,runMode string)error{
@@ -944,8 +946,8 @@ func loadConfigDB(c *Config,runMode string)error{
  // limited to one connection; keeping taskRows open here would block Query below.
  aliases:=map[int64][]string{};aliasRows,err:=db.Query("SELECT task_id,alias FROM task_aliases ORDER BY task_id,position");if err!=nil{return err};for aliasRows.Next(){var id int64;var alias string;if err=aliasRows.Scan(&id,&alias);err!=nil{aliasRows.Close();return err};aliases[id]=append(aliases[id],alias)};if err=aliasRows.Err();err!=nil{aliasRows.Close();return err};if err=aliasRows.Close();err!=nil{return err}
  taskRows,err:=db.Query("SELECT s.name,t.name,t.target_count,t.directory,t.id,t.tags FROM tasks t JOIN scenes s ON s.id=t.scene_id ORDER BY s.position,t.position");if err!=nil{return err}
- tasks:=[]Task{};for taskRows.Next(){var t Task;var id int64;var tags string;if err=taskRows.Scan(&t.Scene,&t.Name,&t.TargetCount,&t.Dir,&id,&tags);err!=nil{taskRows.Close();return err};t.Aliases=aliases[id];if tags!=""{_ = json.Unmarshal([]byte(tags),&t.Tags)};tasks=append(tasks,t)};if err=taskRows.Err();err!=nil{taskRows.Close();return err};if err=taskRows.Close();err!=nil{return err};if len(tasks)==0{return errors.New("SQLite 配置库中没有任务")};c.Tasks=tasks
- diskRows,err:=db.Query("SELECT name,path,mountpoint FROM disks ORDER BY position");if err!=nil{return err};disks:=[]DiskConfig{};for diskRows.Next(){var d DiskConfig;if err=diskRows.Scan(&d.Name,&d.Path,&d.Mountpoint);err!=nil{diskRows.Close();return err};disks=append(disks,d)};if err=diskRows.Err();err!=nil{diskRows.Close();return err};if err=diskRows.Close();err!=nil{return err};if len(disks)==0{return errors.New("SQLite 配置库中没有目标磁盘")};c.Disks=disks
+ tasks:=[]Task{};for taskRows.Next(){var t Task;var id int64;var tags string;if err=taskRows.Scan(&t.Scene,&t.Name,&t.TargetCount,&t.Dir,&id,&tags);err!=nil{taskRows.Close();return err};t.Aliases=aliases[id];if tags!=""{_ = json.Unmarshal([]byte(tags),&t.Tags)};tasks=append(tasks,t)};if err=taskRows.Err();err!=nil{taskRows.Close();return err};if err=taskRows.Close();err!=nil{return err};c.Tasks=tasks
+ diskRows,err:=db.Query("SELECT name,path,mountpoint FROM disks ORDER BY position");if err!=nil{return err};disks:=[]DiskConfig{};for diskRows.Next(){var d DiskConfig;if err=diskRows.Scan(&d.Name,&d.Path,&d.Mountpoint);err!=nil{diskRows.Close();return err};disks=append(disks,d)};if err=diskRows.Err();err!=nil{diskRows.Close();return err};if err=diskRows.Close();err!=nil{return err};c.Disks=disks
  c.Mode="count";c.fromConfigDB=true;log.Printf("已从 SQLite 配置库加载配置: %s（任务 %d 个，磁盘 %d 块）",c.ConfigDB,len(c.Tasks),len(c.Disks));return nil
 }
 func(c *Config)normalize(m string)error{
@@ -1073,7 +1075,7 @@ func(a *App)open()error{
  p,e:=sql.Open("pgx",pg);if e!=nil{return e};defer p.Close();connectTimeout:=a.cfg.ConnectTimeout;if connectTimeout<=0{connectTimeout=10};ctx,cancel:=context.WithTimeout(a.ctx,time.Duration(connectTimeout)*time.Second);defer cancel();if e=p.PingContext(ctx);e!=nil{return fmt.Errorf("PostgreSQL 连接失败: %w",e)}
  ok,e:=mc.BucketExists(ctx,a.cfg.Bucket);if e!=nil{return e};if !ok{return fmt.Errorf("MinIO bucket 不存在: %s",a.cfg.Bucket)}
  a.db,e=sql.Open("sqlite",a.cfg.StateDB);if e!=nil{return e};a.db.SetMaxOpenConns(1)
- _,e=a.db.Exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=30000;"+
+ _,e=a.db.Exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000;"+
  "CREATE TABLE IF NOT EXISTS downloads(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,parent_key TEXT,disk_name TEXT,target_path TEXT,partial_path TEXT,expected_bytes INTEGER,status TEXT NOT NULL DEFAULT 'pending',error TEXT,updated_at TEXT NOT NULL);"+
  "CREATE INDEX IF NOT EXISTS idx_download_task_status ON downloads(task_name,status);"+
  "CREATE TABLE IF NOT EXISTS task_disk_assignments(task_name TEXT NOT NULL,disk_name TEXT NOT NULL,last_used_at TEXT NOT NULL,PRIMARY KEY(task_name,disk_name));"+
@@ -1083,6 +1085,7 @@ func(a *App)open()error{
  if e==nil{
   if e=ensureColumn(a.db,"downloads","started_at","TEXT");e!=nil{return e}
   if e=ensureColumn(a.db,"downloads","completed_at","TEXT");e!=nil{return e}
+  if _,e=a.db.Exec("CREATE TABLE IF NOT EXISTS runtime_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,message TEXT NOT NULL); CREATE TABLE IF NOT EXISTS process_state(id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,created REAL NOT NULL,mode TEXT NOT NULL,updated_at TEXT NOT NULL)");e!=nil{return e}
   log.Printf("MinIO=%s bucket=%s；PostgreSQL=%s:%d/%s；SQLite=%s",a.cfg.Endpoint,a.cfg.Bucket,a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.StateDB)
  };return e
 }
@@ -1505,9 +1508,7 @@ func acquireNamedDiskLocks(keys []string,lockDir string)(func(),error) {
  return func(){for i:=len(locks)-1;i>=0;i--{_ = locks[i].Unlock()}},nil
 }
 func(a *App)downloadSelected(sel map[string][]Episode)error{
- keys,lockErr:=diskLockKeys(a.cfg.Disks);if lockErr!=nil{return lockErr}
- unlockDiskLocks,lockErr:=acquireNamedDiskLocks(keys,diskLockDirectory(a.cfg));if lockErr!=nil{return lockErr}
- defer unlockDiskLocks()
+ // A SQLite process lease prevents concurrent downloader instances; no lock files are created.
  loads:=map[string]int{};existing:=map[string]*DiskConfig{};folderDisk:=map[string]*DiskConfig{}
  // Existing task footprints (including .partial directories) are authoritative.
  // Stale SQLite assignments without any on-disk data are deliberately ignored.
