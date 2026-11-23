@@ -151,3 +151,16 @@ func TestNormalizeParentKey(t *testing.T) {
 		}
 	}
 }
+
+func TestAddSpaceReservations(t *testing.T) {
+	got, ok := addSpaceReservations(100, 200, 30)
+	if !ok || got != 330 {
+		t.Fatalf("expected 330 bytes required, got=%d ok=%v", got, ok)
+	}
+	if _, ok := addSpaceReservations(^uint64(0)-1, 2, 0); ok {
+		t.Fatal("expected reservation overflow to be rejected")
+	}
+	if _, ok := addSpaceReservations(^uint64(0)-10, 1, 10); ok {
+		t.Fatal("expected minimum-free overflow to be rejected")
+	}
+}
