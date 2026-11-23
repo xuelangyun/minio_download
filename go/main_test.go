@@ -935,3 +935,18 @@ func TestWebConfigTasksPersistsAndUpdatesRuntime(t *testing.T) {
 	if err := db.QueryRow("SELECT COUNT(*) FROM tasks WHERE name='邮件归档'").Scan(&count); err != nil { t.Fatal(err) }
 	if count != 1 { t.Fatalf("expected persisted task, got %d", count) }
 }
+
+func TestWebDiskCheckDoesNotWriteThroughMissingMount(t *testing.T) {
+	api := newPlanTestAPI(t)
+	root := t.TempDir()
+	req := httptest.NewRequest(http.MethodPost, "/api/config/disks/check", strings.NewReader(`{"disks":[{"name":"disk1","path":"`+filepath.ToSlash(filepath.Join(root,"data"))+`","mountpoint":"`+filepath.ToSlash(root)+`"}]}`))
+	rec := httptest.NewRecorder()
+	api.configDisksCheck(rec, req)
+	if rec.Code != http.StatusOK { t.Fatalf("disk check failed: %d %s",rec.Code,rec.Body.String()) }
+	var response map[string]any
+	if err:=json.Unmarshal(rec.Body.Bytes(),&response);err!=nil{t.Fatal(err)}
+	results:=response["results"].([]any)
+	if len(results)!=1 || results[0].(map[string]any)["ok"]!=false { t.Fatalf("expected unmounted disk to fail: %#v",response) }
+	entries,err:=os.ReadDir(root);if err!=nil{t.Fatal(err)}
+	if len(entries)!=0{t.Fatalf("disk check wrote into unmounted parent directory: %#v",entries)}
+}
