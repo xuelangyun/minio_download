@@ -236,5 +236,7 @@
   "file_workers": 4,
   "lock_file": "minio_download.lock",
   "mode": "duration",
-  "verify_md5": true
+  "verify_md5": true,
+  "file_retries": 5,
+  "retry_delay_seconds": 1
 }
