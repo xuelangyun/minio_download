@@ -212,7 +212,7 @@ func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,e
  for _,task:=range a.cfg.Tasks{
   candidates:=groups[task.Name];if len(candidates)==0{continue}
   selected:=make([]Episode,0)
-  todo:=make([]Episode,0,len(candidates))
+  todo:=make([]Episode,0,len(candidates));skipped:=0
   for _,ep:=range candidates{
    if a.completed(ep.ID){selected=append(selected,ep);continue}
    if ep.Size<=0{d:=a.cfg.Disks[0];if err:=a.set(ep,d,"","","invalid_size","file_size 无效");err!=nil{return nil,err};skipped++;continue}
@@ -223,7 +223,7 @@ func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,e
   }
   _,downloaded:=a.stats(task.Name);gap:=task.TargetCount-downloaded
   if gap<=0{validGroups[task.Name]=selected;continue}
-  chosenCount:=0;skipped:=0
+  chosenCount:=0
   for pos:=0;pos<len(todo)&&chosenCount<gap;{
    batchSize:=gap-chosenCount;if batchSize>len(todo)-pos{batchSize=len(todo)-pos}
    batch:=todo[pos:pos+batchSize];pos+=batchSize
