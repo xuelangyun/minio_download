@@ -4,6 +4,7 @@ import (
  "context"
  "crypto/tls"
  "crypto/hmac"
+ "crypto/rand"
  "crypto/sha256"
  "encoding/hex"
  "bytes"
@@ -122,6 +123,7 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("GET /api/plans/{id}/export",api.planExport)
  mux.HandleFunc("POST /api/plans/import",api.planImport)
  mux.HandleFunc("POST /api/plans/{id}/apply",api.planApply)
+ mux.HandleFunc("PUT /api/auth/token",api.authToken)
  mux.HandleFunc("PUT /api/config/settings",api.configSettings)
  mux.HandleFunc("POST /api/config/test",api.configTest)
  mux.HandleFunc("PUT /api/config/tasks",api.configTasks)
@@ -136,7 +138,7 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("POST /api/stop",api.stop)
  handler:=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
   w.Header().Set("X-Content-Type-Options","nosniff");w.Header().Set("X-Frame-Options","DENY");w.Header().Set("Referrer-Policy","no-referrer")
-  if strings.HasPrefix(r.URL.Path,"/api/"){w.Header().Set("Cache-Control","no-store");if r.Method=="POST"&&!strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"),";")[0]),"application/json"){writeJSONStatus(w,415,map[string]any{"error":"写操作必须使用 Content-Type: application/json"});return};if !api.authorized(r){writeJSONStatus(w,401,map[string]any{"error":"口令缺失或错误"});return}}
+  if strings.HasPrefix(r.URL.Path,"/api/"){w.Header().Set("Cache-Control","no-store");if (r.Method=="POST"||r.Method=="PUT"||r.Method=="DELETE")&&!strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"),";")[0]),"application/json"){writeJSONStatus(w,415,map[string]any{"error":"写操作必须使用 Content-Type: application/json"});return};if !api.authorized(r){writeJSONStatus(w,401,map[string]any{"error":"口令缺失或错误"});return}}
   mux.ServeHTTP(w,r)
  })
  addr:=net.JoinHostPort(host,strconv.Itoa(port));log.Printf("Go Web API listening on http://%s",addr)
@@ -170,6 +172,37 @@ func(a *WebAPI)authorized(r *http.Request)bool{
  if valid{delete(a.failures,addr);delete(a.lockouts,addr);return true}
  if supplied!=""{a.failures[addr]=append(attempts,now);if len(a.failures[addr])>=8{a.lockouts[addr]=now.Add(60*time.Second)}}
  return false
+}
+func(a *WebAPI)authToken(w http.ResponseWriter,r *http.Request){
+ if strings.TrimSpace(a.cfg.ConfigDB)==""{writeJSONStatus(w,400,map[string]any{"error":"未配置 SQLite 配置库，不能管理访问口令"});return}
+ var body struct{Action string `json:"action"`;Token string `json:"token"`}
+ if err:=json.NewDecoder(io.LimitReader(r.Body,16<<10)).Decode(&body);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
+ var encoded string
+ switch body.Action{
+ case "set":
+  if len(body.Token)<12||len(body.Token)>1024{writeJSONStatus(w,400,map[string]any{"error":"新口令长度必须为 12 到 1024 字节"});return}
+  hash,err:=newTokenHash(body.Token);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"生成口令摘要失败"});return}
+  raw,err:=json.Marshal(hash);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"编码口令摘要失败"});return};encoded=string(raw)
+ case "clear":
+  if body.Token!=""{writeJSONStatus(w,400,map[string]any{"error":"clear 操作不接受 token 字段"});return}
+  encoded="null"
+ default:
+  writeJSONStatus(w,400,map[string]any{"error":"action 只能是 set 或 clear"});return
+ }
+ db,err:=sql.Open("sqlite",a.cfg.ConfigDB);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"打开配置库失败"});return};defer db.Close();db.SetMaxOpenConns(1)
+ if _,err=db.Exec("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)");err!=nil{writeJSONStatus(w,500,map[string]any{"error":"初始化设置表失败"});return}
+ tx,err:=db.Begin();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"开始口令更新事务失败"});return};defer tx.Rollback()
+ if _,err=tx.Exec("INSERT INTO settings(key,value,updated_at) VALUES('web.token_hash',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",encoded,controlTimestamp());err!=nil{writeJSONStatus(w,500,map[string]any{"error":"保存口令摘要失败"});return}
+ if err=tx.Commit();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"提交口令更新失败"});return}
+ if body.Action=="clear"{a.tokenHash=""}else{var hash string;if err=json.Unmarshal([]byte(encoded),&hash);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取口令摘要失败"});return};a.tokenHash=hash}
+ a.authMu.Lock();a.failures=map[string][]time.Time{};a.lockouts=map[string]time.Time{};a.authMu.Unlock()
+ writeJSON(w,map[string]any{"ok":true,"token_set":a.tokenHash!="","action":body.Action})
+}
+func newTokenHash(token string)(string,error){
+ salt:=make([]byte,16);if _,err:=rand.Read(salt);err!=nil{return "",err}
+ const iterations=120000
+ digest:=pbkdf2SHA256([]byte(token),salt,iterations,32)
+ return fmt.Sprintf("pbkdf2_sha256$%d$%s$%s",iterations,hex.EncodeToString(salt),hex.EncodeToString(digest)),nil
 }
 func pbkdf2SHA256(password,salt []byte,iterations,keyLen int)[]byte{
  hLen:=sha256.Size;blocks:=(keyLen+hLen-1)/hLen;out:=make([]byte,0,blocks*hLen)
