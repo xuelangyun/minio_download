@@ -318,29 +318,77 @@ func validateDiskSet(disks []DiskConfig)error{
  }
  return nil
 }
+func taskRootPath(version string,t Task,d DiskConfig)string{
+ return filepath.Join(d.Path,safe(version),safe(t.Scene),safe(taskDir(t)))
+}
+func taskRootHasEntries(version string,t Task,d DiskConfig)(bool,error){
+ root:=taskRootPath(version,t,d)
+ info,err:=os.Lstat(root)
+ if os.IsNotExist(err){return false,nil};if err!=nil{return false,err}
+ if info.Mode()&os.ModeSymlink!=0||!info.IsDir(){return false,fmt.Errorf("任务目录不是普通目录: %s",root)}
+ entries,err:=os.ReadDir(root);if err!=nil{return false,err}
+ return len(entries)>0,nil
+}
+func directorySizeBytes(root string)(int64,error){
+ info,err:=os.Lstat(root);if os.IsNotExist(err){return 0,nil};if err!=nil{return 0,err}
+ if info.Mode()&os.ModeSymlink!=0||!info.IsDir(){return 0,fmt.Errorf("暂存路径不是普通目录: %s",root)}
+ var total int64
+ err=filepath.Walk(root,func(p string,info os.FileInfo,walkErr error)error{
+  if walkErr!=nil{return walkErr}
+  if info.Mode()&os.ModeSymlink!=0{return nil}
+  if info.Mode().IsRegular(){total+=info.Size()}
+  return nil
+ })
+ return total,err
+}
 func(a *App)downloadSelected(sel map[string][]Episode)error{
- loads:=map[string]int{};for _,t:=range a.cfg.Tasks{if a.assigned(t.Name)!=""{loads[a.assigned(t.Name)]++}}
- byDisk:=map[string][]batch{};waitingSpace:=false
- for _,t:=range a.cfg.Tasks{rs:=sel[t.Name];if len(rs)==0{continue};var d *DiskConfig;old:=a.assigned(t.Name)
-  for i:=range a.cfg.Disks{if old!=""&&a.cfg.Disks[i].Name==old{d=&a.cfg.Disks[i];break}}
-  if d==nil{
-   existing,err:=findExistingTaskDisk(a.cfg.DataVersion,t,a.cfg.Disks,rs);if err!=nil{return err}
-   if existing!=""{for i:=range a.cfg.Disks{if a.cfg.Disks[i].Name==existing{d=&a.cfg.Disks[i];break}}}
+ loads:=map[string]int{};existing:=map[string]*DiskConfig{}
+ // Existing task footprints (including .partial directories) are authoritative.
+ // Stale SQLite assignments without any on-disk data are deliberately ignored.
+ for _,task:=range a.cfg.Tasks{
+  var found *DiskConfig
+  for i:=range a.cfg.Disks{
+   has,err:=taskRootHasEntries(a.cfg.DataVersion,task,a.cfg.Disks[i]);if err!=nil{return err}
+   if has{if found!=nil{return fmt.Errorf("任务 %s 的目录同时存在于多块磁盘（%s、%s）",task.Name,found.Name,a.cfg.Disks[i].Name)};found=&a.cfg.Disks[i]}
   }
-  if d==nil{for i:=range a.cfg.Disks{x:=&a.cfg.Disks[i];if d==nil||loads[x.Name]<loads[d.Name]{d=x}}};if d==nil{return errors.New("没有配置目标磁盘")}
-  if err:=validateDisk(*d);err!=nil{return err}
+  if found!=nil{existing[task.Name]=found;loads[found.Name]++}
+ }
+ byDisk:=map[string][]batch{};waitingSpace:=false
+ for _,task:=range a.cfg.Tasks{
+  rows:=sel[task.Name];if len(rows)==0{continue}
+  d:=existing[task.Name]
+  if d==nil{
+   for i:=range a.cfg.Disks{candidate:=&a.cfg.Disks[i];if d==nil||loads[candidate.Name]<loads[d.Name]{d=candidate}}
+  }
+  if d==nil{return errors.New("没有配置目标磁盘")}
   if err:=os.MkdirAll(d.Path,0755);err!=nil{return err}
-  usage,err:=disk.Usage(d.Path);if err!=nil{return err};var bytes int64
-  for _,ep:=range rs{exists:=false;for _,candidate:=range a.cfg.Disks{p,_:=episodePaths(a.cfg.DataVersion,t,candidate,ep.ParentKey);if dirHasFiles(p){exists=true;break}};if !exists{bytes+=ep.Size}}
-  need:=uint64(float64(bytes)*a.cfg.SafetyFactor+a.cfg.MinFreeGB*1024*1024*1024)
+  usage,err:=disk.Usage(d.Path);if err!=nil{return err}
+  var bytes int64
+  for _,ep:=range rows{
+   final,partial:=episodePaths(a.cfg.DataVersion,task,*d,ep.ParentKey)
+   if dirHasFiles(final){continue}
+   partialBytes,sizeErr:=directorySizeBytes(partial);if sizeErr!=nil{return sizeErr}
+   remaining:=ep.Size-partialBytes;if remaining<0{remaining=0};bytes+=remaining
+  }
+  need:=uint64(math.Ceil(float64(bytes)*a.cfg.SafetyFactor)+a.cfg.MinFreeGB*1024*1024*1024)
   if usage.Free<need{
-   log.Printf("任务整体空间预检不通过，未启动: %s free=%d need=%d",t.Name,usage.Free,need)
-   for _,ep:=range rs{_=a.set(ep,*d,"","","waiting_space","磁盘剩余空间不足，任务整体未启动")}
+   log.Printf("任务整体空间预检不通过，未启动: %s disk=%s free=%d need=%d",task.Name,d.Name,usage.Free,need)
+   for _,ep:=range rows{if err:=a.set(ep,*d,"","","waiting_space","磁盘剩余空间不足，任务整体未启动");err!=nil{return err}}
    waitingSpace=true;continue
   }
-  if err:=a.assign(t.Name,d.Name);err!=nil{return fmt.Errorf("保存任务磁盘分配失败 %s: %w",t.Name,err)};loads[d.Name]++;byDisk[d.Name]=append(byDisk[d.Name],batch{t,*d,rs})
+  if err:=a.assign(task.Name,d.Name);err!=nil{return fmt.Errorf("保存任务磁盘分配失败 %s: %w",task.Name,err)}
+  if existing[task.Name]==nil{loads[d.Name]++}
+  byDisk[d.Name]=append(byDisk[d.Name],batch{task,*d,rows})
  }
- var wg sync.WaitGroup;errs:=make(chan error,len(byDisk));for _,bs:=range byDisk{bs:=bs;wg.Add(1);go func(){defer wg.Done();for _,b:=range bs{if a.ctx.Err()!=nil{return};if e:=a.downloadTask(b);e!=nil{errs<-e;return}}}()};wg.Wait();close(errs);for e:=range errs{if e!=nil{return e}};if waitingSpace{return errors.New("部分任务因磁盘空间不足未启动；请释放空间后重新运行")};return nil
+ var wg sync.WaitGroup;errs:=make(chan error,len(byDisk))
+ for _,batches:=range byDisk{
+  batches:=batches;wg.Add(1)
+  go func(){defer wg.Done();for _,b:=range batches{if a.ctx.Err()!=nil{return};if err:=a.downloadTask(b);err!=nil{errs<-err;return}}}()
+ }
+ wg.Wait();close(errs)
+ for err:=range errs{if err!=nil{return err}}
+ if waitingSpace{return errors.New("部分任务因磁盘空间不足未启动；请释放空间后重新运行")}
+ return nil
 }
 func(a *App)downloadTask(b batch)error{
  sem:=make(chan struct{},a.cfg.Workers);var wg sync.WaitGroup;var mu sync.Mutex;var first error
