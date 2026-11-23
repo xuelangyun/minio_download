@@ -287,10 +287,11 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
    if st.Size()>expected.Size{_=os.Remove(tmp)}else{offset=st.Size()}
   }else if !os.IsNotExist(err){return err}
   if offset>=expected.Size&&offset>0{_=os.Remove(tmp);offset=0}
-  if offset>0&&expected.ETag!=""{
+  if offset>0{
    current,statErr:=a.mc.StatObject(a.ctx,a.cfg.Bucket,key,minio.StatObjectOptions{})
    if statErr!=nil{if attempt<attempts{select{case <-a.ctx.Done():return a.ctx.Err();case <-time.After(time.Duration(attempt)*time.Second):};continue};return statErr}
-   if !sameETag(current.ETag,expected.ETag){_=os.Remove(tmp);return fmt.Errorf("续传前发现远端对象已变化，已丢弃旧临时文件: %s",key)}
+   changed:=current.Size!=expected.Size||(expected.ETag!=""&&!sameETag(current.ETag,expected.ETag))||(!expected.LastModified.IsZero()&&!current.LastModified.Equal(expected.LastModified))
+   if changed{_=os.Remove(tmp);return fmt.Errorf("续传前发现远端对象已变化，已丢弃旧临时文件: %s",key)}
   }
   opts:=minio.GetObjectOptions{}
   if expected.ETag!=""{if err:=opts.SetMatchETag(strings.Trim(expected.ETag,"\""));err!=nil{return err}}
@@ -323,7 +324,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
   }
   if err==nil{
    latest,statErr:=a.mc.StatObject(a.ctx,a.cfg.Bucket,key,minio.StatObjectOptions{})
-   if statErr!=nil{err=statErr}else if latest.Size!=expected.Size||!sameETag(latest.ETag,expected.ETag){err=fmt.Errorf("下载期间远端对象被修改: %s",key)}
+   if statErr!=nil{err=statErr}else if latest.Size!=expected.Size||(expected.ETag!=""&&!sameETag(latest.ETag,expected.ETag))||(!expected.LastModified.IsZero()&&!latest.LastModified.Equal(expected.LastModified)){err=fmt.Errorf("下载期间远端对象被修改: %s",key)}
   }
   if err==nil&&isMD5ETag(expected.ETag){
    var sum string
