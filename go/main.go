@@ -1449,6 +1449,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  var existing *DiskConfig;var existingPath string
  for i:=range a.cfg.Disks{
   candidate:=&a.cfg.Disks[i];candidateFinal,_:=episodePaths(a.cfg.DataVersion,t,*candidate,e.ParentKey)
+  if err:=recoverEpisodeDirectory(candidateFinal);err!=nil{return a.fail(e,*candidate,candidateFinal,"",err)}
   if pathIsDir(candidateFinal){
    if existing!=nil{return fmt.Errorf("episode %s 在多个磁盘存在正式目录，违反单副本规则",e.ID)}
    existing=candidate;existingPath=candidateFinal
@@ -1546,6 +1547,36 @@ func retryFileOperation(operation func()error,windows bool)error{
  }
  return nil
 }
+func recoverEpisodeDirectory(final string)error{
+ parent:=filepath.Dir(final)
+ entries,err:=os.ReadDir(parent)
+ if os.IsNotExist(err){return nil}
+ if err!=nil{return err}
+ prefix:="."+filepath.Base(final)+".minio-episode-backup-"
+ backups:=make([]os.FileInfo,0)
+ for _,entry:=range entries{
+  if !strings.HasPrefix(entry.Name(),prefix){continue}
+  path:=filepath.Join(parent,entry.Name())
+  info,statErr:=os.Lstat(path)
+  if statErr!=nil{return statErr}
+  if !info.IsDir()||info.Mode()&os.ModeSymlink!=0{return fmt.Errorf("episode 备份不是普通目录，拒绝自动恢复: %s",path)}
+  backups=append(backups,info)
+ }
+ if len(backups)==0{return nil}
+ _,finalErr:=os.Lstat(final)
+ if finalErr==nil{
+  for _,backup:=range backups{if err:=os.RemoveAll(filepath.Join(parent,backup.Name()));err!=nil{return fmt.Errorf("清理已发布 episode 的旧备份失败: %w",err)}}
+  return nil
+ }
+ if !os.IsNotExist(finalErr){return finalErr}
+ sort.Slice(backups,func(i,j int)bool{return backups[i].ModTime().After(backups[j].ModTime())})
+ chosen:=backups[0]
+ backupPath:=filepath.Join(parent,chosen.Name())
+ if err:=retryFileOperation(func()error{return os.Rename(backupPath,final)},runtime.GOOS=="windows");err!=nil{return fmt.Errorf("恢复崩溃前的 episode 正式目录失败: %w",err)}
+ for _,backup:=range backups[1:]{if err:=os.RemoveAll(filepath.Join(parent,backup.Name()));err!=nil{return fmt.Errorf("清理多余 episode 备份失败: %w",err)}}
+ log.Printf("检测到上次进程中断，已恢复 episode 正式目录: %s",final)
+ return nil
+}
 func replaceEpisodeDirectory(partial,final string)error{
  return replaceEpisodeDirectoryForOS(partial,final,runtime.GOOS=="windows")
 }
@@ -1556,7 +1587,7 @@ func replaceEpisodeDirectoryForOS(partial,final string,windows bool)error{
  _,statErr:=os.Lstat(final)
  if os.IsNotExist(statErr){return retryFileOperation(func()error{return os.Rename(partial,final)},windows)}
  if statErr!=nil{return statErr}
- backup,err:=os.MkdirTemp(filepath.Dir(final),".minio-episode-backup-*")
+ backup,err:=os.MkdirTemp(filepath.Dir(final),"."+filepath.Base(final)+".minio-episode-backup-*")
  if err!=nil{return err}
  if err=os.Remove(backup);err!=nil{return err}
  if err=retryFileOperation(func()error{return os.Rename(final,backup)},windows);err!=nil{return err}
