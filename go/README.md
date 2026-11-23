@@ -38,7 +38,7 @@ Go 版本按 Python 的两个 py_shell 脚本拆分了任务配置模板：
     cp config.count.example.json config.json
     ./minio-download --config config.json --mode count
 
-    # 启动只读 Web API（默认 127.0.0.1:8765）
+    # 启动 Web API（默认 127.0.0.1:8765）
     ./minio-download --config config.json --web
 
     # 若要复用 py_sample 的配置库，在 config.json 中设置 config_db 路径；
