@@ -568,3 +568,24 @@ func TestWebAPIRejectsCrossOriginWhenTokenConfigured(t *testing.T) {
 		t.Fatal("cross-origin requests must be rejected even with a valid token")
 	}
 }
+
+func TestWebAPITokenFailureLockout(t *testing.T) {
+	digest := hex.EncodeToString(pbkdf2SHA256([]byte("secret"), []byte("salt"), 1, 32))
+	api := &WebAPI{tokenHash: "pbkdf2_sha256$1$73616c74$" + digest}
+	for i := 0; i < 8; i++ {
+		request := httptest.NewRequest(http.MethodGet, "http://example.test/api/status", nil)
+		request.Host = "example.test"
+		request.RemoteAddr = "192.0.2.8:1234"
+		request.Header.Set("Authorization", "Bearer incorrect")
+		if api.authorized(request) {
+			t.Fatal("incorrect token unexpectedly accepted")
+		}
+	}
+	valid := httptest.NewRequest(http.MethodGet, "http://example.test/api/status", nil)
+	valid.Host = "example.test"
+	valid.RemoteAddr = "192.0.2.8:1234"
+	valid.Header.Set("Authorization", "Bearer secret")
+	if api.authorized(valid) {
+		t.Fatal("valid token should be temporarily blocked after eight failures")
+	}
+}
