@@ -990,29 +990,51 @@ func(a *App)open()error{
   log.Printf("MinIO=%s bucket=%s；PostgreSQL=%s:%d/%s；SQLite=%s",a.cfg.Endpoint,a.cfg.Bucket,a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.StateDB)
  };return e
 }
-type sqlExecer interface{Exec(string,...any)(sql.Result,error)}
-func setWithExec(db sqlExecer,e Episode,d DiskConfig,final,partial,status,msg string)error{ now:=time.Now().UTC().Format(time.RFC3339Nano)
- _,err:=db.Exec("INSERT INTO downloads(episode_id,task_name,parent_key,disk_name,target_path,partial_path,expected_bytes,status,error,started_at,completed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "+
- "ON CONFLICT(episode_id) DO UPDATE SET task_name=excluded.task_name,parent_key=excluded.parent_key,disk_name=excluded.disk_name,target_path=excluded.target_path,partial_path=excluded.partial_path,expected_bytes=excluded.expected_bytes,status=excluded.status,error=excluded.error,"+
- "started_at=CASE WHEN excluded.status='running' THEN excluded.updated_at ELSE downloads.started_at END,"+
- "completed_at=CASE WHEN excluded.status='completed' THEN excluded.updated_at WHEN excluded.status='running' THEN NULL ELSE downloads.completed_at END,updated_at=excluded.updated_at",
- e.ID,e.Task,e.ParentKey,d.Name,nullable(final),nullable(partial),e.Size,status,nullable(msg),nullableTime(status=="running",now),nullableTime(status=="completed",now),now)
- return err
+type sqlExecer interface {
+	Exec(string, ...any) (sql.Result, error)
 }
-func(a *App)set(e Episode,d DiskConfig,final,partial,status,msg string)error{return setWithExec(a.db,e,d,final,partial,status,msg)}
-func recordWithExec(db sqlExecer,e Episode,d DiskConfig,final string)error{ _,err:=db.Exec("INSERT INTO downloaded_episodes(episode_id,task_name,source_task_name,job_id,sn_code,parent_key,disk_name,target_path,file_size,content_time,create_time,downloaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "+
- "ON CONFLICT(episode_id) DO UPDATE SET task_name=excluded.task_name,source_task_name=excluded.source_task_name,job_id=excluded.job_id,sn_code=excluded.sn_code,parent_key=excluded.parent_key,disk_name=excluded.disk_name,target_path=excluded.target_path,file_size=excluded.file_size,content_time=excluded.content_time,create_time=excluded.create_time,downloaded_at=excluded.downloaded_at",
- e.ID,e.Task,e.SourceTask,e.JobID,e.SN,e.ParentKey,d.Name,final,e.Size,e.Duration,e.Created,time.Now().UTC().Format(time.RFC3339Nano));return err
+
+func setWithExec(db sqlExecer, e Episode, d DiskConfig, final, partial, status, msg string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := db.Exec("INSERT INTO downloads(episode_id,task_name,parent_key,disk_name,target_path,partial_path,expected_bytes,status,error,started_at,completed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "+
+		"ON CONFLICT(episode_id) DO UPDATE SET task_name=excluded.task_name,parent_key=excluded.parent_key,disk_name=excluded.disk_name,target_path=excluded.target_path,partial_path=excluded.partial_path,expected_bytes=excluded.expected_bytes,status=excluded.status,error=excluded.error,"+
+		"started_at=CASE WHEN excluded.status='running' THEN excluded.updated_at ELSE downloads.started_at END,"+
+		"completed_at=CASE WHEN excluded.status='completed' THEN excluded.updated_at WHEN excluded.status='running' THEN NULL ELSE downloads.completed_at END,updated_at=excluded.updated_at",
+		e.ID, e.Task, e.ParentKey, d.Name, nullable(final), nullable(partial), e.Size, status, nullable(msg), nullableTime(status == "running", now), nullableTime(status == "completed", now), now)
+	return err
 }
-func(a *App)record(e Episode,d DiskConfig,final string)error{return recordWithExec(a.db,e,d,final)}
-func(a *App)recordAndSet(e Episode,d DiskConfig,final string)error{
- tx,err:=a.db.Begin()
- if err!=nil{return err}
- defer tx.Rollback()
- if err=recordWithExec(tx,e,d,final);err!=nil{return fmt.Errorf("写入完成台账失败: %w",err)}
- if err=setWithExec(tx,e,d,final,"","completed","");err!=nil{return fmt.Errorf("更新下载完成状态失败: %w",err)}
- if err=tx.Commit();err!=nil{return fmt.Errorf("提交下载完成记录失败: %w",err)}
- return nil
+
+func (a *App) set(e Episode, d DiskConfig, final, partial, status, msg string) error {
+	return setWithExec(a.db, e, d, final, partial, status, msg)
+}
+
+func recordWithExec(db sqlExecer, e Episode, d DiskConfig, final string) error {
+	_, err := db.Exec("INSERT INTO downloaded_episodes(episode_id,task_name,source_task_name,job_id,sn_code,parent_key,disk_name,target_path,file_size,content_time,create_time,downloaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "+
+		"ON CONFLICT(episode_id) DO UPDATE SET task_name=excluded.task_name,source_task_name=excluded.source_task_name,job_id=excluded.job_id,sn_code=excluded.sn_code,parent_key=excluded.parent_key,disk_name=excluded.disk_name,target_path=excluded.target_path,file_size=excluded.file_size,content_time=excluded.content_time,create_time=excluded.create_time,downloaded_at=excluded.downloaded_at",
+		e.ID, e.Task, e.SourceTask, e.JobID, e.SN, e.ParentKey, d.Name, final, e.Size, e.Duration, e.Created, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (a *App) record(e Episode, d DiskConfig, final string) error {
+	return recordWithExec(a.db, e, d, final)
+}
+
+func (a *App) recordAndSet(e Episode, d DiskConfig, final string) error {
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = recordWithExec(tx, e, d, final); err != nil {
+		return fmt.Errorf("写入完成台账失败: %w", err)
+	}
+	if err = setWithExec(tx, e, d, final, "", "completed", ""); err != nil {
+		return fmt.Errorf("更新下载完成状态失败: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("提交下载完成记录失败: %w", err)
+	}
+	return nil
 }
 func nullableTime(ok bool,v string)any{if ok{return v};return nil}
 func ensureColumn(db *sql.DB,table,column,typ string)error{
