@@ -1554,6 +1554,17 @@ func retryFileOperation(operation func()error,windows bool)error{
  }
  return nil
 }
+func uniqueEpisodeBackupPath(final string)(string,error){
+ parent:=filepath.Dir(final)
+ prefix:="."+filepath.Base(final)+".minio-episode-backup-"
+ for attempt:=0;attempt<10;attempt++{
+  var random [12]byte
+  if _,err:=rand.Read(random[:]);err!=nil{return "",err}
+  candidate:=filepath.Join(parent,prefix+hex.EncodeToString(random[:]))
+  if _,err:=os.Lstat(candidate);os.IsNotExist(err){return candidate,nil}else if err!=nil{return "",err}
+ }
+ return "",errors.New("无法生成唯一的 episode 备份路径")
+}
 func recoverEpisodeDirectory(final string)error{
  parent:=filepath.Dir(final)
  entries,err:=os.ReadDir(parent)
@@ -1567,6 +1578,12 @@ func recoverEpisodeDirectory(final string)error{
   info,statErr:=os.Lstat(path)
   if statErr!=nil{return statErr}
   if !info.IsDir()||info.Mode()&os.ModeSymlink!=0{return fmt.Errorf("episode 备份不是普通目录，拒绝自动恢复: %s",path)}
+  contents,readErr:=os.ReadDir(path)
+  if readErr!=nil{return readErr}
+  if len(contents)==0{
+   if removeErr:=os.Remove(path);removeErr!=nil{return fmt.Errorf("清理未完成的空 episode 备份失败: %w",removeErr)}
+   continue
+  }
   backups=append(backups,info)
  }
  if len(backups)==0{return nil}
@@ -1594,9 +1611,8 @@ func replaceEpisodeDirectoryForOS(partial,final string,windows bool)error{
  _,statErr:=os.Lstat(final)
  if os.IsNotExist(statErr){return retryFileOperation(func()error{return os.Rename(partial,final)},windows)}
  if statErr!=nil{return statErr}
- backup,err:=os.MkdirTemp(filepath.Dir(final),"."+filepath.Base(final)+".minio-episode-backup-*")
+ backup,err:=uniqueEpisodeBackupPath(final)
  if err!=nil{return err}
- if err=os.Remove(backup);err!=nil{return err}
  if err=retryFileOperation(func()error{return os.Rename(final,backup)},windows);err!=nil{return err}
  if err=retryFileOperation(func()error{return os.Rename(partial,final)},windows);err!=nil{
   rollbackErr:=retryFileOperation(func()error{return os.Rename(backup,final)},windows)
