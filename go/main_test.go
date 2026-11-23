@@ -368,6 +368,7 @@ func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
 	put("minio.secret_key", "secret")
 	put("minio.bucket", "rocp-data")
 	put("minio.secure", false)
+	put("minio.cert_check", false)
 	put("pg.host", "db.example")
 	put("pg.port", 5433)
 	put("pg.database", "minio_event")
@@ -404,7 +405,7 @@ func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
 	if err := loadConfigDB(&cfg, "count"); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Endpoint != "http://minio.example:9000" || cfg.PGHost != "db.example" || cfg.PGPort != 5433 || cfg.DataVersion != "银河2.2数据" {
+	if cfg.Endpoint != "http://minio.example:9000" || !cfg.MinioSkipVerify || cfg.PGHost != "db.example" || cfg.PGPort != 5433 || cfg.DataVersion != "银河2.2数据" {
 		t.Fatalf("connection settings were not imported: %+v", cfg)
 	}
 	if len(cfg.Tasks) != 1 || cfg.Tasks[0].Name != "桌面收纳" || cfg.Tasks[0].TargetCount != 40 || len(cfg.Tasks[0].Aliases) != 1 || cfg.Tasks[0].Aliases[0] != "0930桌面收纳" {
