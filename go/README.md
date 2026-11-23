@@ -29,7 +29,7 @@ Go 版本按 Python 的两个 py_shell 脚本拆分了任务配置模板：
     go mod tidy
     go build -o minio-download .
     cp config.example.json config.json
-    ./minio-download --config config.json --mode duration
+    ./minio-download --config config.json --mode duration\n\n    # 另一个终端可请求安全暂停；运行中的进程会轮询 SQLite 控制位\n    ./minio-download --config config.json --stop
 
     # 条数模式：使用独立的 43 任务配置
     cp config.count.example.json config.json
@@ -42,4 +42,4 @@ Windows PowerShell：
 
 ## 当前首版限制
 
-已实现文件级 Range 续传、ETag 条件请求、标准 MD5 ETag 校验、下载后远端元数据复核和 Windows 对象文件名检查。仍未移植 Python Web 控制台、配置 SQLite、任务方案/标签、Web 发起的跨进程暂停控制、PID/单实例锁、磁盘预留锁、完整崩溃恢复与 Python 配置库兼容层。命令行 Ctrl+C 可取消当前 context，并将正在下载的 episode 标记为 `paused`，保留 `.minio-tmp` 供下次 Range 续传。Go 使用自己的 SQLite 状态表，不会直接复用 Python 状态库。生产使用前应先在测试 bucket 验证。
+已实现文件级 Range 续传、ETag 条件请求、标准 MD5 ETag 校验、下载后远端元数据复核和 Windows 对象文件名检查。仍未移植 Python Web 控制台、配置 SQLite、任务方案/标签、Web 发起的跨进程暂停控制、PID/单实例锁、磁盘预留锁、完整崩溃恢复与 Python 配置库兼容层。命令行 `--stop` 或 Ctrl+C 可请求取消当前 context，并将正在下载的 episode 标记为 `paused`，保留 `.minio-tmp` 供下次 Range 续传。Go 使用自己的 SQLite 状态表，不会直接复用 Python 状态库。生产使用前应先在测试 bucket 验证。
