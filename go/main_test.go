@@ -215,6 +215,52 @@ func TestDynamicSpaceExhaustionIsClassified(t *testing.T) {
  err:=fmt.Errorf("%w: disk=target",errInsufficientDiskSpace)
  if !errors.Is(err,errInsufficientDiskSpace){t.Fatal("wrapped capacity exhaustion must remain classifiable")}
 }
+func TestReserveObjectSpaceConcurrentAccounting(t *testing.T) {
+ const workers=32
+ app:=&App{cfg:Config{MinFreeGB:0}}
+ diskCfg:=DiskConfig{Name:"disk-a",Path:t.TempDir()}
+ reservations:=make(chan *spaceReservation,workers)
+ errs:=make(chan error,workers)
+ var wg sync.WaitGroup
+ for i:=0;i<workers;i++{
+  wg.Add(1)
+  go func(){
+   defer wg.Done()
+   reservation,err:=app.reserveObjectSpace(diskCfg,1)
+   if err!=nil{errs<-err;return}
+   reservations<-reservation
+  }()
+ }
+ wg.Wait()
+ close(errs)
+ for err:=range errs{t.Errorf("concurrent reservation failed: %v",err)}
+ close(reservations)
+ held:=uint64(0)
+ all:=make([]*spaceReservation,0,workers)
+ for reservation:=range reservations{held+=reservation.remaining;all=append(all,reservation)}
+ if len(all)!=workers{t.Fatalf("acquired %d reservations, want %d",len(all),workers)}
+ app.spaceMu.Lock()
+ got:=app.spaceInFlight["disk-a"]
+ app.spaceMu.Unlock()
+ if got!=uint64(workers)||held!=uint64(workers){t.Fatalf("reservation ledger=%d held=%d want %d",got,held,workers)}
+ for _,reservation:=range all{reservation.Release()}
+ app.spaceMu.Lock()
+ defer app.spaceMu.Unlock()
+ if _,ok:=app.spaceInFlight["disk-a"];ok{t.Fatal("all released reservations should clear the disk ledger")}
+}
+
+func TestProgressWriterReportsOnlyWrittenBytes(t *testing.T) {
+ var out bytes.Buffer
+ var reported int64
+ writer:=progressWriter{writer:&out,onWrite:func(n int64){reported+=n}}
+ payload:=[]byte("transfer-data")
+ n,err:=writer.Write(payload)
+ if err!=nil{t.Fatal(err)}
+ if n!=len(payload)||reported!=int64(n)||out.String()!=string(payload){
+  t.Fatalf("write n=%d reported=%d output=%q",n,reported,out.String())
+ }
+}
+
 func TestSpaceReservationConsumeAndRelease(t *testing.T) {
  app:=&App{cfg:Config{MinFreeGB:0}}
  diskCfg:=DiskConfig{Name:"disk-a",Path:t.TempDir()}
