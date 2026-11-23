@@ -38,6 +38,9 @@ Go 版本按 Python 的两个 py_shell 脚本拆分了任务配置模板：
     cp config.count.example.json config.json
     ./minio-download --config config.json --mode count
 
+    # 启动只读 Web API（默认 127.0.0.1:8765）
+    ./minio-download --config config.json --web
+
     # 若要复用 py_sample 的配置库，在 config.json 中设置 config_db 路径；
     # state_db 指向 py_sample/minio_download_state.sqlite3 可共享暂停控制与状态。
 
@@ -57,6 +60,10 @@ Windows PowerShell：
 
 Go 对配置库只读，不会改写 Python Web 保存的配置。当前导入 MinIO、PostgreSQL、TLS 证书校验策略、磁盘、任务顺序、别名、条数目标、校验/传输参数及 fsync 策略。`config_db` 目前只支持 `count` 模式；时长模式仍使用 `config.example.json` 中的 `target_hours`，避免把 Python 条数目标误解释为时长目标。
 
+## Go Web API 当前范围
+
+`--web` 可启动独立只读 HTTP 服务，提供 `GET /api/status`、`GET /api/episodes?task=任务名`、`GET /api/logs?offset=N` 和无需口令的 `GET /healthz`。状态接口返回任务标签、历史完成进度、磁盘空间/挂载状态、磁盘任务分配、运行中的 episode 和上次运行结果。日志接口按 offset 增量读取完整行。Web API 默认只监听 `127.0.0.1:8765`；未配置 Python Web 访问口令时拒绝非本机监听。配置库已设置 PBKDF2 口令时，API 请求必须使用 `Authorization: Bearer <口令>`。
+
 ## 当前限制
 
-尚未移植 Python Web 控制台本身、任务方案/标签的管理接口、Web 进程树管理、完整 Python 状态库的所有历史兼容、实时速度/ETA 汇总、动态磁盘预留锁，以及完整的崩溃恢复集成测试。Go 可读取 Python 运行控制表中的 `stop_requested`（兼容 ISO 时间戳），`--stop` 也会写入同一控制表；要让 Python Web 控制台观察 Go 的下载状态、进程和日志，请将两者的 `state_db`、`pid_file`、`log_dir` 指向同一位置。Go 使用 Python Web 预期的 `minio_task_downloader.log` 文件名，PID 文件包含兼容的 `pid` / `created` 字段。生产使用前应先在测试 bucket 验证。
+尚未移植 Python Web 的完整控制台与写接口（启动/暂停/强制停止、任务/磁盘/设置管理、连接测试、方案/标签 CRUD 和导入导出）、完整 Python 状态库的所有历史兼容、实时速度/ETA 汇总、动态磁盘预留锁，以及完整的崩溃恢复集成测试。Go 可读取 Python 运行控制表中的 `stop_requested`（兼容 ISO 时间戳），`--stop` 也会写入同一控制表；要让 Python Web 控制台观察 Go 的下载状态、进程和日志，请将两者的 `state_db`、`pid_file`、`log_dir` 指向同一位置。Go 使用 Python Web 预期的 `minio_task_downloader.log` 文件名，PID 文件包含兼容的 `pid` / `created` 字段。生产使用前应先在测试 bucket 验证。
