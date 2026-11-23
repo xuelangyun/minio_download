@@ -64,6 +64,7 @@ var stopFlag=flag.Bool("stop",false,"请求正在运行的下载器安全暂停"
 var webFlag=flag.Bool("web",false,"启动只读 Web API 服务")
 var webHost=flag.String("web-host","127.0.0.1","Web API 监听地址")
 var webPort=flag.Int("web-port",8765,"Web API 监听端口")
+var preserveStopRequest=flag.Bool("preserve-stop-request",false,"内部参数：保留 Web 启动后写入的暂停请求")
 
 func main(){
  flag.Parse()
@@ -83,7 +84,7 @@ func main(){
  ctx,cancel:=context.WithCancel(baseCtx);defer cancel()
  a:=&App{cfg:c,ctx:ctx,cancel:cancel,mode:*mode,recheck:*recheck,validated:map[string]bool{}}
  lock:=flock.New(c.LockFile);locked,lockErr:=lock.TryLock();if lockErr!=nil{log.Fatalf("创建下载锁失败: %v",lockErr)};if !locked{log.Fatal("检测到另一个下载器实例正在运行")};defer lock.Unlock()
- if e=clearStopRequestDB(c.StateDB);e!=nil{log.Fatal(e)}
+ if !*preserveStopRequest{if e=clearStopRequestDB(c.StateDB);e!=nil{log.Fatal(e)}}
  if e=a.open();e!=nil{log.Fatal(e)};defer a.db.Close()
  if e=writePIDFile(c.PIDFile,*mode);e!=nil{log.Fatal(e)};defer removePIDFile(c.PIDFile)
  watcherDone:=a.startStopWatcher();defer func(){cancel();<-watcherDone}()
@@ -877,7 +878,8 @@ func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
  if err:=os.MkdirAll(a.cfg.LogDir,0755);err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return}
  logFile,err:=os.OpenFile(filepath.Join(a.cfg.LogDir,"minio_task_downloader.log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0644);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"打开日志失败: "+err.Error()});return}
  executable,err:=os.Executable();if err!=nil{logFile.Close();writeJSONStatus(w,500,map[string]any{"error":"定位下载器程序失败: "+err.Error()});return}
- args:=[]string{"--config",a.configFile,"--mode",a.mode,"--max-rounds",strconv.Itoa(body.MaxRounds)};if body.RecheckMissing{args=append(args,"--recheck-missing")}
+ if err:=clearStopRequestDB(a.cfg.StateDB);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"清理旧暂停请求失败: "+err.Error()});return}
+ args:=[]string{"--config",a.configFile,"--mode",a.mode,"--max-rounds",strconv.Itoa(body.MaxRounds),"--preserve-stop-request"};if body.RecheckMissing{args=append(args,"--recheck-missing")}
  cmd:=exec.Command(executable,args...);configureDetached(cmd);cmd.Stdout=logFile;cmd.Stderr=logFile;cmd.Stdin=nil
  if err=cmd.Start();err!=nil{logFile.Close();writeJSONStatus(w,500,map[string]any{"error":"启动下载器失败: "+err.Error()});return}
  _=logFile.Close();go func(){_=cmd.Wait()}();a.childPID=int32(cmd.Process.Pid);if proc,e:=process.NewProcess(a.childPID);e==nil{if ms,e:=proc.CreateTime();e==nil{a.childCreated=float64(ms)/1000}}
