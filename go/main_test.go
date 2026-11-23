@@ -1760,6 +1760,19 @@ func TestFirstRunUsesSingleSQLiteDatabase(t *testing.T) {
 	if cfg.Endpoint != "" || cfg.SecretKey != "" {
 		t.Fatal("new installation must not invent MinIO credentials")
 	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	writer := &sqliteLogWriter{db: db}
+	if _, err = writer.Write([]byte("first-run log entry\\n")); err != nil {
+		t.Fatal(err)
+	}
+	var savedLog string
+	if err = db.QueryRow("SELECT message FROM runtime_logs ORDER BY id DESC LIMIT 1").Scan(&savedLog); err != nil || savedLog != "first-run log entry" {
+		t.Fatalf("expected log line in SQLite, got %q, err=%v", savedLog, err)
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
