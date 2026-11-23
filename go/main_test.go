@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"syscall"
 	"sync"
 	"strconv"
 	"path/filepath"
@@ -1498,7 +1499,7 @@ func TestWebConfigTasksResetRestoresDefaultsAndPreservesTags(t *testing.T) {
  found:=false
  for _,task:=range api.cfg.Tasks{if task.Name=="桌面收纳"{found=true;if len(task.Tags)!=1||task.Tags[0]!="用户自定义标签"{t.Fatalf("same-name task tag was not preserved: %#v",task.Tags)}}}
  if !found{t.Fatal("default task 桌面收纳 was not restored")}
- db,err:=sql.Open("sqlite",api.cfg.ConfigDB);if err!=nil{t.Fatal(err)};defer db.Close()
+ db,err=sql.Open("sqlite",api.cfg.ConfigDB);if err!=nil{t.Fatal(err)};defer db.Close()
  var count int
  if err=db.QueryRow("SELECT COUNT(*) FROM tasks").Scan(&count);err!=nil{t.Fatal(err)}
  if count!=len(api.cfg.Tasks){t.Fatalf("persisted tasks=%d runtime tasks=%d",count,len(api.cfg.Tasks))}
