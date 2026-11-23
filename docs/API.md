@@ -79,6 +79,7 @@
   "last_run": {},
   "stale_records": 0,
   "running_episodes": [],
+  "transfer_progress": { "downloaded_bytes": 0, "expected_bytes": 0, "remaining_bytes": 0, "speed_bytes_per_second": 0, "eta_seconds": null, "progress_percent": 0 },
   "disks": [ { "name": "disk1", "path": "/mnt/temdata1", "exists": false, "mounted": false, "total": 0, "free": 0, "used": 0, "tasks": [] } ],
   "scenes": [ { "scene": "Education and Entertainment(教育娱乐)",
     "tasks": [ { "name": "积木搭建", "dir": "积木搭建", "target": 40, "aliases": [], "tags": [],
@@ -93,7 +94,8 @@
 | `setup_issues` | 开始下载前还缺的配置：`page` ∈ `connection / disks / tasks`。非空时 `POST /api/run` 返回 400 |
 | `last_run` | 上次运行结果：`result` ∈ `finished / paused / error`，另有 `at`、`counts`、`mode`、`error`（以及本 Web 启动且异常退出时的 `exit_code`） |
 | `stale_records` | 记录标记已完成但本地目录已被删除的条数（不计入进度） |
-| `running_episodes` | 下载器运行时才有内容：`episode_id, task_name, disk_name, started_at, expected_bytes, partial_bytes`（暂存目录当前字节数，前端据此算速度）；最多 24 条 |
+| `running_episodes` | 下载器运行时才有内容：`episode_id, task_name, disk_name, started_at, expected_bytes, partial_bytes`；最多 24 条 |
+| `transfer_progress` | 所有运行中 episode 的汇总进度：`downloaded_bytes / expected_bytes / remaining_bytes`；`speed_bytes_per_second` 为两次状态采样间暂存目录字节增量计算的近似速度；`eta_seconds` 为估算剩余秒数（速度尚未建立时为 `null`）；`progress_percent` 为汇总百分比。采样基于本地暂存文件，受文件系统缓存与状态轮询间隔影响，不等同于网卡线速。
 | `disks[]` | `total / free / used` 字节（读不到为 0）；`mounted` = 挂载点是否真挂载；`tasks` = 已分配到该盘的任务 |
 | `scenes[].tasks[]` | `downloaded` 已下载条数（正式目录仍存在才算）；`hours` 已下载时长；`bytes` 已下载大小；`issues` = 未完成原因计数 `{状态: 条数}`（状态见 [DATA §6.1](DATA.md#61-downloadsstatus)）；`disk` 分配的磁盘；`tags` 标签 |
 
@@ -184,7 +186,7 @@
 
 ### `POST /api/config/tasks/reset`
 
-恢复为程序内置的默认任务列表（同名任务的标签保留）。`{ "ok": true }`。
+恢复为 Go 内置 count 模式默认任务列表（同名任务的标签保留）。`{ "ok": true }`。此接口当前只适用于 Go count 模式。
 
 ### `PUT /api/config/disks`
 

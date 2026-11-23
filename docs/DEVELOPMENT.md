@@ -354,6 +354,8 @@ Web 页面修改 ───────▶ ConfigStore.set_* （校验 → 事务
   * `replace`：整体替换任务配置，版本目录取方案的（空则沿用当前），标签取方案的；
   * `merge`：`merge_payloads` 只追加当前**没有**（按任务名）的任务，**已有任务和条数绝不改动**；每追加一个任务都用 `validate` 回调试校验，冲突的任务跳过并返回原因，不影响其它任务；
 * **导入 / 导出**：导出为 `{"format": "minio-downloader-plan", "version": 1, "name", "note", "payload"}`；导入内容不可信，必须校验；同名自动加序号，不覆盖。
+* **Go 兼容实现**：Go Web 已实现同一组方案列表 / 详情 / CRUD / replace / merge / 标签筛选 / JSON 导入导出接口。Go 校验允许方案 `data_version` 为空；`replace` 时继承当前配置版本目录，当前配置也为空则拒绝应用。对应测试覆盖空版本保存与载入。
+* **Go 配置写接口**：已实现 `PUT /api/config/tasks`、`POST /api/config/tasks/reset`（从 Go 内置 count 模式默认任务清单恢复，保留同名任务标签）、`PUT /api/config/disks`、`POST /api/config/disks/check`、`PUT /api/config/settings` 和 `POST /api/config/test`。设置项已接入 MinIO 连接 / TLS、PostgreSQL、下载并发 / 重试、默认补齐轮数、连接与响应头超时、Web 监听地址 / 端口；`--max-rounds`、`--web-host`、`--web-port` 可显式覆盖配置。MinIO `read_timeout` 当前限制等待响应头的时间，不是流式 body 的空闲读超时。
 
 ## 5. Episode 状态机
 
@@ -581,7 +583,7 @@ python minio_task_downloader_by_count.py --max-rounds 1     # 继续：日志里
 
 **已知限制**
 
-* 任务级空间预检是“整体放得下才开始”，放不下则该任务本轮跳过（沿用自原脚本）。
+* 任务级空间预检是“整体放得下才开始”，放不下则该任务本轮跳过（沿用自原脚本）。 Go 下载器重试 Episode 时，会先按 Python 版规则检查暂存目录中已完成文件（普通文件、大小一致，且对象修改时间差小于 2 秒；MinIO 未提供修改时间时按大小判断），符合条件的文件直接复用，不重复下载或重复预留空间；对象下载失败且临时文件已被外部清理时，也会恢复对应的空间预留。Go 下载器在每个对象开始前再次读取目标磁盘剩余空间，并将并发对象的未完成字节量纳入进程内预留；对象预留只按尚未下载的剩余字节建立；已有有效暂存字节已占用磁盘空间，不会在容量预检中重复计算，但会记入可恢复账本，若重试删除暂存文件则重新加入预留，避免容量账本低估后续下载空间。下载流实际写入的字节会同步扣减预留，续传时只预留剩余部分。空间不足首次发生后，会停止该 episode 及所属任务继续准入尚未开始的对象 / episode；已取得空间预留并开始的并发下载允许收尾，episode 标记为 `waiting_space` 并保留有效暂存数据。 Go 版本在进入磁盘调度前，按实际文件系统设备标识获取跨进程 `flock`；同一主机上的其它 Go 下载器实例若使用同一文件系统，即使配置了不同目标子目录，也不能同时启动该盘下载。锁按稳定顺序获取，结束或进程崩溃时由操作系统释放；锁文件位于系统临时目录。该锁是主机级互斥，不提供跨主机共享文件系统协调。
 * 分片上传的对象 ETag 不是内容 MD5，只能校验字节数；SSE 对象需关闭 MD5 校验。
 * 真实 MinIO / 真实 Windows 行为没有自动化验证（§8.4）。
 * Web 只有“单口令”鉴权，没有用户 / 角色；口令经 HTTP 头传输，跨机访问请放在 HTTPS 反向代理之后。
@@ -592,6 +594,36 @@ python minio_task_downloader_by_count.py --max-rounds 1     # 继续：日志里
 
 * 磁盘空间按“能放多少先下多少”的细粒度预检，替代整体预检。
 * 方案版本历史（每次覆盖保留旧版本）与“按标签批量设置条数”的方案级模板。
-* 下载速度 / 预计剩余时间：前端已有 `partial_bytes` 与速度，可结合剩余条数与平均大小估算 ETA。
+* 下载速度 / 预计剩余时间：Go `GET /api/status` 返回 `transfer_progress` 汇总字节、近似速度、ETA 与百分比。速度由两次轮询间本地暂存目录字节增量计算，受文件系统缓存和轮询间隔影响；不是网卡级精确吞吐。
 * 对象级校验和（`x-amz-checksum-*`）支持，弥补分片对象无法校验内容的缺口。
 * 把 `minio_task_downloader_by_count.py` 按 §3.4 的段落拆成多个模块（状态库、调度、选条数），降低单文件规模；拆分时保持 §2.3 的依赖方向，并先补足对应的集成测试。
+
+
+## 13. Go 版本（初始移植）
+
+Go 实现位于 `go/`，与 Python 版本并行维护，不替换 `py_sample/` 或 `py_shell/`。
+
+| 文件 | 说明 |
+|---|---|
+| `go/main.go` | CLI、PostgreSQL 候选查询、任务调度、MinIO 下载、兼容 Python 历史完成台账的 SQLite 状态恢复 |
+| `go/config.example.json` | 按时长任务模板，对应 `py_shell/minio_task_downloader.py` |
+| `go/config.count.example.json` | 按条数任务模板，对应 `py_shell/minio_task_downloader_by_count.py`；43 个任务，默认每任务 40 条 |
+| `.github/workflows/go-release.yml` | Windows amd64、Linux amd64、Linux arm64 交叉构建与打包 |
+
+构建要求 Go 1.23+。本地命令：
+
+```bash
+cd go
+go mod tidy
+go test ./...
+go build -o minio-download .
+```
+
+按时长运行使用时长模板；按条数运行使用条数模板。两个模板的任务名、历史别名和目标目录必须分开维护，不能简单把两份 Python 清单合并，因为部分任务在两种脚本中的当前名称 / 历史别名方向不同。
+
+Go 首版已覆盖：质量过滤、任务别名归并、排序后去重、按时长 / 条数选取、条数模式并发预检必需文件并补足有效候选、时长模式将上次缺文件任务排到候选末尾、按实际任务目录和磁盘负载分配任务、任务级空间预检（扣除已有临时文件大小，并累计预留同一磁盘上排队任务的预计空间）、按文件系统设备标识获取跨进程磁盘 flock（同一主机同一文件系统互斥，进程退出自动释放；不覆盖跨主机共享存储协调）、每盘 episode 并发、单条内文件并发、Range 续传、ETag 条件请求、标准 MD5 ETag 校验、暂存目录清理、文件锁、SQLite 状态记录和原子目录发布；任务级与单条文件级 worker semaphore 均使用 context-aware admission，暂停 / 取消时不会继续阻塞等待并发槽位。
+
+**尚未达到 Python 全功能等价**：配置 SQLite、Web 完整控制台 / API、任务方案与标签、配置管理与连接测试、磁盘空间原子预留 / 写满换盘、完整 Python 状态机和历史状态库兼容。Go 当前的状态表与 Python 主要表字段尽量对齐，但不应假设两种实现可无条件共享同一个状态库。Go 首版必须先通过本地 `go test`、三个目标平台交叉构建和真实 MinIO / PostgreSQL 小样本联调，才可用于正式数据。
+
+
+若重试流程丢弃本次运行刚写入的暂存数据，会把对应字节重新计入预留，避免预留账本与实际磁盘占用脱节。

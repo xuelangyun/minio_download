@@ -1,0 +1,425 @@
+{
+  "minio_endpoint": "http://127.0.0.1:9000",
+  "minio_access_key": "",
+  "minio_secret_key": "",
+  "minio_bucket": "rocp-data",
+  "minio_region": "",
+  "minio_use_ssl": false,
+  "pg_host": "127.0.0.1",
+  "pg_port": 5432,
+  "pg_database": "minio_event",
+  "pg_user": "postgres",
+  "pg_password": "",
+  "data_version": "银河2.2数据",
+  "state_db": "minio_download_state.sqlite3",
+  "log_dir": "logs",
+  "min_free_gb": 3,
+  "space_safety_factor": 1.15,
+  "max_writes_per_disk": 2,
+  "require_mcap": true,
+  "mcap_pattern": "*.SYNC.mcap",
+  "include_null_quality": false,
+  "disks": [
+    {
+      "name": "disk1",
+      "path": "/mnt/temdata1",
+      "mountpoint": "/mnt/temdata1"
+    },
+    {
+      "name": "disk2",
+      "path": "/mnt/temdata2",
+      "mountpoint": "/mnt/temdata2"
+    },
+    {
+      "name": "disk3",
+      "path": "/mnt/temdata3",
+      "mountpoint": "/mnt/temdata3"
+    }
+  ],
+  "tasks": [
+    {
+      "name": "积木搭建",
+      "scene": "Education and Entertainment(教育娱乐)",
+      "dir": "积木搭建",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0930_废物装箱",
+      "scene": "Household(家居)",
+      "dir": "废物装箱",
+      "aliases": [
+        "0902_废物装箱",
+        "0904_废物装箱"
+      ],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0930插花艺术",
+      "scene": "Household(家居)",
+      "dir": "插花艺术",
+      "aliases": [
+        "0902_插花艺术",
+        "0904_插花艺术"
+      ],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0930_电线分类",
+      "scene": "Household(家居)",
+      "dir": "电线分类",
+      "aliases": [
+        "0902_电线分类",
+        "0904_电线分类"
+      ],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0930_颜色分类",
+      "scene": "Household(家居)",
+      "dir": "颜色分类",
+      "aliases": [
+        "0902_颜色分类",
+        "0904_颜色分类"
+      ],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0904_颜色分类_新",
+      "scene": "Household(家居)",
+      "dir": "颜色分类_新",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "桌面收纳",
+      "scene": "Household(家居)",
+      "dir": "桌面收纳",
+      "aliases": [
+        "0930桌面收纳"
+      ],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0930积木搭建",
+      "scene": "Household(家居)",
+      "dir": "积木搭建",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "药品检查",
+      "scene": "Household(家居)",
+      "dir": "药品检查",
+      "aliases": [
+        "0930药品检查"
+      ],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0930餐盘整理",
+      "scene": "Household(家居)",
+      "dir": "餐盘整理",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "叠牛仔裤",
+      "scene": "Household(家居)",
+      "dir": "叠牛仔裤",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "垃圾处理",
+      "scene": "Household(家居)",
+      "dir": "垃圾处理",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "药箱管理",
+      "scene": "Household(家居)",
+      "dir": "药箱管理",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "餐具摆放",
+      "scene": "Household(家居)",
+      "dir": "餐具摆放",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0724电器物料分拣_1",
+      "scene": "Industry(工业)",
+      "dir": "电器物料分拣_1",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0724电器物料分拣_2",
+      "scene": "Industry(工业)",
+      "dir": "电器物料分拣_2",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0724电器物料分拣_3",
+      "scene": "Industry(工业)",
+      "dir": "电器物料分拣_3",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0911电器物料抓取_左A右A",
+      "scene": "Industry(工业)",
+      "dir": "电器物料抓取_左A右A",
+      "aliases": [
+        "0818电器物料抓取_左A右A",
+        "0820电器物料抓取_左A右A",
+        "0908电器物料抓取_左A右A"
+      ],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0911电器物料抓取_左A右B",
+      "scene": "Industry(工业)",
+      "dir": "电器物料抓取_左A右B",
+      "aliases": [
+        "0818电器物料抓取_左A右B"
+      ],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0818电器物料抓取_左B右A",
+      "scene": "Industry(工业)",
+      "dir": "电器物料抓取_左B右A",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0820电器物料抓取_左B右B",
+      "scene": "Industry(工业)",
+      "dir": "电器物料抓取_左B右B",
+      "aliases": [
+        "0818电器物料抓取_左B右B"
+      ],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0904_单臂清框_电器开关1P",
+      "scene": "Industry(工业)",
+      "dir": "单臂清框_电器开关1P",
+      "aliases": [
+        "0902_单臂清框_电器开关1P"
+      ],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0904_单臂清框_电器开关2P",
+      "scene": "Industry(工业)",
+      "dir": "单臂清框_电器开关2P",
+      "aliases": [
+        "0902_单臂清框_电器开关2P"
+      ],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "0904_单臂清框_电器开关3P",
+      "scene": "Industry(工业)",
+      "dir": "单臂清框_电器开关3P",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "108垂直抓取左A右A",
+      "scene": "Industry(工业)",
+      "dir": "垂直抓取左A右A",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "单臂清框_零件A",
+      "scene": "Industry(工业)",
+      "dir": "单臂清框_零件A",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "单臂清框_零件B",
+      "scene": "Industry(工业)",
+      "dir": "单臂清框_零件B",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "单臂清框_零件C",
+      "scene": "Industry(工业)",
+      "dir": "单臂清框_零件C",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "右侧前车门上下铰链喷涂",
+      "scene": "Industry(工业)",
+      "dir": "右侧前车门上下铰链喷涂",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "右侧前车门上铰链喷涂操作",
+      "scene": "Industry(工业)",
+      "dir": "右侧前车门上铰链喷涂操作",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "右侧前车门下铰链喷涂操作",
+      "scene": "Industry(工业)",
+      "dir": "右侧前车门下铰链喷涂操作",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "右侧后车门上下铰链喷涂",
+      "scene": "Industry(工业)",
+      "dir": "右侧后车门上下铰链喷涂",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "右侧后车门上铰链喷涂操作",
+      "scene": "Industry(工业)",
+      "dir": "右侧后车门上铰链喷涂操作",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "右侧后车门下铰链喷涂操作",
+      "scene": "Industry(工业)",
+      "dir": "右侧后车门下铰链喷涂操作",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "左侧前车门上下铰链喷涂",
+      "scene": "Industry(工业)",
+      "dir": "左侧前车门上下铰链喷涂",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "左侧前车门上铰链喷涂操作",
+      "scene": "Industry(工业)",
+      "dir": "左侧前车门上铰链喷涂操作",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "左侧前车门下铰链喷涂操作",
+      "scene": "Industry(工业)",
+      "dir": "左侧前车门下铰链喷涂操作",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "左侧后车门上下铰链喷涂",
+      "scene": "Industry(工业)",
+      "dir": "左侧后车门上下铰链喷涂",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "左侧后车门上铰链喷涂操作",
+      "scene": "Industry(工业)",
+      "dir": "左侧后车门上铰链喷涂操作",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "左侧后车门下铰链喷涂操作",
+      "scene": "Industry(工业)",
+      "dir": "左侧后车门下铰链喷涂操作",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "电器物料分拣",
+      "scene": "Industry(工业)",
+      "dir": "电器物料分拣",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "线缆管理",
+      "scene": "Industry(工业)",
+      "dir": "线缆管理",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    },
+    {
+      "name": "螺栓保护套装配",
+      "scene": "Industry(工业)",
+      "dir": "螺栓保护套装配",
+      "aliases": [],
+      "target_hours": 0,
+      "target_count": 40
+    }
+  ],
+  "trust_completed_records": false,
+  "file_workers": 4,
+  "lock_file": "minio_download.lock",
+  "mode": "count",
+  "verify_md5": true,
+  "file_retries": 5,
+  "retry_delay_seconds": 1,
+  "validate_workers": 16,
+  "pid_file": "minio_download.pid",
+  "config_db": "",
+  "minio_skip_verify": false,
+  "fsync": true
+}

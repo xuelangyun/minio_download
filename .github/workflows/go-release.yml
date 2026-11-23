@@ -1,0 +1,76 @@
+name: Go cross-platform release
+
+on:
+  push:
+    branches: ["main", "feature/go-downloader"]
+    tags: ["go-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+          cache: false
+      - name: Download Go modules
+        working-directory: go
+        run: go mod tidy
+      - name: Run focused unit tests
+        working-directory: go
+        run: |
+          go test ./... -run "^(TestSafeJoinRejectsTraversal|TestLoadConfigDBImportsPythonCountConfiguration|TestResumeReservationTracksOnlyRemainingBytes|TestCompletedEpisodeDirRequiresTaskInfo|TestWebAPIRequiresBearerTokenWhenConfigured|TestMissingMCAPCleanupCanRecoverAfterInterruption)$"
+      - name: Build Windows amd64
+        working-directory: go
+        run: |
+          mkdir -p dist/windows-amd64
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/windows-amd64/minio-download.exe .
+      - name: Build Linux amd64
+        working-directory: go
+        run: |
+          mkdir -p dist/linux-amd64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/linux-amd64/minio-download .
+      - name: Build Linux arm64
+        working-directory: go
+        run: |
+          mkdir -p dist/linux-arm64
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/linux-arm64/minio-download .
+      - name: Add templates and documentation
+        working-directory: go
+        run: |
+          cp config.example.json config.count.example.json README.md dist/windows-amd64/
+          cp config.example.json config.count.example.json README.md dist/linux-amd64/
+          cp config.example.json config.count.example.json README.md dist/linux-arm64/
+      - name: Package artifacts
+        run: |
+          cd go/dist
+          zip -qr ../../minio-download-windows-amd64.zip windows-amd64
+          tar -czf ../../minio-download-linux-amd64.tar.gz linux-amd64
+          tar -czf ../../minio-download-linux-arm64.tar.gz linux-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minio-download-release-assets
+          path: minio-download-*.*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/go-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: minio-download-release-assets
+          path: dist
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/minio-download-*.*
