@@ -105,6 +105,7 @@ func main(){
 }
 
 type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time}
+func(a *WebAPI)completedPath(path string)bool{return a.cfg.TrustCompletedRecords||completedEpisodeDir(path,a.cfg.RequireMCAP,a.cfg.MCAPPattern)}
 func serveWeb(c Config,host string,port int)error{
  if port<1||port>65535{return errors.New("web-port 必须在 1 到 65535 之间")}
  if err:=os.MkdirAll(filepath.Dir(c.StateDB),0755);err!=nil{return err}
@@ -162,7 +163,13 @@ func(a *WebAPI)authorized(r *http.Request)bool{
  supplied:=strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"),"Bearer "));addr:=r.RemoteAddr;now:=time.Now()
  a.authMu.Lock()
  tokenHash:=a.tokenHash
- if tokenHash==""{a.authMu.Unlock();return isLoopbackHost(r.Hostname())&&isLoopbackRemote(r.RemoteAddr)&&r.Header.Get("X-Forwarded-For")==""}
+ if tokenHash==""{a.authMu.Unlock();host := r.Host
+  if parsed, _, err := net.SplitHostPort(host); err == nil {
+   host = parsed
+  } else {
+   host = strings.Trim(host, "[]")
+  }
+  return isLoopbackHost(host)&&isLoopbackRemote(r.RemoteAddr)&&r.Header.Get("X-Forwarded-For")==""}
  if a.lockouts!=nil{if until:=a.lockouts[addr];now.Before(until){a.authMu.Unlock();return false}}
  if a.failures==nil{a.failures=map[string][]time.Time{}};if a.lockouts==nil{a.lockouts=map[string]time.Time{}}
  attempts:=a.failures[addr];kept:=attempts[:0];for _,at:=range attempts{if now.Sub(at)<=5*time.Minute{kept=append(kept,at)}};attempts=kept
@@ -483,11 +490,11 @@ func(a *WebAPI)planApply(w http.ResponseWriter,r *http.Request){
    target:=-1;for i:=range candidate.Scenes{if candidate.Scenes[i].Scene==scene.Scene{target=i;break}}
    if target<0{candidate.Scenes=append(candidate.Scenes,planScene{Scene:scene.Scene,Tasks:[]planTask{}});target=len(candidate.Scenes)-1}
    candidate.Scenes[target].Tasks=append(candidate.Scenes[target].Tasks,task)
-   if _,e:=validatePlanPayload(mustJSON(candidate));e!=nil{skipped=append(skipped,map[string]string{"name":task.Name,"reason":e.Error()});continue}
+   if _,e:=validatePlanPayload(json.RawMessage(mustJSON(candidate)));e!=nil{skipped=append(skipped,map[string]string{"name":task.Name,"reason":e.Error()});continue}
    result=candidate;existing[task.Name]=true;added=append(added,task.Name)
   }}
  }else{for _,scene:=range incoming.Scenes{for _,task:=range scene.Tasks{added=append(added,task.Name)}}}
- if err=validatePlanPayload(mustJSON(result));err!=nil{writeJSONStatus(w,400,map[string]any{"error":err.Error()});return}
+ if _,err=validatePlanPayload(json.RawMessage(mustJSON(result)));err!=nil{writeJSONStatus(w,400,map[string]any{"error":err.Error()});return}
  if body.Mode=="replace"||len(added)>0{
   if err=persistPlanPayload(db,result);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"应用方案失败："+err.Error()});return}
   tasks:=[]Task{};for _,scene:=range result.Scenes{for _,t:=range scene.Tasks{tasks=append(tasks,Task{Scene:scene.Scene,Name:t.Name,TargetCount:t.Count,Aliases:append([]string{},t.Aliases...),Dir:t.Dir,Tags:append([]string{},t.Tags...)})}};a.cfg.Tasks=tasks;a.cfg.DataVersion=result.DataVersion
@@ -1124,7 +1131,7 @@ func(a *App)checkRequiredFiles(parent string)(string,string,error){
  direct:=map[string]bool{}
  for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:parent+"/",Recursive:false}){
   if obj.Err!=nil{return "error","MinIO 目录检查失败",obj.Err}
-  if !obj.IsDir&&!strings.HasSuffix(obj.Key,"/"){direct[path.Base(obj.Key)]=true}
+  if !strings.HasSuffix(obj.Key,"/"){direct[path.Base(obj.Key)]=true}
  }
  if !direct["task_info.json"]{return "missing_task_info","缺少 task_info.json",nil}
  if a.cfg.RequireMCAP{
@@ -1620,7 +1627,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  objects:=make([]minio.ObjectInfo,0)
  for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:true}){
   if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)}
-  if obj.IsDir||strings.HasSuffix(obj.Key,"/"){continue}
+  if strings.HasSuffix(obj.Key,"/"){continue}
   objects=append(objects,obj)
  }
  if err:=sweepPartial(partial,e.ParentKey,objects);err!=nil{return a.fail(e,d,final,partial,err)}
