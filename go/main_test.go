@@ -236,7 +236,7 @@ func TestChooseTaskDiskKeepsSharedOutputFolderTogether(t *testing.T) {
 	loads := map[string]int{"disk1": 0, "disk2": 0}
 	folderDisk := map[string]*DiskConfig{}
 	first := Task{Name: "task-a", Scene: "scene-a", Dir: "shared-folder"}
-	second := Task{Name: "task-b", Scene: "scene-b", Dir: "shared-folder"}
+	second := Task{Name: "task-b", Scene: "scene-a", Dir: "shared-folder"}
 	chosenFirst := chooseTaskDisk(first, disks, loads, folderDisk)
 	chosenSecond := chooseTaskDisk(second, disks, loads, folderDisk)
 	if chosenFirst == nil || chosenSecond == nil || chosenFirst.Name != chosenSecond.Name {
@@ -336,3 +336,101 @@ func TestIsStopRequestedAcceptsPythonTimestamp(t *testing.T) {
 	}
 }
 
+
+func TestChooseTaskDiskSeparatesSameFolderAcrossScenes(t *testing.T) {
+	disks := []DiskConfig{{Name: "disk1"}, {Name: "disk2"}}
+	loads := map[string]int{"disk1": 0, "disk2": 0}
+	folderDisk := map[string]*DiskConfig{}
+	first := chooseTaskDisk(Task{Name: "task-a", Scene: "scene-a", Dir: "shared"}, disks, loads, folderDisk)
+	second := chooseTaskDisk(Task{Name: "task-b", Scene: "scene-b", Dir: "shared"}, disks, loads, folderDisk)
+	if first == nil || second == nil || first.Name == second.Name {
+		t.Fatalf("different scenes should be scheduled independently: first=%v second=%v", first, second)
+	}
+}
+
+func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "python-config.sqlite3")
+	db, err := sql.Open("sqlite", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := []string{
+		"CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)",
+		"CREATE TABLE scenes(id INTEGER PRIMARY KEY,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE)",
+		"CREATE TABLE tasks(id INTEGER PRIMARY KEY,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE,target_count INTEGER NOT NULL,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]')",
+		"CREATE TABLE task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL,PRIMARY KEY(task_id,alias))",
+		"CREATE TABLE disks(name TEXT PRIMARY KEY,position INTEGER NOT NULL,path TEXT NOT NULL,mountpoint TEXT NOT NULL)",
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put := func(key string, value any) {
+		t.Helper()
+		raw, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if _, execErr := db.Exec("INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)", key, string(raw), "now"); execErr != nil {
+			t.Fatal(execErr)
+		}
+	}
+	put("minio.endpoint", "http://minio.example:9000")
+	put("minio.access_key", "access")
+	put("minio.secret_key", "secret")
+	put("minio.bucket", "rocp-data")
+	put("minio.secure", false)
+	put("pg.host", "db.example")
+	put("pg.port", 5433)
+	put("pg.database", "minio_event")
+	put("pg.user", "postgres")
+	put("pg.password", "p@ss")
+	put("tasks.data_version", "银河2.2数据")
+	put("run.min_free_gb", 3.0)
+	put("run.space_safety_factor", 1.15)
+	put("run.max_writes_per_disk", 2)
+	put("run.require_mcap", true)
+	put("run.include_null_quality", false)
+	put("run.validate_workers", 16)
+	put("run.mcap_pattern", "*.SYNC.mcap")
+	put("transfer.file_workers", 4)
+	put("transfer.file_retries", 5)
+	put("transfer.retry_delay", 1.0)
+	put("transfer.verify_md5", true)
+	if _, err := db.Exec("INSERT INTO scenes(id,position,name) VALUES(1,0,'Household')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO tasks(id,scene_id,position,name,target_count,directory) VALUES(7,1,0,'桌面收纳',40,'桌面收纳')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO task_aliases(task_id,position,alias) VALUES(7,0,'0930桌面收纳')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO disks(name,position,path,mountpoint) VALUES('disk1',0,'/mnt/data','/mnt/data')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{ConfigDB: name}
+	if err := loadConfigDB(&cfg, "count"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Endpoint != "http://minio.example:9000" || cfg.PGHost != "db.example" || cfg.PGPort != 5433 || cfg.DataVersion != "银河2.2数据" {
+		t.Fatalf("connection settings were not imported: %+v", cfg)
+	}
+	if len(cfg.Tasks) != 1 || cfg.Tasks[0].Name != "桌面收纳" || cfg.Tasks[0].TargetCount != 40 || len(cfg.Tasks[0].Aliases) != 1 || cfg.Tasks[0].Aliases[0] != "0930桌面收纳" {
+		t.Fatalf("task and alias import failed: %+v", cfg.Tasks)
+	}
+	if len(cfg.Disks) != 1 || cfg.Disks[0].Name != "disk1" || cfg.Workers != 2 || cfg.FileWorkers != 4 {
+		t.Fatalf("disk/runtime settings import failed: disks=%+v workers=%d fileWorkers=%d", cfg.Disks, cfg.Workers, cfg.FileWorkers)
+	}
+}
+
+func TestLoadConfigDBRejectsDurationMode(t *testing.T) {
+	cfg := Config{ConfigDB: filepath.Join(t.TempDir(), "config.sqlite3")}
+	if err := loadConfigDB(&cfg, "duration"); err == nil {
+		t.Fatal("duration mode must not silently replace hour targets with count targets")
+	}
+}
