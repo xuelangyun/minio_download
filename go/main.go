@@ -243,13 +243,20 @@ func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,e
  }
  return validGroups,nil
 }
+func(a *App)isMissingStatus(id string)bool{
+ var status string
+ err:=a.db.QueryRow("SELECT status FROM downloads WHERE episode_id=?",id).Scan(&status)
+ return err==nil&&(status=="missing_task_info"||status=="missing_mcap")
+}
 func(a *App)run(all []Episode,nround int)error{
  groups:=map[string][]Episode{};for _,e:=range all{groups[e.Task]=append(groups[e.Task],e)}
  if a.mode=="count"{var err error;groups,err=a.prevalidateCount(groups);if err!=nil{return err}}
  for r:=1;r<=nround;r++{if a.ctx.Err()!=nil{return nil};selected:=map[string][]Episode{}
   for _,t:=range a.cfg.Tasks{s,n:=a.stats(t.Name);target,used:=t.TargetHours*3600,s;if a.mode=="count"{target=float64(t.TargetCount);used=float64(n)}
+   candidates:=groups[t.Name]
+   if a.mode=="duration"{sort.SliceStable(candidates,func(i,j int)bool{mi:=a.isMissingStatus(candidates[i].ID);mj:=a.isMissingStatus(candidates[j].ID);return !mi&&mj})}
    addSec:=0.0;addN:=0
-   for _,e:=range groups[t.Name]{if a.completed(e.ID){continue};var st string;_=a.db.QueryRow("SELECT status FROM downloads WHERE episode_id=?",e.ID).Scan(&st);if !a.recheck&&(st=="missing_task_info"||st=="missing_mcap"){continue}
+   for _,e:=range candidates{if a.completed(e.ID){continue};if a.mode=="count"&&!a.recheck&&a.isMissingStatus(e.ID){continue}
     if (a.mode=="duration"&&addSec>=target-used)||(a.mode=="count"&&float64(addN)>=target-used){break};selected[t.Name]=append(selected[t.Name],e);addSec+=e.Duration;addN++}
    if a.mode=="duration"{log.Printf("按时长 %s: 目标 %.2fh 已完成 %.2fh 新选 %d 条/%.2fh",t.Name,target/3600,s/3600,addN,addSec/3600)}else{log.Printf("按条数 %s: 目标 %d 已完成 %d 新选 %d 条",t.Name,int(target),n,addN)}
   }
