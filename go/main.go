@@ -98,6 +98,7 @@ func main(){
  if e=writePIDFile(c.PIDFile,*mode);e!=nil{log.Fatal(e)};defer removePIDFile(c.PIDFile)
  watcherDone:=a.startStopWatcher();defer func(){cancel();<-watcherDone}()
  if e=validateDiskSet(a.cfg.Disks);e!=nil{log.Fatal(e)}
+ if e=a.recoverPendingCleanup();e!=nil{log.Fatalf("恢复上次未完成的缺失 mcap 清理失败: %v",e)}
  if *cleanup{n,err:=a.cleanup(*dry);if err!=nil{log.Fatal(err)};log.Printf("清理结束：%d 条",n);if *dry{return}}else if *dry{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
  rows,e:=a.fetch();if e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停（候选查询期间收到暂停请求）");a.saveLastRun("paused",nil);return};log.Printf("候选查询失败: %v",e);a.saveLastRun("error",e);return}
  if e=a.run(rows,effectiveRounds);e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil);return};log.Printf("下载执行失败: %v",e);a.saveLastRun("error",e);return}
@@ -994,7 +995,6 @@ func(a *App)open()error{
  if e==nil{
   if e=ensureColumn(a.db,"downloads","started_at","TEXT");e!=nil{return e}
   if e=ensureColumn(a.db,"downloads","completed_at","TEXT");e!=nil{return e}
-  if e=a.recoverPendingCleanup();e!=nil{return fmt.Errorf("恢复上次未完成的缺失 mcap 清理失败: %w",e)}
   log.Printf("MinIO=%s bucket=%s；PostgreSQL=%s:%d/%s；SQLite=%s",a.cfg.Endpoint,a.cfg.Bucket,a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.StateDB)
  };return e
 }
