@@ -40,9 +40,9 @@ jobs:
       - name: Add templates and documentation
         working-directory: go
         run: |
-          cp config.example.json README.md dist/windows-amd64/
-          cp config.example.json README.md dist/linux-amd64/
-          cp config.example.json README.md dist/linux-arm64/
+          cp config.example.json config.count.example.json README.md dist/windows-amd64/
+          cp config.example.json config.count.example.json README.md dist/linux-amd64/
+          cp config.example.json config.count.example.json README.md dist/linux-arm64/
       - name: Package artifacts
         run: |
           cd go/dist
