@@ -12,6 +12,9 @@ import (
  "io"
  "log"
  "math"
+ "net"
+ "net/url"
+ "strconv"
  "os"
  "os/signal"
  "path"
@@ -100,10 +103,18 @@ func(c *Config)normalize(m string)error{
  }
  _=m;return nil
 }
+func postgresDSN(c Config) string {
+ q:=url.Values{}
+ q.Set("sslmode","prefer")
+ q.Set("connect_timeout","10")
+ q.Set("application_name","minio_task_downloader_go")
+ u:=url.URL{Scheme:"postgres",User:url.UserPassword(c.PGUser,c.PGPassword),Host:net.JoinHostPort(c.PGHost,strconv.Itoa(c.PGPort)),Path:"/"+c.PGDB,RawQuery:q.Encode()}
+ return u.String()
+}
 func(a *App)open()error{
  endpoint:=strings.TrimPrefix(strings.TrimPrefix(a.cfg.Endpoint,"https://"),"http://");secure:=a.cfg.SSL||strings.HasPrefix(a.cfg.Endpoint,"https://")
  mc,e:=minio.New(endpoint,&minio.Options{Creds:credentials.NewStaticV4(a.cfg.AccessKey,a.cfg.SecretKey,""),Secure:secure,Region:a.cfg.Region});if e!=nil{return e};a.mc=mc
- pg:=fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=prefer connect_timeout=10",a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.PGUser,a.cfg.PGPassword)
+ pg:=postgresDSN(a.cfg)
  p,e:=sql.Open("pgx",pg);if e!=nil{return e};defer p.Close();ctx,cancel:=context.WithTimeout(a.ctx,15*time.Second);defer cancel();if e=p.PingContext(ctx);e!=nil{return fmt.Errorf("PostgreSQL 连接失败: %w",e)}
  ok,e:=mc.BucketExists(ctx,a.cfg.Bucket);if e!=nil{return e};if !ok{return fmt.Errorf("MinIO bucket 不存在: %s",a.cfg.Bucket)}
  a.db,e=sql.Open("sqlite",a.cfg.StateDB);if e!=nil{return e};a.db.SetMaxOpenConns(1)
