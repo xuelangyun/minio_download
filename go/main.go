@@ -68,8 +68,27 @@ func(c *Config)normalize(m string)error{
  if c.PGPort==0{c.PGPort=5432};if c.DataVersion==""{c.DataVersion="银河2.2数据"};if c.StateDB==""{c.StateDB="minio_download_state.sqlite3"};if c.LogDir==""{c.LogDir="logs"}
  if c.MinFreeGB==0{c.MinFreeGB=3};if c.SafetyFactor==0{c.SafetyFactor=1.15};if c.Workers<=0{c.Workers=2};if c.MCAPPattern==""{c.MCAPPattern="*.SYNC.mcap"}
  if len(c.Disks)==0||len(c.Tasks)==0{return errors.New("disks/tasks 不能为空")}
- seen:=map[string]bool{};for _,t:=range c.Tasks{if t.Name==""||seen[t.Name]{return fmt.Errorf("任务名为空或重复: %q",t.Name)};seen[t.Name]=true;if t.TargetHours<0||t.TargetCount<0{return fmt.Errorf("任务 %s 的目标不能为负数",t.Name)}}
- for _,d:=range c.Disks{if d.Name==""||d.Path==""{return errors.New("磁盘 name/path 不能为空")}}
+ seen:=map[string]bool{};aliases:=map[string]string{};dirs:=map[string]string{}
+ for _,t:=range c.Tasks{
+  if strings.TrimSpace(t.Name)==""||seen[t.Name]{return fmt.Errorf("任务名为空或重复: %q",t.Name)}
+  seen[t.Name]=true
+  if t.TargetHours<0||t.TargetCount<0{return fmt.Errorf("任务 %s 的目标不能为负数",t.Name)}
+  if strings.TrimSpace(t.Scene)==""{return fmt.Errorf("任务 %s 的 scene 不能为空",t.Name)}
+  dir:=taskDir(t);key:=t.Scene+"\x00"+dir
+  if old,ok:=dirs[key];ok{return fmt.Errorf("场景 %s 下目录 %s 同时分配给 %s 和 %s",t.Scene,dir,old,t.Name)}
+  dirs[key]=t.Name
+ }
+ for _,t:=range c.Tasks{for _,alias:=range t.Aliases{
+  if alias==""||seen[alias]{return fmt.Errorf("任务 %s 的别名为空或与当前任务名冲突: %q",t.Name,alias)}
+  if owner,ok:=aliases[alias];ok{return fmt.Errorf("别名 %s 同时属于 %s 和 %s",alias,owner,t.Name)}
+  aliases[alias]=t.Name
+ }}
+ diskNames:=map[string]bool{};diskPaths:=map[string]bool{}
+ for _,d:=range c.Disks{
+  if strings.TrimSpace(d.Name)==""||strings.TrimSpace(d.Path)==""{return errors.New("磁盘 name/path 不能为空")}
+  if diskNames[d.Name]{return fmt.Errorf("磁盘名称重复: %s",d.Name)};diskNames[d.Name]=true
+  clean:=filepath.Clean(d.Path);if diskPaths[clean]{return fmt.Errorf("磁盘路径重复: %s",clean)};diskPaths[clean]=true
+ }
  _=m;return nil
 }
 func(a *App)open()error{
