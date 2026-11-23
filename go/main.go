@@ -1538,6 +1538,39 @@ func sweepPartial(root,parent string,objects []minio.ObjectInfo)error{
 func syncDirectory(dir string){
  f,err:=os.Open(dir);if err!=nil{return};_=f.Sync();_=f.Close()
 }
+func retryFileOperation(operation func()error,windows bool)error{
+ for attempt:=0;attempt<6;attempt++{
+  err:=operation()
+  if err==nil{return nil}
+  if !windows||!os.IsPermission(err)||attempt==5{return err}
+  time.Sleep(time.Duration(attempt+1)*200*time.Millisecond)
+ }
+ return nil
+}
+func replaceDownloadedFile(src,dst string)error{
+ return replaceDownloadedFileForOS(src,dst,runtime.GOOS=="windows")
+}
+func replaceDownloadedFileForOS(src,dst string,windows bool)error{
+ if !windows{return os.Rename(src,dst)}
+ _,statErr:=os.Lstat(dst)
+ if os.IsNotExist(statErr){return retryFileOperation(func()error{return os.Rename(src,dst)},true)}
+ if statErr!=nil{return statErr}
+ backupFile,err:=os.CreateTemp(filepath.Dir(dst),".minio-download-backup-*")
+ if err!=nil{return err}
+ backup:=backupFile.Name()
+ if err=backupFile.Close();err!=nil{_=os.Remove(backup);return err}
+ if err=os.Remove(backup);err!=nil{return err}
+ if err=retryFileOperation(func()error{return os.Rename(dst,backup)},true);err!=nil{return err}
+ if err=retryFileOperation(func()error{return os.Rename(src,dst)},true);err!=nil{
+  rollbackErr:=retryFileOperation(func()error{return os.Rename(backup,dst)},true)
+  if rollbackErr!=nil{return fmt.Errorf("替换目标文件失败: %v；恢复旧文件也失败: %w",err,rollbackErr)}
+  return err
+ }
+ if err=retryFileOperation(func()error{return os.Remove(backup)},true);err!=nil{
+  log.Printf("新文件已发布，但清理旧文件备份失败 %s: %v",backup,err)
+ }
+ return nil
+}
 func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *spaceReservation)error{
  if existingObjectComplete(dst,expected){return nil}
  tmp:=dst+".minio-tmp"
@@ -1610,8 +1643,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
    if err==nil&&!strings.EqualFold(sum,strings.Trim(expected.ETag,"\"")){err=fmt.Errorf("MD5 校验失败 %s: %s != %s",key,sum,expected.ETag)}
   }
   if err==nil{
-   _=os.Remove(dst)
-   if err=os.Rename(tmp,dst);err==nil{if !expected.LastModified.IsZero(){_=os.Chtimes(dst,expected.LastModified,expected.LastModified)};if *a.cfg.Fsync{syncDirectory(filepath.Dir(dst))}}
+   if err=replaceDownloadedFile(tmp,dst);err==nil{if !expected.LastModified.IsZero(){_=os.Chtimes(dst,expected.LastModified,expected.LastModified)};if *a.cfg.Fsync{syncDirectory(filepath.Dir(dst))}}
    if err==nil{return nil}
   }
   if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded){return err}
