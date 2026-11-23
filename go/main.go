@@ -881,18 +881,6 @@ func minioHTTPTransport(c Config)*http.Transport{
  if c.MinioSkipVerify{t.TLSClientConfig=&tls.Config{InsecureSkipVerify:true} /* #nosec: explicitly configured by operator */}
  return t
 }
-func minioTransport(cfg Config)*http.Transport{
- transport:=http.DefaultTransport.(*http.Transport).Clone()
- dialTimeout:=time.Duration(cfg.ConnectTimeout)*time.Second;if dialTimeout<=0{dialTimeout=10*time.Second}
- readTimeout:=time.Duration(cfg.ReadTimeout)*time.Second;if readTimeout<=0{readTimeout=120*time.Second}
- dialer:=&net.Dialer{Timeout:dialTimeout,KeepAlive:30*time.Second}
- transport.DialContext=dialer.DialContext
- transport.TLSHandshakeTimeout=dialTimeout
- // ResponseHeaderTimeout bounds waiting for MinIO response headers; streaming body reads remain context-cancellable.
- transport.ResponseHeaderTimeout=readTimeout
- if cfg.MinioSkipVerify{transport.TLSClientConfig=&tls.Config{InsecureSkipVerify:true} /* #nosec: explicitly configured by operator */}
- return transport
-}
 func(a *App)open()error{
  endpoint:=strings.TrimPrefix(strings.TrimPrefix(a.cfg.Endpoint,"https://"),"http://");secure:=a.cfg.SSL||strings.HasPrefix(a.cfg.Endpoint,"https://")
  transport:=minioHTTPTransport(a.cfg)
