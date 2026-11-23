@@ -55,7 +55,7 @@ Windows PowerShell：
 3. 将 `config_db` 设置为 Python 的 `minio_downloader_config.sqlite3` 文件路径；`state_db` 设置为 Python 的 `minio_download_state.sqlite3` 路径；若希望 Python Web 识别 Go 进程和读取日志，还要把 `pid_file`、`log_dir` 分别指向 Python 的 `minio_download.pid` 和 `logs` 目录。
 4. 运行 `./minio-download --config config.json`，未指定 `--mode` 时会自动识别为 `count`。
 
-Go 对配置库只读，不会改写 Python Web 保存的配置。当前导入 MinIO、PostgreSQL、磁盘、任务顺序、别名、条数目标和下载参数。`config_db` 目前只支持 `count` 模式；时长模式仍使用 `config.example.json` 中的 `target_hours`，避免把 Python 条数目标误解释为时长目标。
+Go 对配置库只读，不会改写 Python Web 保存的配置。当前导入 MinIO、PostgreSQL、TLS 证书校验策略、磁盘、任务顺序、别名、条数目标、校验/传输参数及 fsync 策略。`config_db` 目前只支持 `count` 模式；时长模式仍使用 `config.example.json` 中的 `target_hours`，避免把 Python 条数目标误解释为时长目标。
 
 ## 当前限制
 
