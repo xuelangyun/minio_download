@@ -322,3 +322,17 @@ func TestPIDFileLifecycle(t *testing.T) {
 		t.Fatalf("PID file should be removed, got err=%v", err)
 	}
 }
+
+func TestIsStopRequestedAcceptsPythonTimestamp(t *testing.T) {
+	for _, value := range []string{"1", "2026-11-23T03:05:30+00:00", "  2026-11-23T03:05:30Z  "} {
+		if !isStopRequested(value) {
+			t.Fatalf("expected pause request for %q", value)
+		}
+	}
+	for _, value := range []string{"", " ", "0", " 0 "} {
+		if isStopRequested(value) {
+			t.Fatalf("did not expect pause request for %q", value)
+		}
+	}
+}
+
