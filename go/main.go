@@ -163,16 +163,76 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  _=a.set(e,d,final,partial,"running","");var total int64
  for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:true}){if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)};if obj.IsDir||strings.HasSuffix(obj.Key,"/"){continue}
   rel:=strings.TrimPrefix(obj.Key,e.ParentKey+"/");dst,err:=safeJoin(partial,rel);if err!=nil{return a.fail(e,d,final,partial,err)};if err=os.MkdirAll(filepath.Dir(dst),0755);err!=nil{return a.fail(e,d,final,partial,err)}
-  tmp:=dst+".minio-tmp";if err=a.fetchObject(obj.Key,tmp);err!=nil{return a.fail(e,d,final,partial,err)};if err=os.Remove(dst);err!=nil&&!os.IsNotExist(err){return a.fail(e,d,final,partial,err)};if err=os.Rename(tmp,dst);err!=nil{return a.fail(e,d,final,partial,err)};total+=obj.Size
+  tmp:=dst+".minio-tmp";_ = tmp;if err=a.fetchObject(obj.Key,dst,obj);err!=nil{return a.fail(e,d,final,partial,err)};total+=obj.Size
  }
  if total==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
  if err:=os.RemoveAll(final);err!=nil{return a.fail(e,d,final,partial,err)};if err:=os.Rename(partial,final);err!=nil{return a.fail(e,d,final,partial,err)}
  if err:=a.set(e,d,final,"","completed","");err!=nil{return err};return a.record(e,d,final)
 }
-func(a *App)fetchObject(key,tmp string)error{
- obj,e:=a.mc.GetObject(a.ctx,a.cfg.Bucket,key,minio.GetObjectOptions{});if e!=nil{return e};defer obj.Close();info,e:=obj.Stat();if e!=nil{return e}
- f,e:=os.OpenFile(tmp,os.O_CREATE|os.O_TRUNC|os.O_WRONLY,0644);if e!=nil{return e};n,ce:=io.Copy(f,obj);se:=f.Sync();fe:=f.Close();if ce!=nil{return ce};if se!=nil{return se};if fe!=nil{return fe};if n!=info.Size{return fmt.Errorf("对象大小校验失败 %s: %d != %d",key,n,info.Size)};return nil
+func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
+ tmp:=dst+".minio-tmp"
+ const attempts=5
+ for attempt:=1;attempt<=attempts;attempt++{
+  if a.ctx.Err()!=nil{return a.ctx.Err()}
+  offset:=int64(0)
+  if st,err:=os.Stat(tmp);err==nil{
+   if st.Size()>expected.Size{_=os.Remove(tmp)}else{offset=st.Size()}
+  }else if !os.IsNotExist(err){return err}
+  opts:=minio.GetObjectOptions{}
+  if expected.ETag!=""{if err:=opts.SetMatchETag(strings.Trim(expected.ETag,"\""));err!=nil{return err}}
+  if offset>0{if err:=opts.SetRange(offset,0);err!=nil{return err}}
+  obj,err:=a.mc.GetObject(a.ctx,a.cfg.Bucket,key,opts)
+  if err==nil{
+   var info minio.ObjectInfo
+   info,err=obj.Stat()
+   if err==nil&&(info.Size!=expected.Size||!sameETag(info.ETag,expected.ETag)){err=fmt.Errorf("对象元数据发生变化: %s",key)}
+   if err==nil{
+    flags:=os.O_CREATE|os.O_WRONLY
+    if offset>0{flags|=os.O_APPEND}else{flags|=os.O_TRUNC}
+    var out *os.File
+    out,err=os.OpenFile(tmp,flags,0644)
+    if err==nil{
+     var n int64
+     n,err=io.Copy(out,obj)
+     if err==nil{err=out.Sync()}
+     closeErr:=out.Close()
+     if err==nil{err=closeErr}
+     if err==nil&&n!=expected.Size-offset{err=fmt.Errorf("对象分段长度不符 %s: got=%d want=%d",key,n,expected.Size-offset)}
+    }
+   }
+   _=obj.Close()
+  }
+  if err==nil{
+   var st os.FileInfo
+   st,err=os.Stat(tmp)
+   if err==nil&&st.Size()!=expected.Size{err=fmt.Errorf("对象大小校验失败 %s: %d != %d",key,st.Size(),expected.Size)}
+  }
+  if err==nil{
+   latest,statErr:=a.mc.StatObject(a.ctx,a.cfg.Bucket,key,minio.StatObjectOptions{})
+   if statErr!=nil{err=statErr}else if latest.Size!=expected.Size||!sameETag(latest.ETag,expected.ETag){err=fmt.Errorf("下载期间远端对象被修改: %s",key)}
+  }
+  if err==nil&&isMD5ETag(expected.ETag){
+   var sum string
+   sum,err=fileMD5(tmp)
+   if err==nil&&!strings.EqualFold(sum,strings.Trim(expected.ETag,"\"")){err=fmt.Errorf("MD5 校验失败 %s: %s != %s",key,sum,expected.ETag)}
+  }
+  if err==nil{
+   _=os.Remove(dst)
+   if err=os.Rename(tmp,dst);err==nil&&!expected.LastModified.IsZero(){_=os.Chtimes(dst,expected.LastModified,expected.LastModified)}
+   if err==nil{return nil}
+  }
+  if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded){return err}
+  if err!=nil&&strings.Contains(err.Error(),"远端对象被修改"){_=os.Remove(tmp)}
+  if attempt<attempts{
+   log.Printf("对象下载重试 %d/%d: %s: %v",attempt,attempts,key,err)
+   select{case <-a.ctx.Done():return a.ctx.Err();case <-time.After(time.Duration(attempt)*time.Second):}
+  }
+ }
+ return fmt.Errorf("对象下载重试 %d 次仍失败: %s",attempts,key)
 }
+func sameETag(a,b string)bool{return strings.Trim(a,"\"")==strings.Trim(b,"\"")}
+func isMD5ETag(etag string)bool{v:=strings.Trim(etag,"\"");if len(v)!=32||strings.Contains(v,"-"){return false};_,err:=hex.DecodeString(v);return err==nil}
+func fileMD5(name string)(string,error){f,err:=os.Open(name);if err!=nil{return "",err};defer f.Close();h:=md5.New();if _,err=io.Copy(h,f);err!=nil{return "",err};return hex.EncodeToString(h.Sum(nil)),nil}
 func(a *App)fail(e Episode,d DiskConfig,final,partial string,err error)error{_=a.set(e,d,final,partial,"failed",err.Error());log.Printf("下载失败 %s: %v",e.ID,err);return err}
 func(a *App)cleanup(preview bool)(int,error){
  rows,e:=a.db.Query("SELECT episode_id,target_path FROM downloads WHERE status='completed'");if e!=nil{return 0,e};defer rows.Close();n:=0
