@@ -1019,3 +1019,25 @@ func TestConfiguredConnectionTimeoutsAreApplied(t *testing.T) {
 	if err!=nil { t.Fatal(err) }
 	if u.Query().Get("connect_timeout")!="7" { t.Fatalf("PostgreSQL connect_timeout mismatch: %s",u.Query().Get("connect_timeout")) }
 }
+
+func TestApplyWebSettingCoversAllRuntimeSettings(t *testing.T) {
+ cfg:=Config{}
+ cases:=[]struct{key string;value any}{
+  {"run.default_rounds",3},
+  {"transfer.connect_timeout",17},
+  {"transfer.read_timeout",240},
+  {"web.host","0.0.0.0"},
+  {"web.port",9876},
+ }
+ for _,tc:=range cases{applyWebSetting(&cfg,tc.key,tc.value)}
+ if cfg.DefaultRounds!=3||cfg.ConnectTimeout!=17||cfg.ReadTimeout!=240||cfg.WebHost!="0.0.0.0"||cfg.WebPort!=9876{
+  t.Fatalf("operational settings not applied: %#v",cfg)
+ }
+}
+func TestMinioTransportUsesConfiguredTimeouts(t *testing.T) {
+ tr:=minioTransport(Config{ConnectTimeout:23,ReadTimeout:321})
+ defer tr.CloseIdleConnections()
+ if tr.TLSHandshakeTimeout!=23*time.Second{t.Fatalf("TLS handshake timeout=%s",tr.TLSHandshakeTimeout)}
+ if tr.ResponseHeaderTimeout!=321*time.Second{t.Fatalf("response header timeout=%s",tr.ResponseHeaderTimeout)}
+ if tr.DialContext==nil{t.Fatal("dial timeout transport hook is missing")}
+}
