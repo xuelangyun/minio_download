@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -162,5 +163,43 @@ func TestAddSpaceReservations(t *testing.T) {
 	}
 	if _, ok := addSpaceReservations(^uint64(0)-10, 1, 10); ok {
 		t.Fatal("expected minimum-free overflow to be rejected")
+	}
+}
+
+func TestPathIsDirIncludesEmptyFinalDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "empty-final")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !pathIsDir(dir) {
+		t.Fatal("an existing final directory should be recognized even when empty")
+	}
+	if pathIsDir(filepath.Join(dir, "missing")) {
+		t.Fatal("a missing directory must not be recognized")
+	}
+}
+
+func TestCompletedHonorsTrustedLedger(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	_, err = db.Exec("CREATE TABLE downloads(episode_id TEXT PRIMARY KEY,status TEXT,target_path TEXT); CREATE TABLE downloaded_episodes(episode_id TEXT PRIMARY KEY,target_path TEXT,disk_name TEXT);")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("INSERT INTO downloaded_episodes(episode_id,target_path,disk_name) VALUES('ep-1','/archived/disk/episode','old-disk')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{db: db, cfg: Config{TrustCompletedRecords: true}}
+	if !app.completed("ep-1") {
+		t.Fatal("trusted historical ledger entry should count as completed even when archived path is unavailable")
+	}
+	app.cfg.TrustCompletedRecords = false
+	if app.completed("ep-1") {
+		t.Fatal("untrusted ledger entry with a missing path must not count as completed")
 	}
 }
