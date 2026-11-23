@@ -1106,3 +1106,19 @@ func TestWebAuthTokenCanSetRotateAndClear(t *testing.T) {
 	if err = db.QueryRow("SELECT value FROM settings WHERE key='web.token_hash'").Scan(&raw); err != nil { t.Fatal(err) }
 	if raw != "null" { t.Fatalf("cleared token must persist JSON null, got %q", raw) }
 }
+
+func TestAcquireSemaphoreStopsWhenContextCancelled(t *testing.T) {
+ ctx,cancel:=context.WithCancel(context.Background())
+ sem:=make(chan struct{},1)
+ sem<-struct{}{}
+ cancel()
+ started:=time.Now()
+ if acquireSemaphore(ctx,sem){t.Fatal("cancelled context unexpectedly acquired a full semaphore")}
+ if time.Since(started)>100*time.Millisecond{t.Fatal("semaphore acquisition did not stop promptly")}
+}
+func TestAcquireSemaphoreAcquiresAvailableSlot(t *testing.T) {
+ ctx,cancel:=context.WithCancel(context.Background());defer cancel()
+ sem:=make(chan struct{},1)
+ if !acquireSemaphore(ctx,sem){t.Fatal("available semaphore slot was not acquired")}
+ if len(sem)!=1{t.Fatalf("semaphore occupancy=%d, want 1",len(sem))}
+}
