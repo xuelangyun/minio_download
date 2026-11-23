@@ -301,7 +301,7 @@ func TestPIDFileLifecycle(t *testing.T) {
 	if err := json.Unmarshal(data, &record); err != nil {
 		t.Fatal(err)
 	}
-	if record.PID != os.Getpid() || record.Mode != "count" || record.CreatedAt == "" {
+	if record.PID != os.Getpid() || record.Mode != "count" || record.Created <= 0 || record.CreatedAt == "" {
 		t.Fatalf("unexpected PID record: %+v", record)
 	}
 	removePIDFile(name)
