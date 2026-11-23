@@ -84,6 +84,7 @@ func main(){
  if *mode!="duration"&&*mode!="count"{log.Fatal("--mode 只能是 duration 或 count")}
  if e=loadConfigDB(&c,*mode);e!=nil{log.Fatalf("读取 SQLite 配置库失败: %v",e)}
  if e=c.normalize(*mode);e!=nil{log.Fatal(e)}
+ if *cleanup&&!c.RequireMCAP{log.Fatal("require_mcap 已关闭，不能清理缺少 mcap 的目录；请先在配置中启用 require_mcap")}
  effectiveRounds:=c.DefaultRounds;if *rounds>0{effectiveRounds=*rounds};if effectiveRounds<1||effectiveRounds>50{log.Fatal("--max-rounds / run.default_rounds 必须在 1 到 50 之间")}
  if *webFlag{host:=c.WebHost;port:=c.WebPort;if *webHost!=""{host=*webHost};if *webPort>0{port=*webPort};if e=serveWeb(c,host,port);e!=nil{log.Fatal(e)};return}
  _=os.MkdirAll(filepath.Dir(c.StateDB),0755);_=os.MkdirAll(filepath.Dir(c.LockFile),0755);_=os.MkdirAll(c.LogDir,0755)
