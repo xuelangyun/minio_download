@@ -195,6 +195,10 @@ func TestSpaceReservationRestoreAfterDiscardedPartial(t *testing.T) {
  reservation.Release()
  if _,ok:=app.spaceInFlight["disk-a"];ok{t.Fatal("release should clear remaining reservation")}
 }
+func TestDynamicSpaceExhaustionIsClassified(t *testing.T) {
+ err:=fmt.Errorf("%w: disk=target",errInsufficientDiskSpace)
+ if !errors.Is(err,errInsufficientDiskSpace){t.Fatal("wrapped capacity exhaustion must remain classifiable")}
+}
 func TestSpaceReservationConsumeAndRelease(t *testing.T) {
  app:=&App{cfg:Config{MinFreeGB:0}}
  diskCfg:=DiskConfig{Name:"disk-a",Path:t.TempDir()}
