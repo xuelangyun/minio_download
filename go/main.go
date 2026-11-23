@@ -241,6 +241,34 @@ func(a *App)cleanup(preview bool)(int,error){
 }
 func dirHasFiles(p string)bool{x,e:=os.ReadDir(p);return e==nil&&len(x)>0}
 func hasPattern(p,pat string)bool{x,e:=os.ReadDir(p);if e!=nil{return false};for _,v:=range x{if !v.IsDir(){if ok,_:=path.Match(pat,v.Name());ok{return true}}};return false}
-func safe(s string)string{s=strings.TrimSpace(s);if s==""||s=="."||s==".."{return "_"};r:=strings.NewReplacer("/","_","\\","_",":","_","*","_","?","_","\"","_","<","_",">","_","|","_");s=strings.TrimRight(r.Replace(s),". ");if s==""{return "_"};return s}
-func safeJoin(root,rel string)(string,error){c:=path.Clean(strings.ReplaceAll(rel,"\\","/"));if c=="."||c==".."||strings.HasPrefix(c,"../")||strings.HasPrefix(c,"/"){return "",fmt.Errorf("非法对象路径 %q",rel)};p:=filepath.Join(root,filepath.FromSlash(c));r,e:=filepath.Rel(root,p);if e!=nil||r==".."||strings.HasPrefix(r,".."+string(os.PathSeparator)){return "",fmt.Errorf("对象路径越界 %q",rel)};return p,nil}
+func safe(s string)string{
+ s=strings.TrimSpace(s)
+ if s==""||s=="."||s==".."{return "_"}
+ r:=strings.NewReplacer("/","_","\\","_",":","_","*","_","?","_","\"","_","<","_",">","_","|","_")
+ s=strings.TrimRight(r.Replace(s),". ")
+ if s==""{return "_"}
+ if runtime.GOOS=="windows"&&windowsReserved(s){s="_"+s}
+ return s
+}
+func windowsReserved(s string)bool{
+ base:=strings.ToUpper(strings.TrimSuffix(s,filepath.Ext(s)))
+ if base=="CON"||base=="PRN"||base=="AUX"||base=="NUL"{return true}
+ if len(base)==4&&(strings.HasPrefix(base,"COM")||strings.HasPrefix(base,"LPT"))&&base[3]>='1'&&base[3]<='9'{return true}
+ return false
+}
+func invalidWindowsObjectPart(s string)bool{
+ if strings.TrimRight(s," .")!=s||windowsReserved(s)||strings.ContainsAny(s,`<>:"\\|?*`){return true}
+ for _,r:=range s{if r<32{return true}}
+ return false
+}
+func safeJoin(root,rel string)(string,error){
+ normalized:=strings.ReplaceAll(rel,"\\","/")
+ c:=path.Clean(normalized)
+ if c=="."||c==".."||strings.HasPrefix(c,"../")||strings.HasPrefix(c,"/"){return "",fmt.Errorf("非法对象路径 %q",rel)}
+ if runtime.GOOS=="windows"{for _,part:=range strings.Split(c,"/"){if invalidWindowsObjectPart(part){return "",fmt.Errorf("Windows 不支持的对象文件名 %q",part)}}}
+ p:=filepath.Join(root,filepath.FromSlash(c))
+ r,e:=filepath.Rel(root,p)
+ if e!=nil||r==".."||strings.HasPrefix(r,".."+string(os.PathSeparator)){return "",fmt.Errorf("对象路径越界 %q",rel)}
+ return p,nil
+}
 func taskDir(t Task)string{if t.Dir!=""{return t.Dir};return t.Name}
