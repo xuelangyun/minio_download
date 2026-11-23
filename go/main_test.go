@@ -307,8 +307,8 @@ func TestExistingPartialBytesIgnoresInvalidOrCompleteTempFiles(t *testing.T) {
  if err:=os.WriteFile(dst+".minio-tmp",[]byte("12345"),0600);err!=nil{t.Fatal(err)}
  if got:=existingPartialBytes(dst,100);got!=5{t.Fatalf("partial temp: got %d want 5",got)}
  if err:=os.WriteFile(dst+".minio-tmp",make([]byte,100),0600);err!=nil{t.Fatal(err)}
- if got:=existingPartialBytes(dst,100);got!=0{t.Fatalf("complete temp should be re-downloaded: got %d want 0",got)}
- if got:=remainingObjectBytes(dst,100);got!=100{t.Fatalf("complete temp remaining: got %d want 100",got)}
+ if got:=existingPartialBytes(dst,100);got!=100{t.Fatalf("complete temp should be retained as resumable: got %d want 100",got)}
+ if got:=remainingObjectBytes(dst,100);got!=0{t.Fatalf("complete temp remaining: got %d want 0",got)}
 }
 func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
  dir:=t.TempDir();dst:=filepath.Join(dir,"object.bin")
@@ -316,7 +316,14 @@ func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
  if err:=os.WriteFile(dst+".minio-tmp",[]byte("12345"),0600);err!=nil{t.Fatal(err)}
  if got:=remainingObjectBytes(dst,100);got!=95{t.Fatalf("partial resume: got %d want 95",got)}
  if err:=os.WriteFile(dst+".minio-tmp",make([]byte,100),0600);err!=nil{t.Fatal(err)}
- if got:=remainingObjectBytes(dst,100);got!=100{t.Fatalf("complete temp will be discarded and redownloaded: got %d want 100",got)}
+ if got:=remainingObjectBytes(dst,100);got!=0{t.Fatalf("complete temp remaining: got %d want 0",got)}
+}
+func TestResumeOffsetBacksOffOnlyOnFirstAttempt(t *testing.T) {
+ if got:=resumeOffset(200,300,true);got!=200-resumeBackoffBytes&&200>resumeBackoffBytes{t.Fatalf("backoff offset=%d",got)}
+ if got:=resumeOffset(resumeBackoffBytes+10,300,true);got!=10{t.Fatalf("first-attempt offset=%d want 10",got)}
+ if got:=resumeOffset(resumeBackoffBytes+10,300,false);got!=resumeBackoffBytes+10{t.Fatalf("retry offset=%d",got)}
+ if got:=resumeOffset(100,90,true);got!=0{t.Fatalf("oversized partial offset=%d want 0",got)}
+ if got:=resumeOffset(10,100,true);got!=10{t.Fatalf("small partial offset=%d want 10",got)}
 }
 func TestAddSpaceReservations(t *testing.T) {
 	got, ok := addSpaceReservations(100, 200, 30)
