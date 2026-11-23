@@ -25,7 +25,7 @@ jobs:
       - name: Run focused unit tests
         working-directory: go
         run: |
-          go test ./... -run "^(TestSafeJoinRejectsTraversal|TestLoadConfigDBImportsPythonCountConfiguration|TestResumeReservationTracksOnlyRemainingBytes|TestCompletedEpisodeDirRequiresTaskInfo|TestWebAPIRequiresBearerTokenWhenConfigured|TestMissingMCAPCleanupCanRecoverAfterInterruption)$"
+          go test ./... -run "^(TestSafeJoinRejectsTraversal|TestLoadConfigDBImportsPythonCountConfiguration|TestResumeReservationTracksOnlyRemainingBytes|TestCompletedEpisodeDirRequiresTaskInfo|TestWebAPIRequiresBearerTokenWhenConfigured|TestMissingMCAPCleanupCanRecoverAfterInterruption|TestFirstRunUsesSingleSQLiteDatabase)$"
       - name: Build Windows amd64
         working-directory: go
         run: |
