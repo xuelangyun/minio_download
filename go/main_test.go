@@ -525,6 +525,41 @@ func TestFindExistingTaskDiskHonorsRequiredMCAP(t *testing.T) {
  if err!=nil{t.Fatal(err)}
  if got!="disk1"{t.Fatalf("valid episode disk=%q",got)}
 }
+func TestReconcileInterruptedDownloadsPreservesPartialAndRecoversFinal(t *testing.T) {
+ db,err:=sql.Open("sqlite",filepath.Join(t.TempDir(),"state.db"));if err!=nil{t.Fatal(err)};defer db.Close();db.SetMaxOpenConns(1)
+ _,err=db.Exec("CREATE TABLE downloads(episode_id TEXT PRIMARY KEY,status TEXT,target_path TEXT,partial_path TEXT,error TEXT,completed_at TEXT,updated_at TEXT);")
+ if err!=nil{t.Fatal(err)}
+ root:=t.TempDir();complete:=filepath.Join(root,"complete");partial:=filepath.Join(root,"partial")
+ if err=os.Mkdir(complete,0755);err!=nil{t.Fatal(err)}
+ if err=os.WriteFile(filepath.Join(complete,"task_info.json"),[]byte("{}"),0600);err!=nil{t.Fatal(err)}
+ if err=os.Mkdir(partial,0755);err!=nil{t.Fatal(err)}
+ if err=os.WriteFile(filepath.Join(partial,"part.bin"),[]byte("partial"),0600);err!=nil{t.Fatal(err)}
+ _,err=db.Exec("INSERT INTO downloads(episode_id,status,target_path,partial_path) VALUES('done','running',?,'')",complete);if err!=nil{t.Fatal(err)}
+ _,err=db.Exec("INSERT INTO downloads(episode_id,status,target_path,partial_path) VALUES('resume','running',?,?)",filepath.Join(root,"missing-final"),partial);if err!=nil{t.Fatal(err)}
+ app:=&App{db:db,cfg:Config{}}
+ if err=app.reconcileInterruptedDownloads();err!=nil{t.Fatal(err)}
+ var status,partialPath string
+ if err=db.QueryRow("SELECT status,COALESCE(partial_path,'') FROM downloads WHERE episode_id='done'").Scan(&status,&partialPath);err!=nil{t.Fatal(err)}
+ if status!="completed"{t.Fatalf("valid final directory status=%q",status)}
+ if err=db.QueryRow("SELECT status,partial_path FROM downloads WHERE episode_id='resume'").Scan(&status,&partialPath);err!=nil{t.Fatal(err)}
+ if status!="pending"{t.Fatalf("interrupted partial status=%q, want pending",status)}
+ if partialPath!=partial{t.Fatalf("partial path lost: got %q want %q",partialPath,partial)}
+ if _,err=os.Stat(filepath.Join(partial,"part.bin"));err!=nil{t.Fatalf("partial file should be preserved: %v",err)}
+ var message string
+ if err=db.QueryRow("SELECT error FROM downloads WHERE episode_id='resume'").Scan(&message);err!=nil{t.Fatal(err)}
+ if !strings.Contains(message,"续传"){t.Fatalf("recovery reason not recorded: %q",message)}
+}
+func TestReconcileInterruptedDownloadsIsIdempotent(t *testing.T) {
+ db,err:=sql.Open("sqlite",filepath.Join(t.TempDir(),"state.db"));if err!=nil{t.Fatal(err)};defer db.Close();db.SetMaxOpenConns(1)
+ _,err=db.Exec("CREATE TABLE downloads(episode_id TEXT PRIMARY KEY,status TEXT,target_path TEXT,partial_path TEXT,error TEXT,completed_at TEXT,updated_at TEXT);");if err!=nil{t.Fatal(err)}
+ _,err=db.Exec("INSERT INTO downloads(episode_id,status,target_path,partial_path) VALUES('ep','running','/missing/final','/partial/keep')");if err!=nil{t.Fatal(err)}
+ app:=&App{db:db,cfg:Config{}}
+ if err=app.reconcileInterruptedDownloads();err!=nil{t.Fatal(err)}
+ if err=app.reconcileInterruptedDownloads();err!=nil{t.Fatal(err)}
+ var status,partial string
+ if err=db.QueryRow("SELECT status,partial_path FROM downloads WHERE episode_id='ep'").Scan(&status,&partial);err!=nil{t.Fatal(err)}
+ if status!="pending"||partial!="/partial/keep"{t.Fatalf("unexpected reconciled state status=%q partial=%q",status,partial)}
+}
 func TestCompletedEpisodeDirRequiresTaskInfo(t *testing.T) {
  dir:=t.TempDir()
  if completedEpisodeDir(dir,false,""){t.Fatal("empty directory must not count as completed")}
