@@ -33,6 +33,7 @@ import (
 type Task struct { Name string `json:"name"`; Scene string `json:"scene"`; Dir string `json:"dir"`; Aliases []string `json:"aliases"`; TargetHours float64 `json:"target_hours"`; TargetCount int `json:"target_count"` }
 type DiskConfig struct { Name string `json:"name"`; Path string `json:"path"`; Mountpoint string `json:"mountpoint"` }
 type Config struct {
+ Mode string `json:"mode"`
  Endpoint string `json:"minio_endpoint"`; AccessKey string `json:"minio_access_key"`; SecretKey string `json:"minio_secret_key"`; Bucket string `json:"minio_bucket"`; Region string `json:"minio_region"`; SSL bool `json:"minio_use_ssl"`
  PGHost string `json:"pg_host"`; PGPort int `json:"pg_port"`; PGDB string `json:"pg_database"`; PGUser string `json:"pg_user"`; PGPassword string `json:"pg_password"`
  DataVersion string `json:"data_version"`; LockFile string `json:"lock_file"`; StateDB string `json:"state_db"`; LogDir string `json:"log_dir"`; MinFreeGB float64 `json:"min_free_gb"`; SafetyFactor float64 `json:"space_safety_factor"`
@@ -68,6 +69,7 @@ func main(){
  log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH)
 }
 func(c *Config)normalize(m string)error{
+ if c.Mode!=""&&c.Mode!=m{return fmt.Errorf("配置文件 mode=%s 与命令行 --mode=%s 不一致",c.Mode,m)}
  if c.Endpoint==""||c.AccessKey==""||c.SecretKey==""||c.Bucket==""{return errors.New("MinIO endpoint/access_key/secret_key/bucket 必须填写")}
  if c.PGHost==""||c.PGDB==""||c.PGUser==""||c.PGPassword==""{return errors.New("PostgreSQL 连接参数必须填写")}
  if c.PGPort==0{c.PGPort=5432};if c.DataVersion==""{c.DataVersion="银河2.2数据"};if c.LockFile==""{c.LockFile="minio_download.lock"};if c.StateDB==""{c.StateDB="minio_download_state.sqlite3"};if c.LogDir==""{c.LogDir="logs"}
@@ -136,7 +138,7 @@ func ensureColumn(db *sql.DB,table,column,typ string)error{
 func nullable(s string)any{if s==""{return nil};return s}
 func(a *App)completed(id string)bool{var p sql.NullString;err:=a.db.QueryRow("SELECT target_path FROM downloads WHERE episode_id=? AND status='completed'",id).Scan(&p);if err!=nil{return false};if a.cfg.TrustCompletedRecords{return true};return p.Valid&&dirHasFiles(p.String)}
 func(a *App)stats(task string)(float64,int){rows,err:=a.db.Query("SELECT content_time,target_path FROM downloaded_episodes WHERE task_name=?",task);if err!=nil{return 0,0};defer rows.Close();var seconds float64;count:=0;for rows.Next(){var v sql.NullFloat64;var p sql.NullString;if rows.Scan(&v,&p)!=nil{continue};if a.cfg.TrustCompletedRecords||(p.Valid&&dirHasFiles(p.String)){seconds+=v.Float64;count++}};return seconds,count}
-func(a *App)assign(task,disk string){tx,err:=a.db.Begin();if err!=nil{return};_,_=tx.Exec("DELETE FROM task_disk_assignments WHERE task_name=?",task);_,_=tx.Exec("INSERT INTO task_disk_assignments(task_name,disk_name,last_used_at) VALUES(?,?,?)",task,disk,time.Now().UTC().Format(time.RFC3339Nano));_=tx.Commit()}
+func(a *App)assign(task,disk string)error{tx,err:=a.db.Begin();if err!=nil{return err};defer tx.Rollback();if _,err=tx.Exec("DELETE FROM task_disk_assignments WHERE task_name=?",task);err!=nil{return err};if _,err=tx.Exec("INSERT INTO task_disk_assignments(task_name,disk_name,last_used_at) VALUES(?,?,?)",task,disk,time.Now().UTC().Format(time.RFC3339Nano));err!=nil{return err};return tx.Commit()}
 func(a *App)assigned(task string)string{var d string;_=a.db.QueryRow("SELECT disk_name FROM task_disk_assignments WHERE task_name=? ORDER BY last_used_at DESC LIMIT 1",task).Scan(&d);return d}
 func(a *App)record(e Episode,d DiskConfig,final string)error{
  _,err:=a.db.Exec("INSERT INTO downloaded_episodes(episode_id,task_name,source_task_name,job_id,sn_code,parent_key,disk_name,target_path,file_size,content_time,create_time,downloaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "+
@@ -197,17 +199,21 @@ func validateDisk(d DiskConfig)error{
 }
 func(a *App)downloadSelected(sel map[string][]Episode)error{
  loads:=map[string]int{};for _,t:=range a.cfg.Tasks{if a.assigned(t.Name)!=""{loads[a.assigned(t.Name)]++}}
- byDisk:=map[string][]batch{}
+ byDisk:=map[string][]batch{};waitingSpace:=false
  for _,t:=range a.cfg.Tasks{rs:=sel[t.Name];if len(rs)==0{continue};var d *DiskConfig;old:=a.assigned(t.Name)
   for i:=range a.cfg.Disks{if old!=""&&a.cfg.Disks[i].Name==old{d=&a.cfg.Disks[i];break}}
   if d==nil{for i:=range a.cfg.Disks{x:=&a.cfg.Disks[i];if d==nil||loads[x.Name]<loads[d.Name]{d=x}}};if d==nil{return errors.New("没有配置目标磁盘")}
   if err:=validateDisk(*d);err!=nil{return err}
   if err:=os.MkdirAll(d.Path,0755);err!=nil{return err}
   usage,err:=disk.Usage(d.Path);if err!=nil{return err};var bytes int64;for _,e:=range rs{bytes+=e.Size};need:=uint64(float64(bytes)*a.cfg.SafetyFactor+a.cfg.MinFreeGB*1024*1024*1024)
-  if usage.Free<need{log.Printf("任务整体空间预检不通过，未启动: %s free=%d need=%d",t.Name,usage.Free,need);continue}
-  a.assign(t.Name,d.Name);loads[d.Name]++;byDisk[d.Name]=append(byDisk[d.Name],batch{t,*d,rs})
+  if usage.Free<need{
+   log.Printf("任务整体空间预检不通过，未启动: %s free=%d need=%d",t.Name,usage.Free,need)
+   for _,ep:=range rs{_=a.set(ep,*d,"","","waiting_space","磁盘剩余空间不足，任务整体未启动")}
+   waitingSpace=true;continue
+  }
+  if err:=a.assign(t.Name,d.Name);err!=nil{return fmt.Errorf("保存任务磁盘分配失败 %s: %w",t.Name,err)};loads[d.Name]++;byDisk[d.Name]=append(byDisk[d.Name],batch{t,*d,rs})
  }
- var wg sync.WaitGroup;errs:=make(chan error,len(byDisk));for _,bs:=range byDisk{bs:=bs;wg.Add(1);go func(){defer wg.Done();for _,b:=range bs{if a.ctx.Err()!=nil{return};if e:=a.downloadTask(b);e!=nil{errs<-e;return}}}()};wg.Wait();close(errs);for e:=range errs{if e!=nil{return e}};return nil
+ var wg sync.WaitGroup;errs:=make(chan error,len(byDisk));for _,bs:=range byDisk{bs:=bs;wg.Add(1);go func(){defer wg.Done();for _,b:=range bs{if a.ctx.Err()!=nil{return};if e:=a.downloadTask(b);e!=nil{errs<-e;return}}}()};wg.Wait();close(errs);for e:=range errs{if e!=nil{return e}};if waitingSpace{return errors.New("部分任务因磁盘空间不足未启动；请释放空间后重新运行")};return nil
 }
 func(a *App)downloadTask(b batch)error{
  sem:=make(chan struct{},a.cfg.Workers);var wg sync.WaitGroup;var mu sync.Mutex;var first error
