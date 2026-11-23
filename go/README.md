@@ -62,15 +62,15 @@ Go 对配置库只读，不会改写 Python Web 保存的配置。当前导入 M
 
 ## Go Web API 当前范围
 
-`--web` 可启动独立 HTTP 服务，提供只读配置 `GET /api/config`、状态 `GET /api/status`、`GET /api/episodes?task=任务名`、`GET /api/logs?offset=N`、`POST /api/run` 启动下载、安全暂停 `POST /api/stop` 和无需口令的 `GET /healthz`。`GET /api/config` 返回设置 schema、分组、任务 / 标签、磁盘、配置路径和运行状态；Secret Key / PostgreSQL 密码始终返回空串，并通过 `secrets_set` 标记是否已保存。`/api/run` 当前只接受 `mode=download`，支持 `max_rounds`（1–50）和 `recheck_missing`；Web 会以独立进程组启动下载器，关闭 Web 不会连带终止下载。暂停请求必须使用 `Content-Type: application/json`，请求体 `{}`；Web 支持安全暂停与强制结束：安全暂停保留临时文件供续传；强制结束会终止下载器进程树，当前文件的临时数据保留，下次运行按 Range 续传。状态接口返回任务标签、历史完成进度、磁盘空间/挂载状态、磁盘任务分配、运行中的 episode 和上次运行结果。日志接口按 offset 增量读取完整行。Web API 默认只监听 `127.0.0.1:8765`；未配置 Python Web 访问口令时拒绝非本机监听。配置库已设置 PBKDF2 口令时，API 请求必须使用 `Authorization: Bearer <口令>`；5 分钟内连续 8 次错误口令会锁定该来源 60 秒。写请求必须使用 `Content-Type: application/json`，并校验同源 `Origin`。
+`--web` 可启动独立 HTTP 服务，提供配置快照 `GET /api/config`、任务方案管理 `GET|POST /api/plans`、`GET|PUT|DELETE /api/plans/{id}`、`POST /api/plans/{id}/apply`、`GET /api/plans/{id}/export`、`POST /api/plans/import`，以及状态 `GET /api/status`、`GET /api/episodes?task=任务名`、`GET /api/logs?offset=N`、`POST /api/run` 启动下载、安全暂停 `POST /api/stop` 和无需口令的 `GET /healthz`。`GET /api/config` 返回设置 schema、分组、任务 / 标签、磁盘、配置路径和运行状态；Secret Key / PostgreSQL 密码始终返回空串，并通过 `secrets_set` 标记是否已保存。`/api/run` 当前只接受 `mode=download`，支持 `max_rounds`（1–50）和 `recheck_missing`；Web 会以独立进程组启动下载器，关闭 Web 不会连带终止下载。暂停请求必须使用 `Content-Type: application/json`，请求体 `{}`；Web 支持安全暂停与强制结束：安全暂停保留临时文件供续传；强制结束会终止下载器进程树，当前文件的临时数据保留，下次运行按 Range 续传。状态接口返回任务标签、历史完成进度、磁盘空间/挂载状态、磁盘任务分配、运行中的 episode 和上次运行结果。日志接口按 offset 增量读取完整行。Web API 默认只监听 `127.0.0.1:8765`；未配置 Python Web 访问口令时拒绝非本机监听。配置库已设置 PBKDF2 口令时，API 请求必须使用 `Authorization: Bearer <口令>`；5 分钟内连续 8 次错误口令会锁定该来源 60 秒。写请求必须使用 `Content-Type: application/json`，并校验同源 `Origin`。
 
 ## 当前限制
 
-目前 Go Web 仅提供基础状态页和部分 API；配置接口目前只读。尚未实现 Python Web 的完整页面与以下接口：
+目前 Go Web 已实现基础状态页、配置只读快照和任务方案 API（CRUD、应用、JSON 导入 / 导出）；配置修改与 Python Web 完整页面尚未实现。
 
-- 配置管理、连接测试与任务方案 CRUD / 导入导出。
+- 配置管理、连接测试。
 - 任务 / 磁盘 / 设置修改、连接测试和访问口令管理。
-- 任务方案的创建、编辑、删除、应用、导入和导出。
+- 任务方案的高级差异预览和冲突逐项交互处理。
 - 完整 Python 状态库的所有历史兼容、精确实时速度 / ETA 汇总。
 - 动态磁盘预留锁、完整崩溃恢复与真实 MinIO / PostgreSQL 集成测试。
 
