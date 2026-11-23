@@ -55,7 +55,7 @@ type Config struct {
  Disks []DiskConfig `json:"disks"`; Tasks []Task `json:"tasks"`
 }
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
-type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool; spaceMu sync.Mutex; spaceInFlight map[string]uint64 }
+type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool; spaceMu sync.Mutex; spaceInFlight map[string]uint64; processCreated float64 }
 //go:embed config.count.example.json
 var defaultCountConfigJSON []byte
 
@@ -922,7 +922,7 @@ func(a *WebAPI)activeDownloader()(int,bool,bool){
  var pid int;var created float64
  if err:=a.db.QueryRow("SELECT pid,created FROM process_state WHERE id=1").Scan(&pid,&created);err!=nil{return 0,false,false}
  if processIdentity(pid,created){return pid,true,false}
- _,_=a.db.Exec("DELETE FROM process_state WHERE id=1 AND pid=?",pid)
+ _,_=a.db.Exec("DELETE FROM process_state WHERE id=1 AND pid=? AND created=?",pid,created)
  return 0,false,false
 }
 func(a *App)registerProcess()error{
@@ -933,10 +933,19 @@ func(a *App)registerProcess()error{
  if err!=nil&&err!=sql.ErrNoRows{return err}
  created:=float64(time.Now().UnixNano())/1e9
  if proc,e:=process.NewProcess(int32(os.Getpid()));e==nil{if ms,e:=proc.CreateTime();e==nil&&ms>0{created=float64(ms)/1000}}
- _,err=a.db.Exec("INSERT INTO process_state(id,pid,created,mode,updated_at) VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET pid=excluded.pid,created=excluded.created,mode=excluded.mode,updated_at=excluded.updated_at",os.Getpid(),created,a.mode,controlTimestamp())
- return err
+ var result sql.Result
+ if err==sql.ErrNoRows{
+  result,err=a.db.Exec("INSERT OR IGNORE INTO process_state(id,pid,created,mode,updated_at) VALUES(1,?,?,?,?)",os.Getpid(),created,a.mode,controlTimestamp())
+ }else{
+  result,err=a.db.Exec("UPDATE process_state SET pid=?,created=?,mode=?,updated_at=? WHERE id=1 AND pid=? AND created=?",os.Getpid(),created,a.mode,controlTimestamp(),oldPID,oldCreated)
+ }
+ if err!=nil{return err}
+ affected,_:=result.RowsAffected()
+ if affected!=1{return errors.New("另一个下载进程刚刚获得了 SQLite 运行租约")}
+ a.processCreated=created
+ return nil
 }
-func(a *App)unregisterProcess(){if a.db!=nil{_,_=a.db.Exec("DELETE FROM process_state WHERE id=1 AND pid=?",os.Getpid())}}
+func(a *App)unregisterProcess(){if a.db!=nil&&a.processCreated>0{_,_=a.db.Exec("DELETE FROM process_state WHERE id=1 AND pid=? AND created=?",os.Getpid(),a.processCreated)}}
 
 func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
  var body struct{Mode string `json:"mode"`;MaxRounds int `json:"max_rounds"`;RecheckMissing bool `json:"recheck_missing"`}
