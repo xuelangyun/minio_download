@@ -1,0 +1,55 @@
+name: Go cross-platform release
+
+on:
+  push:
+    tags: ["go-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: windows, goarch: amd64, runner: windows-latest, ext: .exe }
+          - { goos: linux, goarch: amd64, runner: ubuntu-latest, ext: "" }
+          - { goos: linux, goarch: arm64, runner: ubuntu-24.04-arm, ext: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+          cache-dependency-path: go/go.sum
+      - name: Build binary
+        shell: bash
+        run: |
+          cd go
+          go mod tidy
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -trimpath -ldflags="-s -w" -o dist/minio-download${{ matrix.ext }} .
+          cp config.example.json README.md dist/
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            cd dist && 7z a ../../minio-download-windows-amd64.zip .
+          else
+            tar -C dist -czf ../../minio-download-linux-${{ matrix.goarch }}.tar.gz .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minio-download-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: minio-download-*.*
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
