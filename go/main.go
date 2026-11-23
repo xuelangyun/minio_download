@@ -402,6 +402,7 @@ func(a *WebAPI)planApply(w http.ResponseWriter,r *http.Request){
  if body.Mode=="replace"&&incoming.DataVersion==""{incoming.DataVersion=strings.TrimSpace(a.cfg.DataVersion)}
  if body.Mode=="replace"&&incoming.DataVersion==""{writeJSONStatus(w,400,map[string]any{"error":"版本目录不能为空（方案未设置，当前配置也为空）"});return}
  result:=incoming;added:=[]string{};skipped:=[]map[string]string{}
+ if body.Mode=="replace"&&result.DataVersion==""{result.DataVersion=a.cfg.DataVersion}
  if body.Mode=="merge"{
   current:=currentPlanPayload(a.cfg);result=planPayload{DataVersion:current.DataVersion,Scenes:append([]planScene{},current.Scenes...)}
   existing:=map[string]bool{};for _,scene:=range result.Scenes{for _,t:=range scene.Tasks{existing[t.Name]=true}}
