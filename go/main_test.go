@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"encoding/hex"
 	"errors"
 	"net/url"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -453,5 +456,80 @@ func TestSaveLastRunForPythonWeb(t *testing.T) {
 	}
 	if result["result"] != "error" || result["error"] != "simulated failure" || result["mode"] != "count" || result["at"] == "" {
 		t.Fatalf("unexpected last_run record: %#v", result)
+	}
+}
+
+func TestPBKDF2SHA256PythonWebCompatibility(t *testing.T) {
+	got := hex.EncodeToString(pbkdf2SHA256([]byte("password"), []byte("salt"), 1, 32))
+	const want = "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+	if got != want {
+		t.Fatalf("PBKDF2 mismatch: got %s want %s", got, want)
+	}
+}
+
+func TestWebAPIRequiresBearerTokenWhenConfigured(t *testing.T) {
+	digest := hex.EncodeToString(pbkdf2SHA256([]byte("secret-token"), []byte("salt"), 120000, 32))
+	api := &WebAPI{tokenHash: "pbkdf2_sha256$120000$73616c74$" + digest}
+	request := httptest.NewRequest(http.MethodGet, "http://example.test/api/status", nil)
+	request.Host = "example.test"
+	if api.authorized(request) {
+		t.Fatal("request without bearer token must be rejected")
+	}
+	request.Header.Set("Authorization", "Bearer secret-token")
+	if !api.authorized(request) {
+		t.Fatal("valid Python-compatible bearer token must be accepted")
+	}
+	request.Header.Set("Authorization", "Bearer wrong")
+	if api.authorized(request) {
+		t.Fatal("invalid bearer token must be rejected")
+	}
+}
+
+func TestWebStatusReturnsConfiguredTasksAndProgress(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "episode-1")
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(root, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	statements := []string{
+		"CREATE TABLE downloaded_episodes(episode_id TEXT PRIMARY KEY,task_name TEXT,content_time REAL,file_size INTEGER,target_path TEXT)",
+		"CREATE TABLE downloads(episode_id TEXT PRIMARY KEY,task_name TEXT,status TEXT,error TEXT,parent_key TEXT,updated_at TEXT)",
+		"CREATE TABLE task_disk_assignments(task_name TEXT,disk_name TEXT)",
+		"CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT)",
+	}
+	for _, statement := range statements {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec("INSERT INTO downloaded_episodes VALUES('ep-1','桌面收纳',3600,1024,?)", target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO task_disk_assignments VALUES('桌面收纳','disk1')"); err != nil {
+		t.Fatal(err)
+	}
+	api := &WebAPI{cfg: Config{Tasks: []Task{{Name: "桌面收纳", Scene: "Household", TargetCount: 40, Tags: []string{"家居"}}}}, db: db}
+	recorder := httptest.NewRecorder()
+	api.status(recorder, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: %d", recorder.Code)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	scenes := response["scenes"].([]any)
+	tasks := scenes[0].(map[string]any)["tasks"].([]any)
+	task := tasks[0].(map[string]any)
+	if task["downloaded"] != float64(1) || task["hours"] != float64(1) || task["disk"] != "disk1" {
+		t.Fatalf("unexpected task progress: %#v", task)
+	}
+	if tags := task["tags"].([]any); len(tags) != 1 || tags[0] != "家居" {
+		t.Fatalf("task tags not returned: %#v", tags)
 	}
 }
