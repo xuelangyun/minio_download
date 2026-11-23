@@ -47,7 +47,7 @@ type Config struct {
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
 type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool }
 var configPath=flag.String("config","config.json","JSON 配置文件")
-var mode=flag.String("mode","duration","duration 或 count")
+var mode=flag.String("mode","","duration 或 count；未指定时根据配置自动选择")
 var rounds=flag.Int("max-rounds",1,"缺少必需文件后的补选轮数")
 var recheck=flag.Bool("recheck-missing",false,"重新检查缺文件数据")
 var cleanup=flag.Bool("cleanup-missing-mcap",false,"清理缺少 mcap 的已下载目录")
@@ -56,12 +56,13 @@ var stopFlag=flag.Bool("stop",false,"请求正在运行的下载器安全暂停"
 
 func main(){
  flag.Parse()
- if *mode!="duration"&&*mode!="count"{log.Fatal("--mode 只能是 duration 或 count")}
  if *rounds<1{log.Fatal("--max-rounds 必须 >= 1")}
  b,e:=os.ReadFile(*configPath);if e!=nil{log.Fatalf("读取配置失败: %v；请复制 config.example.json 为 config.json",e)}
  var c Config;if e=json.Unmarshal(b,&c);e!=nil{log.Fatalf("配置 JSON 无效: %v",e)}
- if e=loadConfigDB(&c,*mode);e!=nil{log.Fatalf("读取 SQLite 配置库失败: %v",e)}
  if *stopFlag{if e=requestStop(c);e!=nil{log.Fatal(e)};log.Print("已写入安全暂停请求");return}
+ if *mode==""{if c.ConfigDB!=""{*mode="count"}else if c.Mode!=""{*mode=c.Mode}else{*mode="duration"}}
+ if *mode!="duration"&&*mode!="count"{log.Fatal("--mode 只能是 duration 或 count")}
+ if e=loadConfigDB(&c,*mode);e!=nil{log.Fatalf("读取 SQLite 配置库失败: %v",e)}
  if e=c.normalize(*mode);e!=nil{log.Fatal(e)}
  _=os.MkdirAll(filepath.Dir(c.StateDB),0755);_=os.MkdirAll(filepath.Dir(c.LockFile),0755);_=os.MkdirAll(c.LogDir,0755)
  f,e:=os.OpenFile(filepath.Join(c.LogDir,"go-downloader.log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0644);if e!=nil{log.Fatal(e)};defer f.Close()
@@ -469,7 +470,7 @@ func addSpaceReservations(reserved,additional,minFree uint64)(uint64,bool){
  return total+minFree,true
 }
 func chooseTaskDisk(task Task,disks []DiskConfig,loads map[string]int,folderDisk map[string]*DiskConfig)*DiskConfig{
- folder:=safe(taskDir(task))
+ folder:=taskFolderKey(task)
  if assigned:=folderDisk[folder];assigned!=nil{return assigned}
  var chosen *DiskConfig
  for i:=range disks{candidate:=&disks[i];if chosen==nil||loads[candidate.Name]<loads[chosen.Name]{chosen=candidate}}
@@ -486,7 +487,7 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
    has,err:=taskRootHasEntries(a.cfg.DataVersion,task,a.cfg.Disks[i]);if err!=nil{return err}
    if has{if found!=nil{return fmt.Errorf("任务 %s 的目录同时存在于多块磁盘（%s、%s）",task.Name,found.Name,a.cfg.Disks[i].Name)};found=&a.cfg.Disks[i]}
   }
-  if found!=nil{existing[task.Name]=found;folder:=safe(taskDir(task));if assigned,ok:=folderDisk[folder];ok&&assigned.Name!=found.Name{return fmt.Errorf("共用目录 %s 的任务分布在不同磁盘（%s、%s）",folder,assigned.Name,found.Name)};if _,ok:=folderDisk[folder];!ok{folderDisk[folder]=found;loads[found.Name]++}}
+  if found!=nil{existing[task.Name]=found;folder:=taskFolderKey(task);if assigned,ok:=folderDisk[folder];ok&&assigned.Name!=found.Name{return fmt.Errorf("共用目录 %s 的任务分布在不同磁盘（%s、%s）",folder,assigned.Name,found.Name)};if _,ok:=folderDisk[folder];!ok{folderDisk[folder]=found;loads[found.Name]++}}
  }
  byDisk:=map[string][]batch{};waitingSpace:=false;reservedBytes:=map[string]uint64{}
  for _,task:=range a.cfg.Tasks{
@@ -740,3 +741,4 @@ func safeJoin(root,rel string)(string,error){
  return p,nil
 }
 func taskDir(t Task)string{if t.Dir!=""{return t.Dir};return t.Name}
+func taskFolderKey(t Task)string{return safe(t.Scene)+"\\x00"+safe(taskDir(t))}
