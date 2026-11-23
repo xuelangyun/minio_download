@@ -503,6 +503,28 @@ func TestPathIsDirIncludesEmptyFinalDirectory(t *testing.T) {
 	}
 }
 
+func TestCompletedEpisodeDirRequiresTaskInfo(t *testing.T) {
+ dir:=t.TempDir()
+ if completedEpisodeDir(dir,false,""){t.Fatal("empty directory must not count as completed")}
+ if err:=os.WriteFile(filepath.Join(dir,"camera.mp4"),[]byte("video"),0600);err!=nil{t.Fatal(err)}
+ if completedEpisodeDir(dir,false,""){t.Fatal("directory without task_info.json must not count as completed")}
+ if err:=os.WriteFile(filepath.Join(dir,"task_info.json"),[]byte("{}"),0600);err!=nil{t.Fatal(err)}
+ if !completedEpisodeDir(dir,false,""){t.Fatal("directory with task_info.json should count as completed")}
+}
+func TestCompletedEpisodeDirRequiresMCAPWhenConfigured(t *testing.T) {
+ dir:=t.TempDir()
+ if err:=os.WriteFile(filepath.Join(dir,"task_info.json"),[]byte("{}"),0600);err!=nil{t.Fatal(err)}
+ if completedEpisodeDir(dir,true,"*.mcap"){t.Fatal("missing mcap must not count as completed")}
+ if err:=os.WriteFile(filepath.Join(dir,"episode.mcap"),[]byte("mcap"),0600);err!=nil{t.Fatal(err)}
+ if !completedEpisodeDir(dir,true,"*.mcap"){t.Fatal("task_info plus matching mcap should count as completed")}
+}
+func TestCompletedEpisodeDirRejectsSymlink(t *testing.T) {
+ parent:=t.TempDir();target:=filepath.Join(parent,"target");link:=filepath.Join(parent,"link")
+ if err:=os.Mkdir(target,0755);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(target,"task_info.json"),[]byte("{}"),0600);err!=nil{t.Fatal(err)}
+ if err:=os.Symlink(target,link);err!=nil{t.Skipf("symlink unavailable: %v",err)}
+ if completedEpisodeDir(link,false,""){t.Fatal("symlink directory must not count as completed")}
+}
 func TestCompletedHonorsTrustedLedger(t *testing.T) {
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
