@@ -733,11 +733,14 @@ func(a *WebAPI)config(w http.ResponseWriter,r *http.Request) {
   scenes[i]["tasks"]=items
  }
  _,running,_:=a.activeDownloader()
+ a.authMu.Lock()
+ tokenSet:=a.tokenHash!=""
+ a.authMu.Unlock()
  platform:="posix";if runtime.GOOS=="windows"{platform="windows"}
  writeJSON(w,map[string]any{
   "schema":schema,"groups":groups,"values":values,"secrets_set":secretsSet,
   "tasks":map[string]any{"data_version":a.cfg.DataVersion,"scenes":scenes},"disks":a.cfg.Disks,
-  "token_set":a.tokenHash!="","paths":map[string]any{"config_db":a.cfg.ConfigDB,"state_db":a.cfg.StateDB,"log_dir":a.cfg.LogDir},
+  "token_set":tokenSet,"paths":map[string]any{"config_db":a.cfg.ConfigDB,"state_db":a.cfg.StateDB,"log_dir":a.cfg.LogDir},
   "platform":platform,"running":running,
  })
 }
