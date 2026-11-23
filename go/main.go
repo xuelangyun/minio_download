@@ -7,7 +7,6 @@ import (
  "crypto/rand"
  "crypto/sha256"
  "encoding/hex"
- "bytes"
  "crypto/md5"
  "database/sql"
  "encoding/json"
@@ -127,6 +126,7 @@ func main(){
  baseCtx,stop:=signal.NotifyContext(context.Background(),os.Interrupt);defer stop()
  ctx,cancel:=context.WithCancel(baseCtx);defer cancel()
  a:=&App{cfg:c,ctx:ctx,cancel:cancel,mode:*mode,recheck:*recheck,validated:map[string]bool{},spaceInFlight:map[string]uint64{}}
+ if !*preserveStopRequest{if err=clearStopRequestDB(c.StateDB);err!=nil{log.Fatalf("清理旧暂停请求失败: %v",err)}}
  if err=a.open();err!=nil{log.Fatal(err)};defer a.db.Close()
  if err=a.registerProcess();err!=nil{log.Fatal(err)};defer a.unregisterProcess()
  watcherDone:=a.startStopWatcher();defer func(){cancel();<-watcherDone}()
@@ -969,11 +969,11 @@ func(a *WebAPI)episodes(w http.ResponseWriter,r *http.Request){
  writeJSON(w,map[string]any{"episodes":episodes})
 }
 func(a *WebAPI)logs(w http.ResponseWriter,r *http.Request){
- offset,err:=strconv.ParseInt(r.URL.Query().Get("offset"),10,64);initial:=err!=nil||offset<0
+ offset,err:=strconv.ParseInt(r.URL.Query().Get("offset"),10,64);initial:=err!=nil||offset<=0
  if initial{offset=0}
  query:="SELECT id,message FROM runtime_logs WHERE id>? ORDER BY id LIMIT 500"
- args:=[]any{offset}
- if initial{query="SELECT id,message FROM (SELECT id,message FROM runtime_logs ORDER BY id DESC LIMIT 500) ORDER BY id"}
+ var args []any
+ if initial{query="SELECT id,message FROM (SELECT id,message FROM runtime_logs ORDER BY id DESC LIMIT 500) ORDER BY id"}else{args=[]any{offset}}
  rows,err:=a.db.Query(query,args...);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取 SQLite 日志失败: "+err.Error()});return};defer rows.Close()
  lines:=[]string{};next:=offset
  for rows.Next(){var id int64;var message string;if rows.Scan(&id,&message)==nil{lines=append(lines,message);if id>next{next=id}}}
