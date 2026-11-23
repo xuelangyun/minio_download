@@ -246,7 +246,7 @@ func currentPlanPayload(c Config) planPayload {
  for _,t:=range c.Tasks {
   i,ok:=index[t.Scene];if !ok{i=len(out.Scenes);index[t.Scene]=i;out.Scenes=append(out.Scenes,planScene{Scene:t.Scene,Tasks:[]planTask{}})}
   aliases:=append([]string{},t.Aliases...);tags:=append([]string{},t.Tags...)
-  out.Scenes[i].Tasks=append(out.Scenes[i].Tasks,planTask{Name:t.Name,Count:t.TargetCount,Aliases:aliases,Dir:taskDir(t),Tags:tags})
+  out.Scenes[i].Tasks=append(out.Scenes[i].Tasks,planTask{Name:t.Name,Count:t.TargetCount,Aliases:aliases,Dir:t.Dir,Tags:tags})
  }
  return out
 }
@@ -268,8 +268,8 @@ func validatePlanPayload(raw json.RawMessage)(planPayload,error){
    if seenTasks[t.Name]{return p,fmt.Errorf("任务名重复：%q（任务名必须全局唯一）",t.Name)}
    seenTasks[t.Name]=true
    if t.Count<0{return p,fmt.Errorf("任务 %q 的目标条数必须是非负整数，当前为 %d",t.Name,t.Count)}
-   t.Dir=strings.TrimSpace(t.Dir);if t.Dir==""{t.Dir=t.Name}
-   dirKey:=scene.Scene+"\x00"+t.Dir;if owner,ok:=dirOwners[dirKey];ok{return p,fmt.Errorf("场景 %q 下目录名 %q 被任务 %q 和 %q 同时使用",scene.Scene,t.Dir,owner,t.Name)};dirOwners[dirKey]=t.Name
+   t.Dir=strings.TrimSpace(t.Dir);dirName:=t.Dir;if dirName==""{dirName=t.Name}
+   dirKey:=scene.Scene+"\x00"+dirName;if owner,ok:=dirOwners[dirKey];ok{return p,fmt.Errorf("场景 %q 下目录名 %q 被任务 %q 和 %q 同时使用",scene.Scene,t.Dir,owner,t.Name)};dirOwners[dirKey]=t.Name
    if t.Aliases==nil{t.Aliases=[]string{}};if t.Tags==nil{t.Tags=[]string{}}
    aliasSeen:=map[string]bool{}
    for i,a:=range t.Aliases {a=strings.TrimSpace(a);if a==""{return p,fmt.Errorf("任务 %q 存在空别名",t.Name)};if aliasSeen[a]{return p,fmt.Errorf("任务 %q 的别名重复：%q",t.Name,a)};aliasSeen[a]=true;if owner,ok:=seenAliases[a];ok&&owner!=t.Name{return p,fmt.Errorf("别名 %q 重复出现在任务 %q 和 %q 中",a,owner,t.Name)};seenAliases[a]=t.Name;t.Aliases[i]=a}
