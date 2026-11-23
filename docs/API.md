@@ -94,7 +94,8 @@
 | `setup_issues` | 开始下载前还缺的配置：`page` ∈ `connection / disks / tasks`。非空时 `POST /api/run` 返回 400 |
 | `last_run` | 上次运行结果：`result` ∈ `finished / paused / error`，另有 `at`、`counts`、`mode`、`error`（以及本 Web 启动且异常退出时的 `exit_code`） |
 | `stale_records` | 记录标记已完成但本地目录已被删除的条数（不计入进度） |
-| `running_episodes` | 下载器运行时才有内容：`episode_id, task_name, disk_name, started_at, expected_bytes, partial_bytes`；最多 24 条 |\n| `transfer_progress` | 所有运行中 episode 的汇总进度：`downloaded_bytes / expected_bytes / remaining_bytes`；`speed_bytes_per_second` 为两次状态采样间暂存目录字节增量计算的近似速度；`eta_seconds` 为估算剩余秒数（速度尚未建立时为 `null`）；`progress_percent` 为汇总百分比。采样基于本地暂存文件，受文件系统缓存与状态轮询间隔影响，不等同于网卡线速。
+| `running_episodes` | 下载器运行时才有内容：`episode_id, task_name, disk_name, started_at, expected_bytes, partial_bytes`；最多 24 条 |
+| `transfer_progress` | 所有运行中 episode 的汇总进度：`downloaded_bytes / expected_bytes / remaining_bytes`；`speed_bytes_per_second` 为两次状态采样间暂存目录字节增量计算的近似速度；`eta_seconds` 为估算剩余秒数（速度尚未建立时为 `null`）；`progress_percent` 为汇总百分比。采样基于本地暂存文件，受文件系统缓存与状态轮询间隔影响，不等同于网卡线速。
 | `disks[]` | `total / free / used` 字节（读不到为 0）；`mounted` = 挂载点是否真挂载；`tasks` = 已分配到该盘的任务 |
 | `scenes[].tasks[]` | `downloaded` 已下载条数（正式目录仍存在才算）；`hours` 已下载时长；`bytes` 已下载大小；`issues` = 未完成原因计数 `{状态: 条数}`（状态见 [DATA §6.1](DATA.md#61-downloadsstatus)）；`disk` 分配的磁盘；`tags` 标签 |
 
