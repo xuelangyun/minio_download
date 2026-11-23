@@ -1633,3 +1633,81 @@ func TestFilesystemIdentityFollowsSymlinkTarget(t *testing.T) {
 	b,err:=filesystemIdentity(link);if err!=nil{t.Fatal(err)}
 	if a!=""&&a!=b { t.Fatalf("symlink should resolve to target filesystem: %q != %q",a,b) }
 }
+
+func TestMissingMCAPCleanupCanRecoverAfterInterruption(t *testing.T) {
+ db, err := sql.Open("sqlite", ":memory:")
+ if err != nil {
+  t.Fatal(err)
+ }
+ defer db.Close()
+ db.SetMaxOpenConns(1)
+ for _, stmt := range []string{
+  "CREATE TABLE downloads(episode_id TEXT PRIMARY KEY,target_path TEXT,status TEXT,error TEXT,updated_at TEXT)",
+  "CREATE TABLE downloaded_episodes(episode_id TEXT PRIMARY KEY)",
+ } {
+  if _, err = db.Exec(stmt); err != nil {
+   t.Fatal(err)
+  }
+ }
+ app := &App{db: db, cfg: Config{MCAPPattern: "*.mcap"}}
+
+ normalDir := filepath.Join(t.TempDir(), "normal-episode")
+ if err = os.MkdirAll(normalDir, 0755); err != nil {
+  t.Fatal(err)
+ }
+ if err = os.WriteFile(filepath.Join(normalDir, "task_info.json"), []byte("{}"), 0600); err != nil {
+  t.Fatal(err)
+ }
+ if _, err = db.Exec("INSERT INTO downloads(episode_id,target_path,status) VALUES(?,?,?)", "normal", normalDir, "completed"); err != nil {
+  t.Fatal(err)
+ }
+ if _, err = db.Exec("INSERT INTO downloaded_episodes(episode_id) VALUES(?)", "normal"); err != nil {
+  t.Fatal(err)
+ }
+ count, err := app.cleanup(false)
+ if err != nil {
+  t.Fatalf("cleanup: %v", err)
+ }
+ if count != 1 {
+  t.Fatalf("cleanup count=%d, want 1", count)
+ }
+ if _, err = os.Stat(normalDir); !os.IsNotExist(err) {
+  t.Fatalf("cleanup directory still exists, err=%v", err)
+ }
+ var downloads, ledger int
+ if err = db.QueryRow("SELECT COUNT(*) FROM downloads WHERE episode_id='normal'").Scan(&downloads); err != nil {
+  t.Fatal(err)
+ }
+ if err = db.QueryRow("SELECT COUNT(*) FROM downloaded_episodes WHERE episode_id='normal'").Scan(&ledger); err != nil {
+  t.Fatal(err)
+ }
+ if downloads != 0 || ledger != 0 {
+  t.Fatalf("cleanup records remain: downloads=%d ledger=%d", downloads, ledger)
+ }
+
+ pendingDir := filepath.Join(t.TempDir(), "pending-episode")
+ if err = os.MkdirAll(pendingDir, 0755); err != nil {
+  t.Fatal(err)
+ }
+ if _, err = db.Exec("INSERT INTO downloads(episode_id,target_path,status) VALUES(?,?,?)", "pending", pendingDir, "cleanup_pending"); err != nil {
+  t.Fatal(err)
+ }
+ if _, err = db.Exec("INSERT INTO downloaded_episodes(episode_id) VALUES(?)", "pending"); err != nil {
+  t.Fatal(err)
+ }
+ if err = app.recoverPendingCleanup(); err != nil {
+  t.Fatalf("recover pending cleanup: %v", err)
+ }
+ if _, err = os.Stat(pendingDir); !os.IsNotExist(err) {
+  t.Fatalf("recovered cleanup directory still exists, err=%v", err)
+ }
+ if err = db.QueryRow("SELECT COUNT(*) FROM downloads WHERE episode_id='pending'").Scan(&downloads); err != nil {
+  t.Fatal(err)
+ }
+ if err = db.QueryRow("SELECT COUNT(*) FROM downloaded_episodes WHERE episode_id='pending'").Scan(&ledger); err != nil {
+  t.Fatal(err)
+ }
+ if downloads != 0 || ledger != 0 {
+  t.Fatalf("pending cleanup records remain: downloads=%d ledger=%d", downloads, ledger)
+ }
+}
