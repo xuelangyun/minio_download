@@ -11,7 +11,8 @@ Go 实现与 Python 版本并行维护。当前首版提供 Windows / Linux 命�
 - 检查 task_info.json 与可选的 *.SYNC.mcap。
 - 多磁盘任务固定分配；每盘任务顺序调度，每盘并发 episode 数可配；每条 episode 内文件并行下载（默认 4）。
 - SQLite WAL 状态库与下载台账。
-- 暂存目录下载完成后原子 rename 发布。
+- 暂存目录下载完成后原子 rename 发布；启动时清理不属于当前对象清单的残留文件，保留有效 Range 临时文件。
+- 跨平台单实例文件锁；文件与发布目录执行 fsync（Windows 不支持时安全忽略）。
 - 任务级磁盘空间预检，默认预留 3 GiB，按 1.15 安全系数估算。文件并发参数 `file_workers` 默认 4，与 `max_writes_per_disk` 分开控制。
 
 ## 配置和运行
