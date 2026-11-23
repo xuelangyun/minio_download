@@ -368,7 +368,7 @@ func safe(s string)string{
  return s
 }
 func windowsReserved(s string)bool{
- base:=strings.ToUpper(strings.TrimSuffix(s,filepath.Ext(s)))
+ base:=strings.ToUpper(strings.SplitN(s,".",2)[0])
  if base=="CON"||base=="PRN"||base=="AUX"||base=="NUL"{return true}
  if len(base)==4&&(strings.HasPrefix(base,"COM")||strings.HasPrefix(base,"LPT"))&&base[3]>='1'&&base[3]<='9'{return true}
  return false
