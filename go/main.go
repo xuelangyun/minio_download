@@ -215,6 +215,7 @@ func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,e
   todo:=make([]Episode,0,len(candidates))
   for _,ep:=range candidates{
    if a.completed(ep.ID){selected=append(selected,ep);continue}
+   if ep.Size<=0{d:=a.cfg.Disks[0];if err:=a.set(ep,d,"","","invalid_size","file_size 无效");err!=nil{return nil,err};skipped++;continue}
    var state string
    _=a.db.QueryRow("SELECT status FROM downloads WHERE episode_id=?",ep.ID).Scan(&state)
    if !a.recheck&&(state=="missing_task_info"||state=="missing_mcap"){continue}
