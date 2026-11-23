@@ -139,7 +139,14 @@ func ensureColumn(db *sql.DB,table,column,typ string)error{
  return err
 }
 func nullable(s string)any{if s==""{return nil};return s}
-func(a *App)completed(id string)bool{var p sql.NullString;err:=a.db.QueryRow("SELECT target_path FROM downloads WHERE episode_id=? AND status='completed'",id).Scan(&p);if err!=nil{return false};if a.cfg.TrustCompletedRecords{return true};return p.Valid&&dirHasFiles(p.String)}
+func(a *App)completed(id string)bool{
+ var p sql.NullString
+ err:=a.db.QueryRow("SELECT target_path FROM downloads WHERE episode_id=? AND status='completed'",id).Scan(&p)
+ if err==nil&&p.Valid&&(a.cfg.TrustCompletedRecords||pathIsDir(p.String)){return true}
+ p=sql.NullString{}
+ err=a.db.QueryRow("SELECT target_path FROM downloaded_episodes WHERE episode_id=?",id).Scan(&p)
+ return err==nil&&p.Valid&&(a.cfg.TrustCompletedRecords||pathIsDir(p.String))
+}
 func(a *App)stats(task string)(float64,int){rows,err:=a.db.Query("SELECT content_time,target_path FROM downloaded_episodes WHERE task_name=?",task);if err!=nil{return 0,0};defer rows.Close();var seconds float64;count:=0;for rows.Next(){var v sql.NullFloat64;var p sql.NullString;if rows.Scan(&v,&p)!=nil{continue};if a.cfg.TrustCompletedRecords||(p.Valid&&dirHasFiles(p.String)){seconds+=v.Float64;count++}};return seconds,count}
 func(a *App)assign(task,disk string)error{tx,err:=a.db.Begin();if err!=nil{return err};defer tx.Rollback();if _,err=tx.Exec("DELETE FROM task_disk_assignments WHERE task_name=?",task);err!=nil{return err};if _,err=tx.Exec("INSERT INTO task_disk_assignments(task_name,disk_name,last_used_at) VALUES(?,?,?)",task,disk,time.Now().UTC().Format(time.RFC3339Nano));err!=nil{return err};return tx.Commit()}
 func(a *App)assigned(task string)string{var d string;_=a.db.QueryRow("SELECT disk_name FROM task_disk_assignments WHERE task_name=? ORDER BY last_used_at DESC LIMIT 1",task).Scan(&d);return d}
@@ -194,6 +201,23 @@ func(a *App)checkRequiredFiles(parent string)(string,string,error){
 func(a *App)syncLocalCopies(groups map[string][]Episode)error{
  for _,task:=range a.cfg.Tasks{
   for _,ep:=range groups[task.Name]{
+   // Reconcile historical ledger/state records first. Python trusts these records
+   // when configured, even if the original disk has been archived or replaced.
+   var ledgerPath,ledgerDisk sql.NullString
+   ledgerErr:=a.db.QueryRow("SELECT target_path,disk_name FROM downloaded_episodes WHERE episode_id=?",ep.ID).Scan(&ledgerPath,&ledgerDisk)
+   if ledgerErr==nil&&ledgerPath.Valid&&(a.cfg.TrustCompletedRecords||pathIsDir(ledgerPath.String)){
+    d:=DiskConfig{Name:ledgerDisk.String}
+    if err:=a.set(ep,d,ledgerPath.String,"","completed","");err!=nil{return err}
+   }else{
+    var statePath,stateDisk sql.NullString
+    var state string
+    stateErr:=a.db.QueryRow("SELECT status,target_path,disk_name FROM downloads WHERE episode_id=?",ep.ID).Scan(&state,&statePath,&stateDisk)
+    if stateErr==nil&&state=="completed"&&statePath.Valid&&(a.cfg.TrustCompletedRecords||pathIsDir(statePath.String)){
+     d:=DiskConfig{Name:stateDisk.String}
+     if err:=a.record(ep,d,statePath.String);err!=nil{return err}
+     if err:=a.set(ep,d,statePath.String,"","completed","");err!=nil{return err}
+    }
+   }
    diskName,err:=findExistingTaskDisk(a.cfg.DataVersion,task,a.cfg.Disks,[]Episode{ep})
    if err!=nil{return err};if diskName==""{continue}
    var chosen *DiskConfig
@@ -576,6 +600,7 @@ func(a *App)cleanup(preview bool)(int,error){
  }}
  return n,nil
 }
+func pathIsDir(p string)bool{st,e:=os.Stat(p);return e==nil&&st.IsDir()}
 func dirHasFiles(p string)bool{x,e:=os.ReadDir(p);return e==nil&&len(x)>0}
 func hasPattern(p,pat string)bool{x,e:=os.ReadDir(p);if e!=nil{return false};for _,v:=range x{if !v.IsDir(){if ok,_:=path.Match(pat,v.Name());ok{return true}}};return false}
 func normalizeParentKey(value string)(string,error){
