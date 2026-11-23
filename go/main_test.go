@@ -950,3 +950,62 @@ func TestWebDiskCheckDoesNotWriteThroughMissingMount(t *testing.T) {
 	entries,err:=os.ReadDir(root);if err!=nil{t.Fatal(err)}
 	if len(entries)!=0{t.Fatalf("disk check wrote into unmounted parent directory: %#v",entries)}
 }
+
+func TestDecodeWebSettingsValidatesAndPreservesSecretNull(t *testing.T) {
+ raw:=map[string]json.RawMessage{
+  "minio.secret_key":json.RawMessage("null"),
+  "run.max_writes_per_disk":json.RawMessage("4"),
+  "run.space_safety_factor":json.RawMessage("1.25"),
+ }
+ values,err:=decodeWebSettings(raw);if err!=nil{t.Fatal(err)}
+ if _,ok:=values["minio.secret_key"];ok{t.Fatal("null secret must mean unchanged")}
+ if values["run.max_writes_per_disk"]!=4{t.Fatalf("integer setting not decoded: %#v",values)}
+ if values["run.space_safety_factor"]!=1.25{t.Fatalf("float setting not decoded: %#v",values)}
+}
+func TestDecodeWebSettingsRejectsUnknownAndOutOfRange(t *testing.T) {
+ for _,raw:=range []map[string]json.RawMessage{
+  {"not.a.setting":json.RawMessage("1")},
+  {"pg.port":json.RawMessage("65536")},
+  {"run.max_writes_per_disk":json.RawMessage("1.5")},
+  {"minio.secure":json.RawMessage("\"yes\"")},
+ }{
+  if _,err:=decodeWebSettings(raw);err==nil{t.Fatalf("expected validation error for %#v",raw)}
+ }
+}
+func TestWebConfigSettingsPersistsAndUpdatesRuntime(t *testing.T) {
+ api:=newPlanTestAPI(t)
+ db,err:=sql.Open("sqlite",api.cfg.ConfigDB);if err!=nil{t.Fatal(err)}
+ if _,err=db.Exec("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)");err!=nil{t.Fatal(err)}
+ db.Close()
+ body:=`{"values":{"run.max_writes_per_disk":4,"run.space_safety_factor":1.25,"minio.secret_key":null,"pg.password":"new-password"}}`
+ req:=httptest.NewRequest(http.MethodPut,"/api/config/settings",strings.NewReader(body));rec:=httptest.NewRecorder()
+ api.configSettings(rec,req)
+ if rec.Code!=http.StatusOK{t.Fatalf("settings update failed: %d %s",rec.Code,rec.Body.String())}
+ if api.cfg.Workers!=4||api.cfg.SafetyFactor!=1.25||api.cfg.PGPassword!="new-password"{t.Fatalf("runtime config not updated: %#v",api.cfg)}
+ db,err=sql.Open("sqlite",api.cfg.ConfigDB);if err!=nil{t.Fatal(err)};defer db.Close()
+ var got string
+ if err=db.QueryRow("SELECT value FROM settings WHERE key='pg.password'").Scan(&got);err!=nil{t.Fatal(err)}
+ if got!=`"new-password"`{t.Fatalf("secret not persisted as JSON string: %s",got)}
+ var count int
+ if err=db.QueryRow("SELECT COUNT(*) FROM settings WHERE key='minio.secret_key'").Scan(&count);err!=nil{t.Fatal(err)}
+ if count!=0{t.Fatal("null secret should not create or overwrite setting")}
+}
+func TestWebConfigSettingsRejectsInvalidBatchAtomically(t *testing.T) {
+ api:=newPlanTestAPI(t)
+ db,err:=sql.Open("sqlite",api.cfg.ConfigDB);if err!=nil{t.Fatal(err)}
+ if _,err=db.Exec("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)");err!=nil{t.Fatal(err)}
+ db.Close()
+ req:=httptest.NewRequest(http.MethodPut,"/api/config/settings",strings.NewReader(`{"values":{"run.max_writes_per_disk":4,"pg.port":70000}}`));rec:=httptest.NewRecorder()
+ api.configSettings(rec,req)
+ if rec.Code!=http.StatusBadRequest{t.Fatalf("expected 400, got %d: %s",rec.Code,rec.Body.String())}
+ db,err=sql.Open("sqlite",api.cfg.ConfigDB);if err!=nil{t.Fatal(err)};defer db.Close()
+ var count int
+ if err=db.QueryRow("SELECT COUNT(*) FROM settings").Scan(&count);err!=nil{t.Fatal(err)}
+ if count!=0{t.Fatalf("invalid batch partially persisted %d settings",count)}
+}
+func TestWebConfigTestRejectsUnknownTarget(t *testing.T) {
+ api:=newPlanTestAPI(t)
+ req:=httptest.NewRequest(http.MethodPost,"/api/config/test",strings.NewReader(`{"target":"redis"}`));rec:=httptest.NewRecorder()
+ api.configTest(rec,req)
+ if rec.Code!=http.StatusBadRequest{t.Fatalf("expected 400, got %d",rec.Code)}
+}
