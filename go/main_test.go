@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -201,5 +202,25 @@ func TestCompletedHonorsTrustedLedger(t *testing.T) {
 	app.cfg.TrustCompletedRecords = false
 	if app.completed("ep-1") {
 		t.Fatal("untrusted ledger entry with a missing path must not count as completed")
+	}
+}
+
+func TestPostgresDSNEscapesCredentials(t *testing.T) {
+	cfg := Config{PGHost: "::1", PGPort: 5432, PGDB: "db name", PGUser: "user@name", PGPassword: "p@ss word#"}
+	raw := postgresDSN(cfg)
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("invalid PostgreSQL DSN: %v", err)
+	}
+	user := u.User.Username()
+	password, ok := u.User.Password()
+	if !ok || user != cfg.PGUser || password != cfg.PGPassword {
+		t.Fatalf("credentials did not round-trip: user=%q password_ok=%v", user, ok)
+	}
+	if u.Host != "[::1]:5432" {
+		t.Fatalf("IPv6 host was not formatted correctly: %q", u.Host)
+	}
+	if u.Query().Get("sslmode") != "prefer" || u.Query().Get("connect_timeout") != "10" {
+		t.Fatalf("connection options missing: %s", u.RawQuery)
 	}
 }
