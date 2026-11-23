@@ -55,7 +55,7 @@ type Config struct {
  Disks []DiskConfig `json:"disks"`; Tasks []Task `json:"tasks"`
 }
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
-type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool }
+type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool; spaceMu sync.Mutex; spaceInFlight map[string]uint64 }
 //go:embed config.count.example.json
 var defaultCountConfigJSON []byte
 
@@ -88,7 +88,7 @@ func main(){
  log.SetOutput(io.MultiWriter(os.Stdout,f));log.SetFlags(log.Ldate|log.Ltime|log.Lmicroseconds)
  baseCtx,stop:=signal.NotifyContext(context.Background(),os.Interrupt);defer stop()
  ctx,cancel:=context.WithCancel(baseCtx);defer cancel()
- a:=&App{cfg:c,ctx:ctx,cancel:cancel,mode:*mode,recheck:*recheck,validated:map[string]bool{}}
+ a:=&App{cfg:c,ctx:ctx,cancel:cancel,mode:*mode,recheck:*recheck,validated:map[string]bool{},spaceInFlight:map[string]uint64{}}
  lock:=flock.New(c.LockFile);locked,lockErr:=lock.TryLock();if lockErr!=nil{log.Fatalf("创建下载锁失败: %v",lockErr)};if !locked{log.Fatal("检测到另一个下载器实例正在运行")};defer lock.Unlock()
  if !*preserveStopRequest{if e=clearStopRequestDB(c.StateDB);e!=nil{log.Fatal(e)}}
  if e=a.open();e!=nil{log.Fatal(e)};defer a.db.Close()
@@ -1325,6 +1325,26 @@ func episodePaths(version string,t Task,d DiskConfig,parentKey string)(string,st
  leaf:=safe(path.Base(strings.Trim(parentKey,"/")))
  return filepath.Join(root,leaf),filepath.Join(root,"."+leaf+".partial")
 }
+func(a *App)reserveObjectSpace(d DiskConfig,size int64)(func(),error){
+ if size<0{return nil,fmt.Errorf("对象大小无效: %d",size)}
+ a.spaceMu.Lock()
+ usage,err:=disk.Usage(d.Path)
+ if err!=nil{a.spaceMu.Unlock();return nil,fmt.Errorf("动态读取磁盘空间失败 %s: %w",d.Name,err)}
+ reserved:=a.spaceInFlight[d.Name]
+ minFree:=uint64(math.Ceil(a.cfg.MinFreeGB*1024*1024*1024))
+ next,ok:=addSpaceReservations(reserved,uint64(size),minFree)
+ if !ok||usage.Free<next{a.spaceMu.Unlock();return nil,fmt.Errorf("动态磁盘空间不足，暂停启动新对象: disk=%s free=%d reserved=%d object=%d min_free=%d",d.Name,usage.Free,reserved,size,minFree)}
+ a.spaceInFlight[d.Name]=reserved+uint64(size)
+ a.spaceMu.Unlock()
+ var once sync.Once
+ release:=func(){once.Do(func(){a.spaceMu.Lock();current:=a.spaceInFlight[d.Name];amount:=uint64(size);if current<=amount{delete(a.spaceInFlight,d.Name)}else{a.spaceInFlight[d.Name]=current-amount};a.spaceMu.Unlock()})}
+ return release,nil
+}
+func remainingObjectBytes(dst string,expected int64)int64{
+ remaining:=expected
+ if st,err:=os.Stat(dst+".minio-tmp");err==nil&&st.Size()>=0&&st.Size()<expected{remaining=expected-st.Size()}
+ return remaining
+}
 func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  if a.ctx.Err()!=nil{return nil};if e.Size<=0{_=a.set(e,d,"","","invalid_size","file_size 无效");return nil}
  var existing *DiskConfig;var existingPath string
@@ -1367,7 +1387,10 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
    rel:=strings.TrimPrefix(item.Key,e.ParentKey+"/")
    dst,err:=safeJoin(partial,rel)
    if err==nil{err=os.MkdirAll(filepath.Dir(dst),0755)}
-   if err==nil{err=a.fetchObject(item.Key,dst,item)}
+   if err==nil{
+    releaseSpace,spaceErr:=a.reserveObjectSpace(d,remainingObjectBytes(dst,item.Size))
+    if spaceErr!=nil{err=spaceErr}else{defer releaseSpace();err=a.fetchObject(item.Key,dst,item)}
+   }
    if err!=nil{mu.Lock();if first==nil{first=err};mu.Unlock();return}
    total.Add(item.Size)
   }()
