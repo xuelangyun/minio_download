@@ -1388,10 +1388,26 @@ func(r *spaceReservation)Release(){
  if current<=r.remaining{delete(r.app.spaceInFlight,r.diskName)}else{r.app.spaceInFlight[r.diskName]=current-r.remaining}
  r.app.spaceMu.Unlock();r.remaining=0
 }
-type progressWriter struct { writer io.Writer; onWrite func(int64) }
-func(w progressWriter)Write(p []byte)(int,error){
+const fsyncIntervalBytes int64=32*1024*1024
+type progressWriter struct {
+ writer io.Writer
+ onWrite func(int64)
+ syncEvery int64
+ sinceSync int64
+ syncFn func()error
+}
+func(w *progressWriter)Write(p []byte)(int,error){
  n,err:=w.writer.Write(p)
- if n>0&&w.onWrite!=nil{w.onWrite(int64(n))}
+ if n>0{
+  if w.onWrite!=nil{w.onWrite(int64(n))}
+  if w.syncEvery>0&&w.syncFn!=nil{
+   w.sinceSync+=int64(n)
+   if w.sinceSync>=w.syncEvery{
+    if syncErr:=w.syncFn();err==nil{err=syncErr}
+    w.sinceSync=0
+   }
+  }
+ }
  return n,err
 }
 func existingObjectComplete(dst string,expected minio.ObjectInfo)bool{
@@ -1568,7 +1584,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
     out,err=os.OpenFile(tmp,flags,0644)
     if err==nil{
      var n int64
-     n,copyErr:=io.Copy(progressWriter{writer:out,onWrite:onProgress},struct{io.Reader}{obj})
+     writer:=&progressWriter{writer:out,onWrite:onProgress};if *a.cfg.Fsync{writer.syncEvery=fsyncIntervalBytes;writer.syncFn=out.Sync};n,copyErr:=io.Copy(writer,struct{io.Reader}{obj})
      var syncErr error
      if *a.cfg.Fsync{syncErr=out.Sync()}
      closeErr:=out.Close()
