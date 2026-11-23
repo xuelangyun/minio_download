@@ -224,3 +224,22 @@ func TestPostgresDSNEscapesCredentials(t *testing.T) {
 		t.Fatalf("connection options missing: %s", u.RawQuery)
 	}
 }
+
+func TestChooseTaskDiskKeepsSharedOutputFolderTogether(t *testing.T) {
+	disks := []DiskConfig{
+		{Name: "disk1", Path: t.TempDir()},
+		{Name: "disk2", Path: t.TempDir()},
+	}
+	loads := map[string]int{"disk1": 0, "disk2": 0}
+	folderDisk := map[string]*DiskConfig{}
+	first := Task{Name: "task-a", Scene: "scene-a", Dir: "shared-folder"}
+	second := Task{Name: "task-b", Scene: "scene-b", Dir: "shared-folder"}
+	chosenFirst := chooseTaskDisk(first, disks, loads, folderDisk)
+	chosenSecond := chooseTaskDisk(second, disks, loads, folderDisk)
+	if chosenFirst == nil || chosenSecond == nil || chosenFirst.Name != chosenSecond.Name {
+		t.Fatalf("tasks sharing a folder must share a disk: first=%v second=%v", chosenFirst, chosenSecond)
+	}
+	if loads[chosenFirst.Name] != 1 {
+		t.Fatalf("shared folder should count as one disk load, got loads=%v", loads)
+	}
+}
