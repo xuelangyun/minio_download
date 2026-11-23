@@ -293,8 +293,8 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  final,partial:=episodePaths(a.cfg.DataVersion,t,d,e.ParentKey)
  if err:=os.MkdirAll(partial,0755);err!=nil{return a.fail(e,d,final,partial,err)}
  direct:=map[string]bool{};for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:false}){if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)};if !obj.IsDir{direct[path.Base(obj.Key)]=true}}
- if !direct["task_info.json"]{_=a.set(e,d,final,partial,"missing_task_info","缺少 task_info.json");return nil}
- if a.cfg.RequireMCAP{found:=false;for n:=range direct{if ok,_:=path.Match(a.cfg.MCAPPattern,n);ok{found=true}};if !found{_=a.set(e,d,final,partial,"missing_mcap","缺少 mcap");return nil}}
+ if !direct["task_info.json"]{_=os.RemoveAll(partial);_=a.set(e,d,final,partial,"missing_task_info","缺少 task_info.json");return nil}
+ if a.cfg.RequireMCAP{found:=false;for n:=range direct{if ok,_:=path.Match(a.cfg.MCAPPattern,n);ok{found=true}};if !found{_=os.RemoveAll(partial);_=a.set(e,d,final,partial,"missing_mcap","缺少 mcap");return nil}}
  _=a.set(e,d,final,partial,"running","")
  objects:=make([]minio.ObjectInfo,0)
  for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:true}){
