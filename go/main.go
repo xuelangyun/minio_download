@@ -1206,7 +1206,42 @@ func chooseTaskDisk(task Task,disks []DiskConfig,loads map[string]int,folderDisk
  if chosen!=nil{folderDisk[folder]=chosen;loads[chosen.Name]++}
  return chosen
 }
+func diskLockKeys(disks []DiskConfig) ([]string,error) {
+ parts,err:=disk.Partitions(false);if err!=nil{return nil,fmt.Errorf("读取磁盘挂载信息失败，无法建立跨进程磁盘锁: %w",err)}
+ keys:=map[string]bool{}
+ for _,d:=range disks {
+  target:=filepath.Clean(d.Path);bestLen:=-1;key:=""
+  for _,p:=range parts {
+   mount:=filepath.Clean(p.Mountpoint);rel,e:=filepath.Rel(mount,target)
+   if e!=nil||rel==".."||strings.HasPrefix(rel,".."+string(os.PathSeparator)){continue}
+   if runtime.GOOS=="windows"&&!strings.EqualFold(mount,target)&&!strings.HasPrefix(strings.ToLower(target),strings.ToLower(mount+string(os.PathSeparator))){continue}
+   if len(mount)>bestLen {bestLen=len(mount);key=p.Device}
+  }
+  if key=="" {resolved,e:=filepath.Abs(target);if e!=nil{return nil,e};key=resolved}
+  sum:=sha256.Sum256([]byte(strings.ToLower(key)))
+  keys[hex.EncodeToString(sum[:])]=true
+ }
+ out:=make([]string,0,len(keys));for k:=range keys{out=append(out,k)};sort.Strings(out);return out,nil
+}
+func acquireNamedDiskLocks(keys []string,lockDir string)(func(),error) {
+ if err:=os.MkdirAll(lockDir,0700);err!=nil{return nil,fmt.Errorf("创建磁盘锁目录失败: %w",err)}
+ locks:=make([]*flock.Flock,0,len(keys))
+ for _,key:=range keys {
+  lock:=flock.New(filepath.Join(lockDir,"minio-download-disk-"+key+".lock"))
+  ok,err:=lock.TryLock()
+  if err!=nil||!ok {
+   for i:=len(locks)-1;i>=0;i--{_ = locks[i].Unlock()}
+   if err!=nil{return nil,fmt.Errorf("获取磁盘并发锁失败: %w",err)}
+   return nil,fmt.Errorf("目标文件系统正在被另一个下载器实例使用（锁 %s）",key)
+  }
+  locks=append(locks,lock)
+ }
+ return func(){for i:=len(locks)-1;i>=0;i--{_ = locks[i].Unlock()}},nil
+}
 func(a *App)downloadSelected(sel map[string][]Episode)error{
+ keys,lockErr:=diskLockKeys(a.cfg.Disks);if lockErr!=nil{return lockErr}
+ unlockDiskLocks,lockErr:=acquireNamedDiskLocks(keys,filepath.Join(os.TempDir(),"minio-download-locks"));if lockErr!=nil{return lockErr}
+ defer unlockDiskLocks()
  loads:=map[string]int{};existing:=map[string]*DiskConfig{};folderDisk:=map[string]*DiskConfig{}
  // Existing task footprints (including .partial directories) are authoritative.
  // Stale SQLite assignments without any on-disk data are deliberately ignored.
