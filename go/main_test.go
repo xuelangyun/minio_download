@@ -1696,6 +1696,16 @@ func TestMissingMCAPCleanupCanRecoverAfterInterruption(t *testing.T) {
  if _, err = db.Exec("INSERT INTO downloaded_episodes(episode_id) VALUES(?)", "pending"); err != nil {
   t.Fatal(err)
  }
+ previewCount, err := app.cleanup(true)
+ if err != nil {
+  t.Fatalf("preview pending cleanup: %v", err)
+ }
+ if previewCount != 1 {
+  t.Fatalf("pending cleanup preview count=%d, want 1", previewCount)
+ }
+ if _, err = os.Stat(pendingDir); err != nil {
+  t.Fatalf("dry-run unexpectedly removed pending cleanup directory: %v", err)
+ }
  if err = app.recoverPendingCleanup(); err != nil {
   t.Fatalf("recover pending cleanup: %v", err)
  }
