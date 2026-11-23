@@ -790,7 +790,7 @@ func TestValidatePlanPayloadRejectsDuplicateTasksAndInvalidCounts(t *testing.T) 
 	for _, raw := range []string{
 		`{"data_version":"v1","scenes":[{"scene":"A","tasks":[{"name":"same","count":1},{"name":"same","count":2}]}]}`,
 		`{"data_version":"v1","scenes":[{"scene":"A","tasks":[{"name":"bad","count":-1}]}]}`,
-		`{"data_version":"","scenes":[]}`,
+		`{"data_version":"v1","scenes":null}`,
 	} {
 		if _, err := validatePlanPayload(json.RawMessage(raw)); err == nil { t.Errorf("expected invalid payload: %s", raw) }
 	}
