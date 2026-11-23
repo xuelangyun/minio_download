@@ -1,6 +1,6 @@
 # MinIO Download - Go 版本
 
-Go 实现与 Python 版本并行维护。当前首版提供 Windows / Linux 命令行下载核心。
+Go 实现与 Python 版本并行维护，提供 Windows / Linux 命令行下载器。条数模式可以读取 Python Web 控制台使用的 SQLite 配置库和下载状态库；时长模式使用独立 JSON 配置。
 
 ## 功能
 
@@ -21,7 +21,7 @@ Go 版本按 Python 的两个 py_shell 脚本拆分了任务配置模板：
 - `config.example.json`：按时长任务清单，对应 `minio_task_downloader.py`。
 - `config.count.example.json`：按条数任务清单，对应 `minio_task_downloader_by_count.py`（43 个任务，默认每个任务 40 条）。
 
-将所需模板复制为 `config.json`，填写 MinIO、PostgreSQL、磁盘路径。不要提交真实密钥。时长模式的 `target_hours` 单位为小时，数据库 `content_time` 按秒累计；条数模式使用 `target_count`。两种模式必须使用各自对应的任务配置，避免历史别名和任务目录发生冲突。时长模板默认启用 `trust_completed_records`，与 `py_shell/minio_task_downloader.py` 一致：更换 / 归档磁盘后仍按历史完成台账计入目标。条数模板默认关闭该项，与 `py_shell/minio_task_downloader_by_count.py` 一致：只有配置磁盘上的正式目录真实存在才计入目标。
+将所需模板复制为 `config.json`。不使用 Python 配置库时，填写 MinIO、PostgreSQL、磁盘路径和任务目标；不要提交真实密钥。时长模式的 `target_hours` 单位为小时，数据库 `content_time` 按秒累计；条数模式使用 `target_count`。两种模式必须使用各自对应的任务配置，避免历史别名和任务目录发生冲突。时长模板默认启用 `trust_completed_records`，与 `py_shell/minio_task_downloader.py` 一致：更换 / 归档磁盘后仍按历史完成台账计入目标。条数模板默认关闭该项，与 `py_shell/minio_task_downloader_by_count.py` 一致：只有配置磁盘上的正式目录真实存在才计入目标。
 
 需要 Go 1.23+：
 
@@ -37,6 +37,9 @@ Go 版本按 Python 的两个 py_shell 脚本拆分了任务配置模板：
     # 条数模式：使用独立的 43 任务配置
     cp config.count.example.json config.json
     ./minio-download --config config.json --mode count
+
+    # 若要复用 py_sample 的配置库，在 config.json 中设置 config_db 路径；
+    # state_db 指向 py_sample/minio_download_state.sqlite3 可共享暂停控制与状态。
 
 Windows PowerShell：
 
