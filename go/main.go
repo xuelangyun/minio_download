@@ -1972,8 +1972,30 @@ func (a *App) markCleanupPending(episodeID string) error {
  return tx.Commit()
 }
 
+func (a *App) validateCleanupTarget(target string) error {
+ resolvedTarget, err := resolvePathWithMissingTail(target)
+ if err != nil {
+  return fmt.Errorf("解析清理目标路径失败 %s: %w", target, err)
+ }
+ for _, configuredDisk := range a.cfg.Disks {
+  resolvedRoot, rootErr := resolvePathWithMissingTail(configuredDisk.Path)
+  if rootErr != nil {
+   continue
+  }
+  rel, relErr := filepath.Rel(resolvedRoot, resolvedTarget)
+  if relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+   continue
+  }
+  return nil
+ }
+ return fmt.Errorf("拒绝清理配置磁盘之外的路径: %s", target)
+}
+
 func (a *App) completePendingCleanup(episodeID string, target sql.NullString) error {
  if target.Valid && target.String != "" {
+  if err := a.validateCleanupTarget(target.String); err != nil {
+   return err
+  }
   if err := os.RemoveAll(target.String); err != nil {
    return fmt.Errorf("删除 episode 目录 %s 失败: %w", target.String, err)
   }
