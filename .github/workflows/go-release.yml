@@ -21,9 +21,15 @@ jobs:
       - name: Resolve dependencies
         working-directory: go
         run: go mod tidy
+      - name: Format Go sources
+        working-directory: go
+        run: gofmt -w *.go
       - name: Test
         working-directory: go
         run: go test ./...
+      - name: Vet
+        working-directory: go
+        run: go vet ./...
       - name: Build Windows amd64
         working-directory: go
         run: |
