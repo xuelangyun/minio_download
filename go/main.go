@@ -76,6 +76,7 @@ func main(){
  if *mode!="duration"&&*mode!="count"{log.Fatal("--mode 只能是 duration 或 count")}
  if e=loadConfigDB(&c,*mode);e!=nil{log.Fatalf("读取 SQLite 配置库失败: %v",e)}
  if e=c.normalize(*mode);e!=nil{log.Fatal(e)}
+ effectiveRounds:=c.DefaultRounds;if *rounds>0{effectiveRounds=*rounds};if effectiveRounds<1||effectiveRounds>50{log.Fatal("--max-rounds / run.default_rounds 必须在 1 到 50 之间")}
  if *webFlag{if *webHost=="127.0.0.1"&&c.WebHost!=""{*webHost=c.WebHost};if *webPort==8765&&c.WebPort>0{*webPort=c.WebPort};if e=serveWeb(c,*webHost,*webPort);e!=nil{log.Fatal(e)};return}
  _=os.MkdirAll(filepath.Dir(c.StateDB),0755);_=os.MkdirAll(filepath.Dir(c.LockFile),0755);_=os.MkdirAll(c.LogDir,0755)
  f,e:=os.OpenFile(filepath.Join(c.LogDir,"minio_task_downloader.log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0644);if e!=nil{log.Fatal(e)};defer f.Close()
@@ -489,11 +490,6 @@ func applyWebSetting(c *Config,key string,v any){
  case "run.include_null_quality":c.IncludeNull=v.(bool)
  case "run.mcap_pattern":c.MCAPPattern=v.(string)
  case "run.validate_workers":c.ValidateWorkers=v.(int)
- case "run.default_rounds":c.DefaultRounds=v.(int)
- case "transfer.connect_timeout":c.ConnectTimeout=v.(int)
- case "transfer.read_timeout":c.ReadTimeout=v.(int)
- case "web.host":c.WebHost=v.(string)
- case "web.port":c.WebPort=v.(int)
  case "transfer.file_workers":c.FileWorkers=v.(int)
  case "transfer.file_retries":c.FileRetries=v.(int)
  case "transfer.retry_delay":c.RetryDelaySeconds=v.(float64)
