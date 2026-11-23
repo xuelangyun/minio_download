@@ -21,9 +21,9 @@
   "include_null_quality": false,
   "disks": [
     {
-      "name": "disk1",
-      "path": "/mnt/temdata1",
-      "mountpoint": "/mnt/temdata1"
+      "name": "disk5",
+      "path": "/mnt/temdata6",
+      "mountpoint": "/mnt/temdata6"
     }
   ],
   "tasks": [
