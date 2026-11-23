@@ -1514,7 +1514,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
   offset:=int64(0)
   if st,err:=os.Stat(tmp);err==nil{
    if st.Size()>expected.Size{if err:=discardTemp();err!=nil{return err}}else{offset=st.Size()}
-  }else if !os.IsNotExist(err){return err}
+  }else if os.IsNotExist(err){restoreWritten()}else{return err}
   if offset>=expected.Size&&offset>0{if err:=discardTemp();err!=nil{return err};offset=0}
   if offset>0{
    current,statErr:=a.mc.StatObject(a.ctx,a.cfg.Bucket,key,minio.StatObjectOptions{})
