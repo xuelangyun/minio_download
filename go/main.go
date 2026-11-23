@@ -183,13 +183,26 @@ func(a *App)run(all []Episode,nround int)error{
  };return nil
 }
 type batch struct{t Task;d DiskConfig;rows []Episode}
+func validateDisk(d DiskConfig)error{
+ mount:=d.Mountpoint;if mount==""{mount=d.Path}
+ if _,err:=os.Stat(mount);err!=nil{return fmt.Errorf("磁盘挂载点不存在 %s: %w",mount,err)}
+ rel,err:=filepath.Rel(filepath.Clean(mount),filepath.Clean(d.Path))
+ if err!=nil||rel==".."||strings.HasPrefix(rel,".."+string(os.PathSeparator)){return fmt.Errorf("目标路径 %s 不在挂载点 %s 之下",d.Path,mount)}
+ parts,err:=disk.Partitions(false);if err!=nil{return fmt.Errorf("读取磁盘挂载信息失败: %w",err)}
+ found:=false
+ want:=filepath.Clean(mount);if runtime.GOOS=="windows"{want=strings.ToLower(want)}
+ for _,part:=range parts{got:=filepath.Clean(part.Mountpoint);if runtime.GOOS=="windows"{got=strings.ToLower(got)};if got==want{found=true;break}}
+ if !found{return fmt.Errorf("路径存在但不是已挂载的磁盘挂载点: %s",mount)}
+ return nil
+}
 func(a *App)downloadSelected(sel map[string][]Episode)error{
  loads:=map[string]int{};for _,t:=range a.cfg.Tasks{if a.assigned(t.Name)!=""{loads[a.assigned(t.Name)]++}}
  byDisk:=map[string][]batch{}
  for _,t:=range a.cfg.Tasks{rs:=sel[t.Name];if len(rs)==0{continue};var d *DiskConfig;old:=a.assigned(t.Name)
   for i:=range a.cfg.Disks{if old!=""&&a.cfg.Disks[i].Name==old{d=&a.cfg.Disks[i];break}}
   if d==nil{for i:=range a.cfg.Disks{x:=&a.cfg.Disks[i];if d==nil||loads[x.Name]<loads[d.Name]{d=x}}};if d==nil{return errors.New("没有配置目标磁盘")}
-  if err:=os.MkdirAll(d.Path,0755);err!=nil{return err};if d.Mountpoint!=""{if _,err:=os.Stat(d.Mountpoint);err!=nil{return fmt.Errorf("挂载点不存在 %s: %w",d.Mountpoint,err)}}
+  if err:=validateDisk(*d);err!=nil{return err}
+  if err:=os.MkdirAll(d.Path,0755);err!=nil{return err}
   usage,err:=disk.Usage(d.Path);if err!=nil{return err};var bytes int64;for _,e:=range rs{bytes+=e.Size};need:=uint64(float64(bytes)*a.cfg.SafetyFactor+a.cfg.MinFreeGB*1024*1024*1024)
   if usage.Free<need{log.Printf("任务整体空间预检不通过，未启动: %s free=%d need=%d",t.Name,usage.Free,need);continue}
   a.assign(t.Name,d.Name);loads[d.Name]++;byDisk[d.Name]=append(byDisk[d.Name],batch{t,*d,rs})
