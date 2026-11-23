@@ -45,13 +45,14 @@ type Config struct {
  Disks []DiskConfig `json:"disks"`; Tasks []Task `json:"tasks"`
 }
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
-type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; mode string; recheck bool; validated map[string]bool }
+type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool }
 var configPath=flag.String("config","config.json","JSON 配置文件")
 var mode=flag.String("mode","duration","duration 或 count")
 var rounds=flag.Int("max-rounds",1,"缺少必需文件后的补选轮数")
 var recheck=flag.Bool("recheck-missing",false,"重新检查缺文件数据")
 var cleanup=flag.Bool("cleanup-missing-mcap",false,"清理缺少 mcap 的已下载目录")
 var dry=flag.Bool("dry-run",false,"只预览清理操作")
+var stopFlag=flag.Bool("stop",false,"请求正在运行的下载器安全暂停")
 
 func main(){
  flag.Parse()
@@ -59,14 +60,18 @@ func main(){
  if *rounds<1{log.Fatal("--max-rounds 必须 >= 1")}
  b,e:=os.ReadFile(*configPath);if e!=nil{log.Fatalf("读取配置失败: %v；请复制 config.example.json 为 config.json",e)}
  var c Config;if e=json.Unmarshal(b,&c);e!=nil{log.Fatalf("配置 JSON 无效: %v",e)}
+ if *stopFlag{if e=requestStop(c);e!=nil{log.Fatal(e)};log.Print("已写入安全暂停请求");return}
  if e=c.normalize(*mode);e!=nil{log.Fatal(e)}
  _=os.MkdirAll(filepath.Dir(c.StateDB),0755);_=os.MkdirAll(filepath.Dir(c.LockFile),0755);_=os.MkdirAll(c.LogDir,0755)
  f,e:=os.OpenFile(filepath.Join(c.LogDir,"go-downloader.log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0644);if e!=nil{log.Fatal(e)};defer f.Close()
  log.SetOutput(io.MultiWriter(os.Stdout,f));log.SetFlags(log.Ldate|log.Ltime|log.Lmicroseconds)
- ctx,stop:=signal.NotifyContext(context.Background(),os.Interrupt);defer stop()
- a:=&App{cfg:c,ctx:ctx,mode:*mode,recheck:*recheck,validated:map[string]bool{}}
+ baseCtx,stop:=signal.NotifyContext(context.Background(),os.Interrupt);defer stop()
+ ctx,cancel:=context.WithCancel(baseCtx);defer cancel()
+ a:=&App{cfg:c,ctx:ctx,cancel:cancel,mode:*mode,recheck:*recheck,validated:map[string]bool{}}
  lock:=flock.New(c.LockFile);locked,lockErr:=lock.TryLock();if lockErr!=nil{log.Fatalf("创建下载锁失败: %v",lockErr)};if !locked{log.Fatal("检测到另一个下载器实例正在运行")};defer lock.Unlock()
  if e=a.open();e!=nil{log.Fatal(e)};defer a.db.Close()
+ if e=a.clearStopRequest();e!=nil{log.Fatal(e)}
+ watcherDone:=a.startStopWatcher();defer func(){cancel();<-watcherDone}()
  if e=validateDiskSet(a.cfg.Disks);e!=nil{log.Fatal(e)}
  if *cleanup{n,err:=a.cleanup(*dry);if err!=nil{log.Fatal(err)};log.Printf("清理结束：%d 条",n);if *dry{return}}else if *dry{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
  rows,e:=a.fetch();if e!=nil{log.Fatal(e)}
