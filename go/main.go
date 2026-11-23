@@ -32,7 +32,7 @@ type Config struct {
  Endpoint string `json:"minio_endpoint"`; AccessKey string `json:"minio_access_key"`; SecretKey string `json:"minio_secret_key"`; Bucket string `json:"minio_bucket"`; Region string `json:"minio_region"`; SSL bool `json:"minio_use_ssl"`
  PGHost string `json:"pg_host"`; PGPort int `json:"pg_port"`; PGDB string `json:"pg_database"`; PGUser string `json:"pg_user"`; PGPassword string `json:"pg_password"`
  DataVersion string `json:"data_version"`; StateDB string `json:"state_db"`; LogDir string `json:"log_dir"`; MinFreeGB float64 `json:"min_free_gb"`; SafetyFactor float64 `json:"space_safety_factor"`
- Workers int `json:"max_writes_per_disk"`; RequireMCAP bool `json:"require_mcap"`; MCAPPattern string `json:"mcap_pattern"`; IncludeNull bool `json:"include_null_quality"`; TrustCompletedRecords bool `json:"trust_completed_records"`
+ Workers int `json:"max_writes_per_disk"`; FileWorkers int `json:"file_workers"`; RequireMCAP bool `json:"require_mcap"`; MCAPPattern string `json:"mcap_pattern"`; IncludeNull bool `json:"include_null_quality"`; TrustCompletedRecords bool `json:"trust_completed_records"`
  Disks []DiskConfig `json:"disks"`; Tasks []Task `json:"tasks"`
 }
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
@@ -66,7 +66,7 @@ func(c *Config)normalize(m string)error{
  if c.Endpoint==""||c.AccessKey==""||c.SecretKey==""||c.Bucket==""{return errors.New("MinIO endpoint/access_key/secret_key/bucket 必须填写")}
  if c.PGHost==""||c.PGDB==""||c.PGUser==""||c.PGPassword==""{return errors.New("PostgreSQL 连接参数必须填写")}
  if c.PGPort==0{c.PGPort=5432};if c.DataVersion==""{c.DataVersion="银河2.2数据"};if c.StateDB==""{c.StateDB="minio_download_state.sqlite3"};if c.LogDir==""{c.LogDir="logs"}
- if c.MinFreeGB==0{c.MinFreeGB=3};if c.SafetyFactor==0{c.SafetyFactor=1.15};if c.Workers<=0{c.Workers=2};if c.MCAPPattern==""{c.MCAPPattern="*.SYNC.mcap"}
+ if c.MinFreeGB==0{c.MinFreeGB=3};if c.SafetyFactor==0{c.SafetyFactor=1.15};if c.Workers<=0{c.Workers=2};if c.FileWorkers<=0{c.FileWorkers=4};if c.MCAPPattern==""{c.MCAPPattern="*.SYNC.mcap"}
  if len(c.Disks)==0||len(c.Tasks)==0{return errors.New("disks/tasks 不能为空")}
  seen:=map[string]bool{};aliases:=map[string]string{};dirs:=map[string]string{}
  for _,t:=range c.Tasks{
@@ -196,12 +196,32 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  direct:=map[string]bool{};for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:false}){if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)};if !obj.IsDir{direct[path.Base(obj.Key)]=true}}
  if !direct["task_info.json"]{_=a.set(e,d,final,partial,"missing_task_info","缺少 task_info.json");return nil}
  if a.cfg.RequireMCAP{found:=false;for n:=range direct{if ok,_:=path.Match(a.cfg.MCAPPattern,n);ok{found=true}};if !found{_=a.set(e,d,final,partial,"missing_mcap","缺少 mcap");return nil}}
- _=a.set(e,d,final,partial,"running","");var total int64
- for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:true}){if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)};if obj.IsDir||strings.HasSuffix(obj.Key,"/"){continue}
-  rel:=strings.TrimPrefix(obj.Key,e.ParentKey+"/");dst,err:=safeJoin(partial,rel);if err!=nil{return a.fail(e,d,final,partial,err)};if err=os.MkdirAll(filepath.Dir(dst),0755);err!=nil{return a.fail(e,d,final,partial,err)}
-  if err=a.fetchObject(obj.Key,dst,obj);err!=nil{return a.fail(e,d,final,partial,err)};total+=obj.Size
+ _=a.set(e,d,final,partial,"running","")
+ objects:=make([]minio.ObjectInfo,0)
+ for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:true}){
+  if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)}
+  if obj.IsDir||strings.HasSuffix(obj.Key,"/"){continue}
+  objects=append(objects,obj)
  }
- if total==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
+ sem:=make(chan struct{},a.cfg.FileWorkers);var wg sync.WaitGroup;var total atomic.Int64;var mu sync.Mutex;var first error
+ for _,item:=range objects{
+  item:=item
+  if a.ctx.Err()!=nil{break}
+  sem<-struct{}{};wg.Add(1)
+  go func(){
+   defer wg.Done();defer func(){<-sem}()
+   rel:=strings.TrimPrefix(item.Key,e.ParentKey+"/")
+   dst,err:=safeJoin(partial,rel)
+   if err==nil{err=os.MkdirAll(filepath.Dir(dst),0755)}
+   if err==nil{err=a.fetchObject(item.Key,dst,item)}
+   if err!=nil{mu.Lock();if first==nil{first=err};mu.Unlock();return}
+   total.Add(item.Size)
+  }()
+ }
+ wg.Wait()
+ if first!=nil{return a.fail(e,d,final,partial,first)}
+ if a.ctx.Err()!=nil{return a.fail(e,d,final,partial,a.ctx.Err())}
+ if total.Load()==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
  if err:=os.RemoveAll(final);err!=nil{return a.fail(e,d,final,partial,err)};if err:=os.Rename(partial,final);err!=nil{return a.fail(e,d,final,partial,err)}
  if err:=a.record(e,d,final);err!=nil{return err};return a.set(e,d,final,"","completed","")
 }
@@ -270,7 +290,10 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
 func sameETag(a,b string)bool{return strings.Trim(a,"\"")==strings.Trim(b,"\"")}
 func isMD5ETag(etag string)bool{v:=strings.Trim(etag,"\"");if len(v)!=32||strings.Contains(v,"-"){return false};_,err:=hex.DecodeString(v);return err==nil}
 func fileMD5(name string)(string,error){f,err:=os.Open(name);if err!=nil{return "",err};defer f.Close();h:=md5.New();if _,err=io.Copy(h,f);err!=nil{return "",err};return hex.EncodeToString(h.Sum(nil)),nil}
-func(a *App)fail(e Episode,d DiskConfig,final,partial string,err error)error{_=a.set(e,d,final,partial,"failed",err.Error());log.Printf("下载失败 %s: %v",e.ID,err);return err}
+func(a *App)fail(e Episode,d DiskConfig,final,partial string,err error)error{
+ if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded){_=a.set(e,d,final,partial,"paused","已暂停，保留暂存文件供下次续传");return nil}
+ _=a.set(e,d,final,partial,"failed",err.Error());log.Printf("下载失败 %s: %v",e.ID,err);return err
+}
 func(a *App)cleanup(preview bool)(int,error){
  rows,e:=a.db.Query("SELECT episode_id,target_path FROM downloads WHERE status='completed'");if e!=nil{return 0,e};defer rows.Close();n:=0
  for rows.Next(){var id string;var p sql.NullString;if e=rows.Scan(&id,&p);e!=nil{return n,e};if !p.Valid||!hasPattern(p.String,a.cfg.MCAPPattern){n++;if preview{log.Printf("[dry-run] 缺 mcap: %s",p.String)}else{_=os.RemoveAll(p.String);_,_=a.db.Exec("DELETE FROM downloads WHERE episode_id=?",id);_,_=a.db.Exec("DELETE FROM downloaded_episodes WHERE episode_id=?",id)}}};return n,rows.Err()
