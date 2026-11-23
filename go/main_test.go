@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -298,4 +299,26 @@ func TestStopWatcherCancelsApplicationContext(t *testing.T) {
 		t.Fatal("pause watcher did not cancel the context")
 	}
 	<-done
+}
+
+func TestPIDFileLifecycle(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "downloader.pid")
+	if err := writePIDFile(name, "count"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record pidRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.PID != os.Getpid() || record.Mode != "count" || record.CreatedAt == "" {
+		t.Fatalf("unexpected PID record: %+v", record)
+	}
+	removePIDFile(name)
+	if _, err := os.Stat(name); !os.IsNotExist(err) {
+		t.Fatalf("PID file should be removed, got err=%v", err)
+	}
 }
