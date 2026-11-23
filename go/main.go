@@ -74,9 +74,9 @@ func main(){
  watcherDone:=a.startStopWatcher();defer func(){cancel();<-watcherDone}()
  if e=validateDiskSet(a.cfg.Disks);e!=nil{log.Fatal(e)}
  if *cleanup{n,err:=a.cleanup(*dry);if err!=nil{log.Fatal(err)};log.Printf("清理结束：%d 条",n);if *dry{return}}else if *dry{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
- rows,e:=a.fetch();if e!=nil{log.Fatal(e)}
+ rows,e:=a.fetch();if e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停（候选查询期间收到暂停请求）");return};log.Fatal(e)}
  if e=a.run(rows,*rounds);e!=nil{log.Fatal(e)}
- log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH)
+ if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传")}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH)}
 }
 func(c *Config)normalize(m string)error{
  if c.Mode!=""&&c.Mode!=m{return fmt.Errorf("配置文件 mode=%s 与命令行 --mode=%s 不一致",c.Mode,m)}
@@ -119,6 +119,7 @@ func requestStop(c Config) error {
  if err:=os.MkdirAll(filepath.Dir(c.StateDB),0755);err!=nil{return err}
  db,err:=sql.Open("sqlite",c.StateDB);if err!=nil{return err};defer db.Close()
  db.SetMaxOpenConns(1)
+ if _,err=db.Exec("PRAGMA busy_timeout=30000");err!=nil{return err}
  return writeStopRequest(db)
 }
 func(a *App)clearStopRequest()error{
