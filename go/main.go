@@ -1246,6 +1246,11 @@ func diskLockKeys(disks []DiskConfig) ([]string,error) {
  }
  out:=make([]string,0,len(keys));for k:=range keys{out=append(out,k)};sort.Strings(out);return out,nil
 }
+func diskLockDirectory(c Config)string{
+ base:=strings.TrimSpace(c.LockFile)
+ if base==""{base="minio_download.lock"}
+ return filepath.Join(filepath.Dir(base),"disk-locks")
+}
 func acquireNamedDiskLocks(keys []string,lockDir string)(func(),error) {
  if err:=os.MkdirAll(lockDir,0700);err!=nil{return nil,fmt.Errorf("创建磁盘锁目录失败: %w",err)}
  locks:=make([]*flock.Flock,0,len(keys))
@@ -1263,7 +1268,7 @@ func acquireNamedDiskLocks(keys []string,lockDir string)(func(),error) {
 }
 func(a *App)downloadSelected(sel map[string][]Episode)error{
  keys,lockErr:=diskLockKeys(a.cfg.Disks);if lockErr!=nil{return lockErr}
- unlockDiskLocks,lockErr:=acquireNamedDiskLocks(keys,filepath.Join(os.TempDir(),"minio-download-locks"));if lockErr!=nil{return lockErr}
+ unlockDiskLocks,lockErr:=acquireNamedDiskLocks(keys,diskLockDirectory(a.cfg));if lockErr!=nil{return lockErr}
  defer unlockDiskLocks()
  loads:=map[string]int{};existing:=map[string]*DiskConfig{};folderDisk:=map[string]*DiskConfig{}
  // Existing task footprints (including .partial directories) are authoritative.
