@@ -802,8 +802,15 @@ func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := Config{ConfigDB: name}
-	if err := loadConfigDB(&cfg, "count"); err != nil {
-		t.Fatal(err)
+	loadDone := make(chan error, 1)
+	go func() { loadDone <- loadConfigDB(&cfg, "count") }()
+	select {
+	case loadErr := <-loadDone:
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("loadConfigDB blocked while importing Python SQLite configuration with one connection")
 	}
 	if cfg.Endpoint != "http://minio.example:9000" || !cfg.MinioSkipVerify || cfg.Fsync == nil || *cfg.Fsync || cfg.PGHost != "db.example" || cfg.PGPort != 5433 || cfg.DataVersion != "银河2.2数据" {
 		t.Fatalf("connection settings were not imported: %+v", cfg)
