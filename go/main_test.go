@@ -533,3 +533,34 @@ func TestWebStatusReturnsConfiguredTasksAndProgress(t *testing.T) {
 		t.Fatalf("task tags not returned: %#v", tags)
 	}
 }
+
+func TestWebAPIWithoutTokenIsLocalOnly(t *testing.T) {
+	api := &WebAPI{}
+	local := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8765/api/status", nil)
+	local.RemoteAddr = "127.0.0.1:54321"
+	if !api.authorized(local) {
+		t.Fatal("loopback request without configured token should be allowed")
+	}
+	remote := httptest.NewRequest(http.MethodGet, "http://example.test/api/status", nil)
+	remote.Host = "example.test"
+	remote.RemoteAddr = "203.0.113.10:54321"
+	if api.authorized(remote) {
+		t.Fatal("remote request without configured token must be rejected")
+	}
+	local.Header.Set("X-Forwarded-For", "203.0.113.10")
+	if api.authorized(local) {
+		t.Fatal("forwarded requests without token must be rejected")
+	}
+}
+
+func TestWebAPIRejectsCrossOriginWhenTokenConfigured(t *testing.T) {
+	digest := hex.EncodeToString(pbkdf2SHA256([]byte("secret-token"), []byte("salt"), 120000, 32))
+	api := &WebAPI{tokenHash: "pbkdf2_sha256$120000$73616c74$" + digest}
+	request := httptest.NewRequest(http.MethodGet, "http://example.test/api/status", nil)
+	request.Host = "example.test"
+	request.Header.Set("Origin", "http://attacker.test")
+	request.Header.Set("Authorization", "Bearer secret-token")
+	if api.authorized(request) {
+		t.Fatal("cross-origin requests must be rejected even with a valid token")
+	}
+}
