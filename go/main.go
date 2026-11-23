@@ -256,27 +256,30 @@ func validatePlanPayload(raw json.RawMessage)(planPayload,error){
  p.DataVersion=strings.TrimSpace(p.DataVersion)
  if p.DataVersion==""{return p,errors.New("版本目录不能为空")}
  if p.Scenes==nil{return p,errors.New("任务内容格式不对（需要 data_version 和 scenes）")}
- seenTasks:=map[string]bool{};seenAliases:=map[string]string{}
+ seenTasks:=map[string]bool{};seenAliases:=map[string]string{};dirOwners:=map[string]string{};sceneSeen:=map[string]bool{}
  for si:=range p.Scenes {
   scene:=&p.Scenes[si];scene.Scene=strings.TrimSpace(scene.Scene)
-  if scene.Scene==""{return p,fmt.Errorf("第 %d 个场景名称不能为空",si+1)}
+  if scene.Scene==""{return p,errors.New("场景名不能为空")}
+  if sceneSeen[scene.Scene]{return p,fmt.Errorf("场景名重复：%q",scene.Scene)};sceneSeen[scene.Scene]=true
   if scene.Tasks==nil{scene.Tasks=[]planTask{}}
   for ti:=range scene.Tasks {
    t:=&scene.Tasks[ti];t.Name=strings.TrimSpace(t.Name)
-   if t.Name==""{return p,fmt.Errorf("场景 %q 中存在空任务名",scene.Scene)}
+   if t.Name==""{return p,fmt.Errorf("场景 %q 下有任务名为空",scene.Scene)}
    if seenTasks[t.Name]{return p,fmt.Errorf("任务名重复：%q（任务名必须全局唯一）",t.Name)}
    seenTasks[t.Name]=true
-   if t.Count<0{return p,fmt.Errorf("任务 %q 的目标条数必须是非负整数",t.Name)}
-   t.Dir=strings.TrimSpace(t.Dir)
+   if t.Count<0{return p,fmt.Errorf("任务 %q 的目标条数必须是非负整数，当前为 %d",t.Name,t.Count)}
+   t.Dir=strings.TrimSpace(t.Dir);if t.Dir==""{t.Dir=t.Name}
+   dirKey:=scene.Scene+"\\x00"+t.Dir;if owner,ok:=dirOwners[dirKey];ok{return p,fmt.Errorf("场景 %q 下目录名 %q 被任务 %q 和 %q 同时使用",scene.Scene,t.Dir,owner,t.Name)};dirOwners[dirKey]=t.Name
    if t.Aliases==nil{t.Aliases=[]string{}};if t.Tags==nil{t.Tags=[]string{}}
    aliasSeen:=map[string]bool{}
-   for i,a:=range t.Aliases {a=strings.TrimSpace(a);if a==""{return p,fmt.Errorf("任务 %q 存在空别名",t.Name)};if aliasSeen[a]{return p,fmt.Errorf("任务 %q 的别名重复：%q",t.Name,a)};aliasSeen[a]=true;if owner,ok:=seenAliases[a];ok&&owner!=t.Name{return p,fmt.Errorf("别名冲突：%q 同时属于 %q 和 %q",a,owner,t.Name)};seenAliases[a]=t.Name;t.Aliases[i]=a}
+   for i,a:=range t.Aliases {a=strings.TrimSpace(a);if a==""{return p,fmt.Errorf("任务 %q 存在空别名",t.Name)};if aliasSeen[a]{return p,fmt.Errorf("任务 %q 的别名重复：%q",t.Name,a)};aliasSeen[a]=true;if owner,ok:=seenAliases[a];ok&&owner!=t.Name{return p,fmt.Errorf("别名 %q 重复出现在任务 %q 和 %q 中",a,owner,t.Name)};seenAliases[a]=t.Name;t.Aliases[i]=a}
    tagSeen:=map[string]bool{}
    for i,tag:=range t.Tags {tag=strings.TrimSpace(tag);if tag==""{continue};if len([]rune(tag))>24{return p,fmt.Errorf("标签太长（最多 24 个字符）：%s",tag)};if !tagSeen[tag]{tagSeen[tag]=true}else{t.Tags[i]=""}}
    clean:=make([]string,0,len(t.Tags));for _,tag:=range t.Tags{if tag!=""{clean=append(clean,tag)}};t.Tags=clean
    if len(t.Tags)>12{return p,fmt.Errorf("任务 %q 一个任务最多 12 个标签",t.Name)}
   }
  }
+ for alias,owner:=range seenAliases{if seenTasks[alias]{return p,fmt.Errorf("别名 %q（任务 %q）与某个当前任务名冲突",alias,owner)}}
  return p,nil
 }
 func planSummary(p planPayload)map[string]any{
