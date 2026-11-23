@@ -1649,9 +1649,10 @@ func TestMissingMCAPCleanupCanRecoverAfterInterruption(t *testing.T) {
    t.Fatal(err)
   }
  }
- app := &App{db: db, cfg: Config{MCAPPattern: "*.mcap"}}
+ cleanupRoot := t.TempDir()
+ app := &App{db: db, cfg: Config{MCAPPattern: "*.mcap", Disks: []DiskConfig{{Name: "test", Path: cleanupRoot}}}}
 
- normalDir := filepath.Join(t.TempDir(), "normal-episode")
+ normalDir := filepath.Join(cleanupRoot, "normal-episode")
  if err = os.MkdirAll(normalDir, 0755); err != nil {
   t.Fatal(err)
  }
@@ -1685,7 +1686,7 @@ func TestMissingMCAPCleanupCanRecoverAfterInterruption(t *testing.T) {
   t.Fatalf("cleanup records remain: downloads=%d ledger=%d", downloads, ledger)
  }
 
- pendingDir := filepath.Join(t.TempDir(), "pending-episode")
+ pendingDir := filepath.Join(cleanupRoot, "pending-episode")
  if err = os.MkdirAll(pendingDir, 0755); err != nil {
   t.Fatal(err)
  }
@@ -1709,5 +1710,22 @@ func TestMissingMCAPCleanupCanRecoverAfterInterruption(t *testing.T) {
  }
  if downloads != 0 || ledger != 0 {
   t.Fatalf("pending cleanup records remain: downloads=%d ledger=%d", downloads, ledger)
+ }
+
+ outsideDir := t.TempDir()
+ if _, err = db.Exec("INSERT INTO downloads(episode_id,target_path,status) VALUES(?,?,?)", "outside", outsideDir, "cleanup_pending"); err != nil {
+  t.Fatal(err)
+ }
+ if err = app.recoverPendingCleanup(); err == nil {
+  t.Fatal("expected cleanup outside configured disks to be rejected")
+ }
+ if _, err = os.Stat(outsideDir); err != nil {
+  t.Fatalf("outside directory was unexpectedly removed: %v", err)
+ }
+ if err = db.QueryRow("SELECT COUNT(*) FROM downloads WHERE episode_id='outside' AND status='cleanup_pending'").Scan(&downloads); err != nil {
+  t.Fatal(err)
+ }
+ if downloads != 1 {
+  t.Fatalf("unsafe cleanup state should remain pending, got %d rows", downloads)
  }
 }
