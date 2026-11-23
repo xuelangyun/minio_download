@@ -62,7 +62,7 @@ Go 对配置库只读，不会改写 Python Web 保存的配置。当前导入 M
 
 ## Go Web API 当前范围
 
-`--web` 可启动独立只读 HTTP 服务，提供 `GET /api/status`、`GET /api/episodes?task=任务名`、`GET /api/logs?offset=N`、`POST /api/run` 启动下载、安全暂停 `POST /api/stop` 和无需口令的 `GET /healthz`。`/api/run` 当前只接受 `mode=download`，支持 `max_rounds`（1–50）和 `recheck_missing`。暂停请求必须使用 `Content-Type: application/json`，请求体 `{}`；当前不支持 Web 强制结束进程。状态接口返回任务标签、历史完成进度、磁盘空间/挂载状态、磁盘任务分配、运行中的 episode 和上次运行结果。日志接口按 offset 增量读取完整行。Web API 默认只监听 `127.0.0.1:8765`；未配置 Python Web 访问口令时拒绝非本机监听。配置库已设置 PBKDF2 口令时，API 请求必须使用 `Authorization: Bearer <口令>`；5 分钟内连续 8 次错误口令会锁定该来源 60 秒。写请求必须使用 `Content-Type: application/json`，并校验同源 `Origin`。
+`--web` 可启动独立 HTTP 服务，提供 `GET /api/status`、`GET /api/episodes?task=任务名`、`GET /api/logs?offset=N`、`POST /api/run` 启动下载、安全暂停 `POST /api/stop` 和无需口令的 `GET /healthz`。`/api/run` 当前只接受 `mode=download`，支持 `max_rounds`（1–50）和 `recheck_missing`；Web 会以独立进程组启动下载器，关闭 Web 不会连带终止下载。暂停请求必须使用 `Content-Type: application/json`，请求体 `{}`；当前不支持 Web 强制结束进程。状态接口返回任务标签、历史完成进度、磁盘空间/挂载状态、磁盘任务分配、运行中的 episode 和上次运行结果。日志接口按 offset 增量读取完整行。Web API 默认只监听 `127.0.0.1:8765`；未配置 Python Web 访问口令时拒绝非本机监听。配置库已设置 PBKDF2 口令时，API 请求必须使用 `Authorization: Bearer <口令>`；5 分钟内连续 8 次错误口令会锁定该来源 60 秒。写请求必须使用 `Content-Type: application/json`，并校验同源 `Origin`。
 
 ## 当前限制
 
