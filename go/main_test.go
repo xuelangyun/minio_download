@@ -127,3 +127,15 @@ func TestConfigRejectsMismatchedMode(t *testing.T) {
 		t.Fatal("expected duration config to reject count mode")
 	}
 }
+
+func TestEpisodePathsUseParentKeyLeaf(t *testing.T) {
+	d := DiskConfig{Name: "disk1", Path: t.TempDir()}
+	task := Task{Name: "task", Scene: "scene", Dir: "task-dir"}
+	final, partial := episodePaths("v1", task, d, "bucket/prefix/episode-folder/")
+	if filepath.Base(final) != "episode-folder" {
+		t.Fatalf("final leaf should be parent_key basename, got %q", final)
+	}
+	if filepath.Base(partial) != ".episode-folder.partial" {
+		t.Fatalf("partial leaf mismatch: %q", partial)
+	}
+}
