@@ -185,6 +185,19 @@ func(a *App)run(all []Episode,nround int)error{
  };return nil
 }
 type batch struct{t Task;d DiskConfig;rows []Episode}
+func findExistingTaskDisk(version string,t Task,disks []DiskConfig,rows []Episode)(string,error){
+ found:=""
+ for _,ep:=range rows{
+  for _,d:=range disks{
+   final,_:=episodePaths(version,t,d,ep.ParentKey)
+   if dirHasFiles(final){
+    if found!=""&&found!=d.Name{return "",fmt.Errorf("任务 %s 的已有数据分布在多块磁盘（%s、%s）",t.Name,found,d.Name)}
+    found=d.Name
+   }
+  }
+ }
+ return found,nil
+}
 func validateDisk(d DiskConfig)error{
  mount:=d.Mountpoint;if mount==""{mount=d.Path}
  if _,err:=os.Stat(mount);err!=nil{return fmt.Errorf("磁盘挂载点不存在 %s: %w",mount,err)}
@@ -202,10 +215,16 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
  byDisk:=map[string][]batch{};waitingSpace:=false
  for _,t:=range a.cfg.Tasks{rs:=sel[t.Name];if len(rs)==0{continue};var d *DiskConfig;old:=a.assigned(t.Name)
   for i:=range a.cfg.Disks{if old!=""&&a.cfg.Disks[i].Name==old{d=&a.cfg.Disks[i];break}}
+  if d==nil{
+   existing,err:=findExistingTaskDisk(a.cfg.DataVersion,t,a.cfg.Disks,rs);if err!=nil{return err}
+   if existing!=""{for i:=range a.cfg.Disks{if a.cfg.Disks[i].Name==existing{d=&a.cfg.Disks[i];break}}}
+  }
   if d==nil{for i:=range a.cfg.Disks{x:=&a.cfg.Disks[i];if d==nil||loads[x.Name]<loads[d.Name]{d=x}}};if d==nil{return errors.New("没有配置目标磁盘")}
   if err:=validateDisk(*d);err!=nil{return err}
   if err:=os.MkdirAll(d.Path,0755);err!=nil{return err}
-  usage,err:=disk.Usage(d.Path);if err!=nil{return err};var bytes int64;for _,e:=range rs{bytes+=e.Size};need:=uint64(float64(bytes)*a.cfg.SafetyFactor+a.cfg.MinFreeGB*1024*1024*1024)
+  usage,err:=disk.Usage(d.Path);if err!=nil{return err};var bytes int64
+  for _,ep:=range rs{exists:=false;for _,candidate:=range a.cfg.Disks{p,_:=episodePaths(a.cfg.DataVersion,t,candidate,ep.ParentKey);if dirHasFiles(p){exists=true;break}};if !exists{bytes+=ep.Size}}
+  need:=uint64(float64(bytes)*a.cfg.SafetyFactor+a.cfg.MinFreeGB*1024*1024*1024)
   if usage.Free<need{
    log.Printf("任务整体空间预检不通过，未启动: %s free=%d need=%d",t.Name,usage.Free,need)
    for _,ep:=range rs{_=a.set(ep,*d,"","","waiting_space","磁盘剩余空间不足，任务整体未启动")}
