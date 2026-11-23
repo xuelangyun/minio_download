@@ -21,7 +21,7 @@ jobs:
           cache: false
       - name: Download Go modules
         working-directory: go
-        run: go mod tidy
+        run: go mod download
       - name: Run focused unit tests
         working-directory: go
         run: |
@@ -56,7 +56,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: minio-download-release-assets
-          path: minio-download-*.* 
+          path: minio-download-*.*
           if-no-files-found: error
 
   release:
