@@ -21,7 +21,7 @@ jobs:
           cache: false
       - name: Download Go modules
         working-directory: go
-        run: go mod download
+        run: go mod download all
       - name: Run focused unit tests
         working-directory: go
         run: |
