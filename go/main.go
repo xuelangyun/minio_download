@@ -108,6 +108,40 @@ func(c *Config)normalize(m string)error{
  }
  _=m;return nil
 }
+func controlTimestamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+func writeStopRequest(db *sql.DB) error {
+ if _,err:=db.Exec("CREATE TABLE IF NOT EXISTS control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL)");err!=nil{return err}
+ _,err:=db.Exec("INSERT INTO control(key,value,updated_at) VALUES('stop_requested','1',?) ON CONFLICT(key) DO UPDATE SET value='1',updated_at=excluded.updated_at",controlTimestamp())
+ return err
+}
+func requestStop(c Config) error {
+ if c.StateDB==""{c.StateDB="minio_download_state.sqlite3"}
+ if err:=os.MkdirAll(filepath.Dir(c.StateDB),0755);err!=nil{return err}
+ db,err:=sql.Open("sqlite",c.StateDB);if err!=nil{return err};defer db.Close()
+ db.SetMaxOpenConns(1)
+ return writeStopRequest(db)
+}
+func(a *App)clearStopRequest()error{
+ _,err:=a.db.Exec("INSERT INTO control(key,value,updated_at) VALUES('stop_requested','0',?) ON CONFLICT(key) DO UPDATE SET value='0',updated_at=excluded.updated_at",controlTimestamp())
+ return err
+}
+func(a *App)startStopWatcher()<-chan struct{}{
+ done:=make(chan struct{})
+ go func(){
+  defer close(done)
+  ticker:=time.NewTicker(time.Second);defer ticker.Stop()
+  for{
+   select{
+   case <-a.ctx.Done():return
+   case <-ticker.C:
+    var value string
+    err:=a.db.QueryRowContext(a.ctx,"SELECT value FROM control WHERE key='stop_requested'").Scan(&value)
+    if err==nil&&value=="1"{log.Print("检测到外部暂停请求，正在安全停止并保留断点");a.cancel();return}
+   }
+  }
+ }()
+ return done
+}
 func postgresDSN(c Config) string {
  q:=url.Values{}
  q.Set("sslmode","prefer")
