@@ -977,11 +977,11 @@ func TestWebConfigSettingsPersistsAndUpdatesRuntime(t *testing.T) {
  db,err:=sql.Open("sqlite",api.cfg.ConfigDB);if err!=nil{t.Fatal(err)}
  if _,err=db.Exec("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)");err!=nil{t.Fatal(err)}
  db.Close()
- body:=`{"values":{"run.max_writes_per_disk":4,"run.space_safety_factor":1.25,"minio.secret_key":null,"pg.password":"new-password"}}`
+ body:=`{"values":{"run.max_writes_per_disk":4,"run.space_safety_factor":1.25,"run.default_rounds":3,"transfer.connect_timeout":17,"transfer.read_timeout":240,"web.host":"0.0.0.0","web.port":9876,"minio.secret_key":null,"pg.password":"new-password"}}`
  req:=httptest.NewRequest(http.MethodPut,"/api/config/settings",strings.NewReader(body));rec:=httptest.NewRecorder()
  api.configSettings(rec,req)
  if rec.Code!=http.StatusOK{t.Fatalf("settings update failed: %d %s",rec.Code,rec.Body.String())}
- if api.cfg.Workers!=4||api.cfg.SafetyFactor!=1.25||api.cfg.PGPassword!="new-password"{t.Fatalf("runtime config not updated: %#v",api.cfg)}
+ if api.cfg.Workers!=4||api.cfg.SafetyFactor!=1.25||api.cfg.PGPassword!="new-password"||api.cfg.DefaultRounds!=3||api.cfg.ConnectTimeout!=17||api.cfg.ReadTimeout!=240||api.cfg.WebHost!="0.0.0.0"||api.cfg.WebPort!=9876{t.Fatalf("runtime config not updated: %#v",api.cfg)}
  db,err=sql.Open("sqlite",api.cfg.ConfigDB);if err!=nil{t.Fatal(err)};defer db.Close()
  var got string
  if err=db.QueryRow("SELECT value FROM settings WHERE key='pg.password'").Scan(&got);err!=nil{t.Fatal(err)}
