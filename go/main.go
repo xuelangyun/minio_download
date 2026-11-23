@@ -98,8 +98,12 @@ func main(){
  if e=writePIDFile(c.PIDFile,*mode);e!=nil{log.Fatal(e)};defer removePIDFile(c.PIDFile)
  watcherDone:=a.startStopWatcher();defer func(){cancel();<-watcherDone}()
  if e=validateDiskSet(a.cfg.Disks);e!=nil{log.Fatal(e)}
+ if *dry{
+  if !*cleanup{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
+  n,err:=a.cleanup(true);if err!=nil{log.Fatal(err)};log.Printf("清理预览结束：%d 条",n);return
+ }
  if e=a.recoverPendingCleanup();e!=nil{log.Fatalf("恢复上次未完成的缺失 mcap 清理失败: %v",e)}
- if *cleanup{n,err:=a.cleanup(*dry);if err!=nil{log.Fatal(err)};log.Printf("清理结束：%d 条",n);if *dry{return}}else if *dry{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
+ if *cleanup{n,err:=a.cleanup(false);if err!=nil{log.Fatal(err)};log.Printf("清理结束：%d 条",n)}
  rows,e:=a.fetch();if e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停（候选查询期间收到暂停请求）");a.saveLastRun("paused",nil);return};log.Printf("候选查询失败: %v",e);a.saveLastRun("error",e);return}
  if e=a.run(rows,effectiveRounds);e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil);return};log.Printf("下载执行失败: %v",e);a.saveLastRun("error",e);return}
  if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil)}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH);a.saveLastRun("finished",nil)}
@@ -2051,18 +2055,19 @@ func (a *App) recoverPendingCleanup() error {
 }
 
 func (a *App) cleanup(preview bool) (int, error) {
- rows, err := a.db.Query("SELECT episode_id,target_path FROM downloads WHERE status='completed'")
+ rows, err := a.db.Query("SELECT episode_id,target_path,status FROM downloads WHERE status IN ('completed','cleanup_pending')")
  if err != nil {
   return 0, err
  }
  type item struct {
   id string
   path sql.NullString
+  status string
  }
  items := []item{}
  for rows.Next() {
   var entry item
-  if err = rows.Scan(&entry.id, &entry.path); err != nil {
+  if err = rows.Scan(&entry.id, &entry.path, &entry.status); err != nil {
    rows.Close()
    return 0, err
   }
@@ -2077,14 +2082,21 @@ func (a *App) cleanup(preview bool) (int, error) {
  }
  n := 0
  for _, entry := range items {
-  if !entry.path.Valid || !hasPattern(entry.path.String, a.cfg.MCAPPattern) {
+  pending := entry.status == "cleanup_pending"
+  if pending || !entry.path.Valid || !hasPattern(entry.path.String, a.cfg.MCAPPattern) {
    n++
    if preview {
-    log.Printf("[dry-run] 缺 mcap: %s", entry.path.String)
+    if pending {
+     log.Printf("[dry-run] 待恢复的清理项: %s", entry.path.String)
+    } else {
+     log.Printf("[dry-run] 缺 mcap: %s", entry.path.String)
+    }
     continue
    }
-   if err = a.markCleanupPending(entry.id); err != nil {
-    return n, fmt.Errorf("标记 episode %s 清理状态失败: %w", entry.id, err)
+   if !pending {
+    if err = a.markCleanupPending(entry.id); err != nil {
+     return n, fmt.Errorf("标记 episode %s 清理状态失败: %w", entry.id, err)
+    }
    }
    if err = a.completePendingCleanup(entry.id, entry.path); err != nil {
     return n, fmt.Errorf("episode %s 已标记待清理，稍后会自动恢复: %w", entry.id, err)
