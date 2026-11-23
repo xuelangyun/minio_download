@@ -105,7 +105,7 @@ func main(){
  logDB,err:=sql.Open("sqlite",c.StateDB);if err!=nil{log.Fatal(err)}
  logDB.SetMaxOpenConns(1)
  defer logDB.Close()
- log.SetOutput(io.MultiWriter(os.Stdout,&sqliteLogWriter{db:logDB}))
+ log.SetOutput(&sqliteLogWriter{db:logDB,out:os.Stdout})
  log.SetFlags(log.Ldate|log.Ltime|log.Lmicroseconds)
  isWorker:=*workerFlag||(legacyJSON&&!*webFlag)
  if !isWorker{
@@ -142,12 +142,15 @@ func main(){
  if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil)}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH);a.saveLastRun("finished",nil)}
 }
 
-type sqliteLogWriter struct{db *sql.DB;mu sync.Mutex}
+type sqliteLogWriter struct{db *sql.DB;out io.Writer;mu sync.Mutex}
 func(w *sqliteLogWriter)Write(p []byte)(int,error){
- if w==nil||w.db==nil{return len(p),nil}
+ if w==nil{return len(p),nil}
  w.mu.Lock();defer w.mu.Unlock()
- lines:=strings.Split(strings.TrimRight(string(p),"\r\n"),"\n")
- for _,line:=range lines{if line==""{continue};_,_=w.db.Exec("INSERT INTO runtime_logs(created_at,message) VALUES(?,?)",controlTimestamp(),line)}
+ if w.db!=nil{
+  lines:=strings.Split(strings.TrimRight(string(p),"\r\n"),"\n")
+  for _,line:=range lines{if line==""{continue};_,_=w.db.Exec("INSERT INTO runtime_logs(created_at,message) VALUES(?,?)",controlTimestamp(),line)}
+ }
+ if w.out!=nil{_,_=w.out.Write(p)}
  return len(p),nil
 }
 func initializeSQLiteDatabase(name string)error{
@@ -947,7 +950,7 @@ func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
  if err:=clearStopRequestDB(a.cfg.StateDB);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"清理旧暂停请求失败: "+err.Error()});return}
  dbName,err:=filepath.Abs(a.cfg.StateDB);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"解析 SQLite 路径失败: "+err.Error()});return}
  args:=[]string{"--worker","--db",dbName,"--mode",a.mode,"--max-rounds",strconv.Itoa(body.MaxRounds),"--preserve-stop-request"};if body.RecheckMissing{args=append(args,"--recheck-missing")}
- cmd:=exec.Command(executable,args...);configureDetached(cmd);cmd.Stdout=os.Stdout;cmd.Stderr=os.Stdout;cmd.Stdin=nil
+ cmd:=exec.Command(executable,args...);configureDetached(cmd);cmd.Stdout=io.Discard;cmd.Stderr=io.Discard;cmd.Stdin=nil
  if err=cmd.Start();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"启动下载器失败: "+err.Error()});return}
  go func(){_=cmd.Wait()}();created:=float64(0);if proc,e:=process.NewProcess(int32(cmd.Process.Pid));e==nil{if ms,e:=proc.CreateTime();e==nil{created=float64(ms)/1000}};a.setChildProcess(int32(cmd.Process.Pid),created)
  writeJSON(w,map[string]any{"ok":true,"pid":cmd.Process.Pid})
