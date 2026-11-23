@@ -59,6 +59,8 @@ type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context;
 //go:embed config.count.example.json
 var defaultCountConfigJSON []byte
 
+var errRemoteObjectChanged = errors.New("远端对象元数据已变化")
+
 var configPath=flag.String("config","config.json","JSON 配置文件")
 var mode=flag.String("mode","","duration 或 count；未指定时根据配置自动选择")
 var rounds=flag.Int("max-rounds",0,"缺少必需文件后的补选轮数；默认使用配置项 run.default_rounds")
@@ -1566,8 +1568,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
   if offset>0{
    current,statErr:=a.mc.StatObject(a.ctx,a.cfg.Bucket,key,minio.StatObjectOptions{})
    if statErr!=nil{if attempt<attempts{select{case <-a.ctx.Done():return a.ctx.Err();case <-time.After(time.Duration(float64(time.Second)*a.cfg.RetryDelaySeconds*float64(attempt))):};continue};return statErr}
-   changed:=current.Size!=expected.Size||(expected.ETag!=""&&!sameETag(current.ETag,expected.ETag))||(!expected.LastModified.IsZero()&&!current.LastModified.Equal(expected.LastModified))
-   if changed{if discardErr:=discardTemp();discardErr!=nil{return fmt.Errorf("远端对象已变化且删除暂存文件失败 %s: %w",key,discardErr)};return fmt.Errorf("续传前发现远端对象已变化，已丢弃旧临时文件: %s",key)}
+   if !sameObjectVersion(expected,current){if discardErr:=discardTemp();discardErr!=nil{return fmt.Errorf("远端对象已变化且删除暂存文件失败 %s: %w",key,discardErr)};return fmt.Errorf("%w：续传前发现对象已变化，已丢弃旧临时文件: %s",errRemoteObjectChanged,key)}
   }
   opts:=minio.GetObjectOptions{}
   if expected.ETag!=""{if err:=opts.SetMatchETag(strings.Trim(expected.ETag,"\""));err!=nil{return err}}
@@ -1576,7 +1577,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
   if err==nil{
    var info minio.ObjectInfo
    info,err=obj.Stat()
-   if err==nil&&(info.Size!=expected.Size||(expected.ETag!=""&&!sameETag(info.ETag,expected.ETag))||(!expected.LastModified.IsZero()&&!info.LastModified.Equal(expected.LastModified))){err=fmt.Errorf("对象元数据发生变化: %s",key)}
+   if err==nil&&!sameObjectVersion(expected,info){err=fmt.Errorf("%w：GetObject 元数据不匹配: %s",errRemoteObjectChanged,key)}
    if err==nil{
     flags:=os.O_CREATE|os.O_WRONLY
     if offset>0{flags|=os.O_APPEND}else{flags|=os.O_TRUNC}
@@ -1601,7 +1602,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
   }
   if err==nil{
    latest,statErr:=a.mc.StatObject(a.ctx,a.cfg.Bucket,key,minio.StatObjectOptions{})
-   if statErr!=nil{err=statErr}else if latest.Size!=expected.Size||(expected.ETag!=""&&!sameETag(latest.ETag,expected.ETag))||(!expected.LastModified.IsZero()&&!latest.LastModified.Equal(expected.LastModified)){err=fmt.Errorf("下载期间远端对象被修改: %s",key)}
+   if statErr!=nil{err=statErr}else if !sameObjectVersion(expected,latest){err=fmt.Errorf("%w：下载期间对象版本发生变化: %s",errRemoteObjectChanged,key)}
   }
   if err==nil&&*a.cfg.VerifyMD5&&isMD5ETag(expected.ETag){
    var sum string
@@ -1614,7 +1615,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
    if err==nil{return nil}
   }
   if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded){return err}
-  if err!=nil&&strings.Contains(err.Error(),"远端对象被修改"){if discardErr:=discardTemp();discardErr!=nil{log.Printf("删除已失效暂存文件失败 %s: %v",key,discardErr)}}
+  if errors.Is(err,errRemoteObjectChanged){if discardErr:=discardTemp();discardErr!=nil{return fmt.Errorf("远端对象已变化，且删除失效暂存文件失败 %s: %w",key,discardErr)};return err}
   if attempt<attempts{
    log.Printf("对象下载重试 %d/%d: %s: %v",attempt,attempts,key,err)
    select{case <-a.ctx.Done():return a.ctx.Err();case <-time.After(time.Duration(float64(time.Second)*a.cfg.RetryDelaySeconds*float64(attempt))):}
@@ -1623,6 +1624,9 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
  return fmt.Errorf("对象下载重试 %d 次仍失败: %s",attempts,key)
 }
 func sameETag(a,b string)bool{return strings.Trim(a,"\"")==strings.Trim(b,"\"")}
+func sameObjectVersion(expected,current minio.ObjectInfo)bool{
+ return expected.Size==current.Size&&(expected.ETag==""||sameETag(expected.ETag,current.ETag))&&(expected.LastModified.IsZero()||expected.LastModified.Equal(current.LastModified))
+}
 func isMD5ETag(etag string)bool{v:=strings.Trim(etag,"\"");if len(v)!=32||strings.Contains(v,"-"){return false};_,err:=hex.DecodeString(v);return err==nil}
 func fileMD5(name string)(string,error){f,err:=os.Open(name);if err!=nil{return "",err};defer f.Close();h:=md5.New();if _,err=io.Copy(h,f);err!=nil{return "",err};return hex.EncodeToString(h.Sum(nil)),nil}
 func(a *App)fail(e Episode,d DiskConfig,final,partial string,err error)error{
