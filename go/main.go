@@ -91,7 +91,7 @@ func main(){
  if *cleanup{n,err:=a.cleanup(*dry);if err!=nil{log.Fatal(err)};log.Printf("清理结束：%d 条",n);if *dry{return}}else if *dry{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
  rows,e:=a.fetch();if e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停（候选查询期间收到暂停请求）");a.saveLastRun("paused",nil);return};log.Printf("候选查询失败: %v",e);a.saveLastRun("error",e);return}
  if e=a.run(rows,*rounds);e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil);return};log.Printf("下载执行失败: %v",e);a.saveLastRun("error",e);return}
- if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil)}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH);a.saveLastRun("completed",nil)}
+ if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil)}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH);a.saveLastRun("finished",nil)}
 }
 
 type WebAPI struct{cfg Config;db *sql.DB;tokenHash string}
@@ -791,6 +791,11 @@ func taskFolderKey(t Task)string{return safe(t.Scene)+"\x00"+safe(taskDir(t))}
  server:=&http.Server{Addr:addr,Handler:handler,ReadHeaderTimeout:5*time.Second,ReadTimeout:15*time.Second,WriteTimeout:30*time.Second,IdleTimeout:60*time.Second}
  return server.ListenAndServe()
 }
+func isMountedPath(name string)bool{
+ parts,err:=disk.Partitions(false);if err!=nil{return false};target:=filepath.Clean(name)
+ for _,p:=range parts{mount:=filepath.Clean(p.Mountpoint);if runtime.GOOS=="windows"{if strings.EqualFold(target,mount){return true}}else if target==mount{return true}}
+ return false
+}
 func isLoopbackHost(host string)bool{ip:=net.ParseIP(host);return host=="localhost"||(ip!=nil&&ip.IsLoopback())}
 func isLoopbackRemote(addr string)bool{host,_,err:=net.SplitHostPort(addr);return err==nil&&isLoopbackHost(host)}
 func writeJSON(w http.ResponseWriter,v any){writeJSONStatus(w,http.StatusOK,v)}
@@ -824,7 +829,7 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
  }
  disks:=[]map[string]any{}
  diskTasks:=map[string][]string{};for task,name:=range taskDisk{diskTasks[name]=append(diskTasks[name],task)}
- for _,d:=range a.cfg.Disks{usage,e:=disk.Usage(d.Path);item:=map[string]any{"name":d.Name,"path":d.Path,"mounted":pathIsDir(d.Mountpoint),"exists":pathIsDir(d.Path),"total":uint64(0),"free":uint64(0),"used":uint64(0),"tasks":diskTasks[d.Name]};if e==nil{item["total"]=usage.Total;item["free"]=usage.Free;item["used"]=usage.Used};disks=append(disks,item)}
+ for _,d:=range a.cfg.Disks{usage,e:=disk.Usage(d.Path);item:=map[string]any{"name":d.Name,"path":d.Path,"mounted":isMountedPath(d.Mountpoint),"exists":pathIsDir(d.Path),"total":uint64(0),"free":uint64(0),"used":uint64(0),"tasks":diskTasks[d.Name]};if e==nil{item["total"]=usage.Total;item["free"]=usage.Free;item["used"]=usage.Used};disks=append(disks,item)}
  state:=map[string]any{"running":false,"pid":nil,"by_web":false}
  if raw,e:=os.ReadFile(a.cfg.PIDFile);e==nil{var p pidRecord;if json.Unmarshal(raw,&p)==nil{if proc,e:=process.NewProcess(int32(p.PID));e==nil{alive,_:=proc.IsRunning();if alive{ct,_:=proc.CreateTime();if p.Created==0||math.Abs(float64(ct)/1000-p.Created)<2{state=map[string]any{"running":true,"pid":p.PID,"by_web":false}}}}}}
  running,_:=state["running"].(bool)
