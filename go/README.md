@@ -74,3 +74,6 @@ Go 对配置库只读，不会改写 Python Web 保存的配置。当前导入 M
 - 跨主机共享文件系统的磁盘协调、完整崩溃恢复与真实 MinIO / PostgreSQL 集成测试。
 
 Go 可读取 Python 运行控制表中的 `stop_requested`（兼容 ISO 时间戳），`--stop` 和 Web `POST /api/stop` 都会写入同一控制表。要让 Python Web 控制台观察 Go 下载状态、进程和日志，请将两者的 `state_db`、`pid_file`、`log_dir` 指向同一位置。Go 使用 Python Web 预期的 `minio_task_downloader.log` 文件名，PID 文件包含兼容的 `pid` / `created` 字段。生产使用前应先在测试 bucket 验证。
+
+
+Windows 文件发布：替换已有目标文件时先将旧文件改名为同目录备份，再发布新文件；发布失败时回滚旧文件，并对短暂文件占用进行最多 6 次重试。
