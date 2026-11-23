@@ -1041,3 +1041,19 @@ func TestMinioTransportUsesConfiguredTimeouts(t *testing.T) {
  if tr.ResponseHeaderTimeout!=321*time.Second{t.Fatalf("response header timeout=%s",tr.ResponseHeaderTimeout)}
  if tr.DialContext==nil{t.Fatal("dial timeout transport hook is missing")}
 }
+
+func TestWebConfigTasksResetRestoresDefaultsAndPreservesTags(t *testing.T) {
+ api:=newPlanTestAPI(t)
+ api.cfg.Tasks=append(api.cfg.Tasks,Task{Scene:"Household(家居)",Name:"桌面收纳",Dir:"桌面收纳",TargetCount:2,Tags:[]string{"用户自定义标签"}})
+ rec:=httptest.NewRecorder()
+ api.configTasksReset(rec,httptest.NewRequest(http.MethodPost,"/api/config/tasks/reset",strings.NewReader(`{}`)))
+ if rec.Code!=http.StatusOK{t.Fatalf("reset failed: %d %s",rec.Code,rec.Body.String())}
+ if len(api.cfg.Tasks)<40{t.Fatalf("expected default count-mode task set, got %d",len(api.cfg.Tasks))}
+ found:=false
+ for _,task:=range api.cfg.Tasks{if task.Name=="桌面收纳"{found=true;if len(task.Tags)!=1||task.Tags[0]!="用户自定义标签"{t.Fatalf("same-name task tag was not preserved: %#v",task.Tags)}}}
+ if !found{t.Fatal("default task 桌面收纳 was not restored")}
+ db,err:=sql.Open("sqlite",api.cfg.ConfigDB);if err!=nil{t.Fatal(err)};defer db.Close()
+ var count int
+ if err=db.QueryRow("SELECT COUNT(*) FROM tasks").Scan(&count);err!=nil{t.Fatal(err)}
+ if count!=len(api.cfg.Tasks){t.Fatalf("persisted tasks=%d runtime tasks=%d",count,len(api.cfg.Tasks))}
+}
