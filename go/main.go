@@ -166,6 +166,7 @@ func(a *WebAPI)authorized(r *http.Request)bool{
  if a.lockouts!=nil{if until:=a.lockouts[addr];now.Before(until){a.authMu.Unlock();return false}}
  if a.failures==nil{a.failures=map[string][]time.Time{}};if a.lockouts==nil{a.lockouts=map[string]time.Time{}}
  attempts:=a.failures[addr];kept:=attempts[:0];for _,at:=range attempts{if now.Sub(at)<=5*time.Minute{kept=append(kept,at)}};attempts=kept
+ a.failures[addr]=attempts
  if len(attempts)>=8&&now.Sub(attempts[len(attempts)-1])<60*time.Second{a.lockouts[addr]=attempts[len(attempts)-1].Add(60*time.Second);a.authMu.Unlock();return false}
  a.authMu.Unlock()
  parts:=strings.Split(tokenHash,"$");if len(parts)!=4||parts[0]!="pbkdf2_sha256"{return false}
@@ -174,7 +175,13 @@ func(a *WebAPI)authorized(r *http.Request)bool{
  got:=pbkdf2SHA256([]byte(supplied),salt,iterations,len(want));valid:=hmac.Equal(got,want)
  a.authMu.Lock();defer a.authMu.Unlock()
  if valid{delete(a.failures,addr);delete(a.lockouts,addr);return true}
- if supplied!=""{a.failures[addr]=append(attempts,now);if len(a.failures[addr])>=8{a.lockouts[addr]=now.Add(60*time.Second)}}
+ if supplied!=""{
+  current:=a.failures[addr]
+  recent:=current[:0]
+  for _,at:=range current{if now.Sub(at)<=5*time.Minute{recent=append(recent,at)}}
+  a.failures[addr]=append(recent,now)
+  if len(a.failures[addr])>=8{a.lockouts[addr]=now.Add(60*time.Second)}
+ }
  return false
 }
 func(a *WebAPI)authToken(w http.ResponseWriter,r *http.Request){
