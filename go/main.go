@@ -168,7 +168,7 @@ func requestStop(c Config) error {
  return writeStopRequest(db)
 }
 func(a *App)clearStopRequest()error{
- _,err:=a.db.Exec("INSERT INTO control(key,value,updated_at) VALUES('stop_requested','0',?) ON CONFLICT(key) DO UPDATE SET value='0',updated_at=excluded.updated_at",controlTimestamp())
+ _,err:=a.db.Exec("DELETE FROM control WHERE key='stop_requested'")
  return err
 }
 func isStopRequested(value string)bool{value=strings.TrimSpace(value);return value!=""&&value!="0"}
