@@ -155,7 +155,7 @@ func(a *App)downloadTask(b batch)error{
 func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  if a.ctx.Err()!=nil{return nil};if e.Size<=0{_=a.set(e,d,"","","invalid_size","file_size 无效");return nil}
  root:=filepath.Join(d.Path,safe(a.cfg.DataVersion),safe(t.Scene),safe(taskDir(t)));final:=filepath.Join(root,safe(e.ID));partial:=filepath.Join(root,"."+safe(e.ID)+".partial")
- if dirHasFiles(final){_=a.set(e,d,final,"","completed","");return a.record(e,d,final)}
+ if dirHasFiles(final){if err:=a.record(e,d,final);err!=nil{return err};return a.set(e,d,final,"","completed","")}
  if err:=os.MkdirAll(partial,0755);err!=nil{return a.fail(e,d,final,partial,err)}
  direct:=map[string]bool{};for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:false}){if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)};if !obj.IsDir{direct[path.Base(obj.Key)]=true}}
  if !direct["task_info.json"]{_=a.set(e,d,final,partial,"missing_task_info","缺少 task_info.json");return nil}
@@ -167,7 +167,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  }
  if total==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
  if err:=os.RemoveAll(final);err!=nil{return a.fail(e,d,final,partial,err)};if err:=os.Rename(partial,final);err!=nil{return a.fail(e,d,final,partial,err)}
- if err:=a.set(e,d,final,"","completed","");err!=nil{return err};return a.record(e,d,final)
+ if err:=a.record(e,d,final);err!=nil{return err};return a.set(e,d,final,"","completed","")
 }
 func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
  tmp:=dst+".minio-tmp"
