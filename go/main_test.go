@@ -327,6 +327,20 @@ func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
  if err:=os.WriteFile(dst+".minio-tmp",make([]byte,100),0600);err!=nil{t.Fatal(err)}
  if got:=remainingObjectBytes(dst,100);got!=0{t.Fatalf("complete temp remaining: got %d want 0",got)}
 }
+func TestSameObjectVersionChecksSizeETagAndLastModified(t *testing.T) {
+ modified:=time.Date(2026,1,2,3,4,5,0,time.UTC)
+ expected:=minio.ObjectInfo{Size:128,ETag:"abc123",LastModified:modified}
+ if !sameObjectVersion(expected,expected){t.Fatal("identical object metadata should match")}
+ changedSize:=expected;changedSize.Size++
+ if sameObjectVersion(expected,changedSize){t.Fatal("different size must not match")}
+ changedETag:=expected;changedETag.ETag="different"
+ if sameObjectVersion(expected,changedETag){t.Fatal("different ETag must not match")}
+ changedTime:=expected;changedTime.LastModified=modified.Add(time.Second)
+ if sameObjectVersion(expected,changedTime){t.Fatal("different modification time must not match")}
+ weakExpected:=minio.ObjectInfo{Size:128}
+ if !sameObjectVersion(weakExpected,changedETag){t.Fatal("unspecified ETag and modification time should not be required")}
+}
+
 func TestResumeOffsetBacksOffOnlyOnFirstAttempt(t *testing.T) {
  if got:=resumeOffset(resumeBackoffBytes+200,resumeBackoffBytes+300,true);got!=200{t.Fatalf("backoff offset=%d want 200",got)}
  if got:=resumeOffset(resumeBackoffBytes+10,resumeBackoffBytes+300,true);got!=10{t.Fatalf("first-attempt offset=%d want 10",got)}
