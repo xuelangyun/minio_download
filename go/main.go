@@ -228,7 +228,7 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
   idx,ok:=sceneIndex[t.Scene];if !ok{idx=len(scenes);sceneIndex[t.Scene]=idx;scenes=append(scenes,map[string]any{"scene":t.Scene,"tasks":[]map[string]any{}})}
   rows:=scenes[idx]["tasks"].([]map[string]any);count:=0;seconds:=0.0;bytesCount:=int64(0);issues:=map[string]int{}
   records,e:=a.db.Query("SELECT content_time,file_size,target_path FROM downloaded_episodes WHERE task_name=?",t.Name)
-  if e==nil{for records.Next(){var sec sql.NullFloat64;var size sql.NullInt64;var target sql.NullString;if records.Scan(&sec,&size,&target)!=nil{continue};if target.Valid&&(a.cfg.TrustCompletedRecords||pathIsDir(target.String)){count++;seconds+=sec.Float64;bytesCount+=size.Int64}else if target.Valid{staleRecords++}};records.Close()}
+  if e==nil{for records.Next(){var sec sql.NullFloat64;var size sql.NullInt64;var target sql.NullString;if records.Scan(&sec,&size,&target)!=nil{continue};if target.Valid&&a.completedPath(target.String){count++;seconds+=sec.Float64;bytesCount+=size.Int64}else if target.Valid{staleRecords++}};records.Close()}
   issueRows,e:=a.db.Query("SELECT status,COUNT(*) FROM downloads WHERE task_name=? AND status<>'completed' GROUP BY status",t.Name)
   if e==nil{for issueRows.Next(){var state string;var n int;if issueRows.Scan(&state,&n)==nil{issues[state]=n}};issueRows.Close()}
   var assigned any=nil;if name,ok:=taskDisk[t.Name];ok{assigned=name};aliases:=t.Aliases;if aliases==nil{aliases=[]string{}};tags:=t.Tags;if tags==nil{tags=[]string{}}
@@ -966,10 +966,29 @@ func ensureColumn(db *sql.DB,table,column,typ string)error{
  return err
 }
 func nullable(s string)any{if s==""{return nil};return s}
+func completedEpisodeDir(dir string,requireMCAP bool,mcapPattern string)bool{
+ info,err:=os.Lstat(dir)
+ if err!=nil||!info.IsDir()||info.Mode()&os.ModeSymlink!=0{return false}
+ entries,err:=os.ReadDir(dir);if err!=nil{return false}
+ taskInfoFound:=false;mcapFound:=!requireMCAP
+ for _,entry:=range entries{
+  if entry.Type()&os.ModeSymlink!=0{continue}
+  info,err:=entry.Info();if err!=nil||!info.Mode().IsRegular(){continue}
+  if entry.Name()=="task_info.json"{taskInfoFound=true}
+  if requireMCAP{
+   matched,matchErr:=path.Match(mcapPattern,entry.Name())
+   if matchErr==nil&&matched{mcapFound=true}
+  }
+ }
+ return taskInfoFound&&mcapFound
+}
+func(a *App)completedPath(path string)bool{
+ return a.cfg.TrustCompletedRecords||completedEpisodeDir(path,a.cfg.RequireMCAP,a.cfg.MCAPPattern)
+}
 func(a *App)completed(id string)bool{
  var p sql.NullString
  err:=a.db.QueryRow("SELECT target_path FROM downloads WHERE episode_id=? AND status='completed'",id).Scan(&p)
- if err==nil&&p.Valid&&(a.cfg.TrustCompletedRecords||pathIsDir(p.String)){return true}
+ if err==nil&&p.Valid&&a.completedPath(p.String){return true}
  p=sql.NullString{}
  err=a.db.QueryRow("SELECT target_path FROM downloaded_episodes WHERE episode_id=?",id).Scan(&p)
  return err==nil&&p.Valid&&(a.cfg.TrustCompletedRecords||pathIsDir(p.String))
@@ -1032,14 +1051,14 @@ func(a *App)syncLocalCopies(groups map[string][]Episode)error{
    // when configured, even if the original disk has been archived or replaced.
    var ledgerPath,ledgerDisk sql.NullString
    ledgerErr:=a.db.QueryRow("SELECT target_path,disk_name FROM downloaded_episodes WHERE episode_id=?",ep.ID).Scan(&ledgerPath,&ledgerDisk)
-   if ledgerErr==nil&&ledgerPath.Valid&&(a.cfg.TrustCompletedRecords||pathIsDir(ledgerPath.String)){
+   if ledgerErr==nil&&ledgerPath.Valid&&a.completedPath(ledgerPath.String){
     d:=DiskConfig{Name:ledgerDisk.String}
     if err:=a.set(ep,d,ledgerPath.String,"","completed","");err!=nil{return err}
    }else{
     var statePath,stateDisk sql.NullString
     var state string
     stateErr:=a.db.QueryRow("SELECT status,target_path,disk_name FROM downloads WHERE episode_id=?",ep.ID).Scan(&state,&statePath,&stateDisk)
-    if stateErr==nil&&state=="completed"&&statePath.Valid&&(a.cfg.TrustCompletedRecords||pathIsDir(statePath.String)){
+    if stateErr==nil&&state=="completed"&&statePath.Valid&&a.completedPath(statePath.String){
      d:=DiskConfig{Name:stateDisk.String}
      if err:=a.record(ep,d,statePath.String);err!=nil{return err}
      if err:=a.set(ep,d,statePath.String,"","completed","");err!=nil{return err}
@@ -1126,7 +1145,7 @@ func findExistingTaskDisk(version string,t Task,disks []DiskConfig,rows []Episod
  for _,ep:=range rows{
   for _,d:=range disks{
    final,_:=episodePaths(version,t,d,ep.ParentKey)
-   if pathIsDir(final){
+   if completedEpisodeDir(final,false,""){
     if found!=""&&found!=d.Name{return "",fmt.Errorf("任务 %s 的已有数据分布在多块磁盘（%s、%s）",t.Name,found,d.Name)}
     found=d.Name
    }
@@ -1456,7 +1475,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  for i:=range a.cfg.Disks{
   candidate:=&a.cfg.Disks[i];candidateFinal,_:=episodePaths(a.cfg.DataVersion,t,*candidate,e.ParentKey)
   if err:=recoverEpisodeDirectory(candidateFinal);err!=nil{return a.fail(e,*candidate,candidateFinal,"",err)}
-  if pathIsDir(candidateFinal){
+  if completedEpisodeDir(candidateFinal,a.cfg.RequireMCAP,a.cfg.MCAPPattern){
    if existing!=nil{return fmt.Errorf("episode %s 在多个磁盘存在正式目录，违反单副本规则",e.ID)}
    existing=candidate;existingPath=candidateFinal
   }
