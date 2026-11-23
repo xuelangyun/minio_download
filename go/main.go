@@ -1505,8 +1505,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
  restoreWritten:=func(){if writtenThisCall>0{reservation.Restore(writtenThisCall);writtenThisCall=0}}
  discardTemp:=func()error{
   err:=os.Remove(tmp)
-  if err==nil{restoreWritten();return nil}
-  if os.IsNotExist(err){return nil}
+  if err==nil||os.IsNotExist(err){restoreWritten();return nil}
   return err
  }
  attempts:=a.cfg.FileRetries
