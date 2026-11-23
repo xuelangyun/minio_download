@@ -1628,6 +1628,7 @@ func sweepPartial(root,parent string,objects []minio.ObjectInfo)error{
  for _,obj:=range objects{
   rel:=strings.TrimPrefix(obj.Key,parent+"/")
   dst,err:=safeJoin(root,rel);if err!=nil{return err}
+  if err:=recoverDownloadedFile(dst,root);err!=nil{return err}
   keep[dst]=true;keep[dst+".minio-tmp"]=true
  }
  return filepath.Walk(root,func(p string,info os.FileInfo,walkErr error)error{
@@ -1727,16 +1728,67 @@ func replaceEpisodeDirectoryForOS(partial,final string,windows bool)error{
 func replaceDownloadedFile(src,dst string)error{
  return replaceDownloadedFileForOS(src,dst,runtime.GOOS=="windows")
 }
+func uniqueDownloadedFileBackupPath(dst string)(string,error){
+ parent:=filepath.Dir(dst)
+ prefix:="."+filepath.Base(dst)+".minio-file-backup-"
+ for attempt:=0;attempt<10;attempt++{
+  var random [12]byte
+  if _,err:=rand.Read(random[:]);err!=nil{return "",err}
+  candidate:=filepath.Join(parent,prefix+hex.EncodeToString(random[:]))
+  if _,err:=os.Lstat(candidate);os.IsNotExist(err){return candidate,nil}else if err!=nil{return "",err}
+ }
+ return "",errors.New("无法生成唯一的文件备份路径")
+}
+func recoverDownloadedFile(dst,root string)error{
+ parent:=filepath.Dir(dst)
+ rel,err:=filepath.Rel(root,parent);if err!=nil{return err}
+ current:=root
+ checkDir:=func(path string)error{
+  info,err:=os.Lstat(path)
+  if os.IsNotExist(err){return os.ErrNotExist}
+  if err!=nil{return err}
+  if info.Mode()&os.ModeSymlink!=0||!info.IsDir(){return fmt.Errorf("文件备份父路径不是普通目录: %s",path)}
+  return nil
+ }
+ if err:=checkDir(current);err!=nil{return err}
+ if rel!="."{
+  for _,part:=range strings.Split(rel,string(os.PathSeparator)){
+   current=filepath.Join(current,part)
+   if err:=checkDir(current);os.IsNotExist(err){return nil}else if err!=nil{return err}
+  }
+ }
+ entries,err:=os.ReadDir(parent);if os.IsNotExist(err){return nil};if err!=nil{return err}
+ prefix:="."+filepath.Base(dst)+".minio-file-backup-"
+ backups:=make([]os.FileInfo,0)
+ for _,entry:=range entries{
+  if !strings.HasPrefix(entry.Name(),prefix){continue}
+  path:=filepath.Join(parent,entry.Name())
+  info,statErr:=os.Lstat(path);if statErr!=nil{return statErr}
+  if !info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0{return fmt.Errorf("文件备份不是普通文件，拒绝自动恢复: %s",path)}
+  backups=append(backups,info)
+ }
+ if len(backups)==0{return nil}
+ _,finalErr:=os.Lstat(dst)
+ if finalErr==nil{
+  for _,backup:=range backups{if err:=os.Remove(filepath.Join(parent,backup.Name()));err!=nil{return fmt.Errorf("清理已替换文件的旧备份失败: %w",err)}}
+  return nil
+ }
+ if !os.IsNotExist(finalErr){return finalErr}
+ sort.Slice(backups,func(i,j int)bool{return backups[i].ModTime().After(backups[j].ModTime())})
+ chosen:=backups[0]
+ backupPath:=filepath.Join(parent,chosen.Name())
+ if err:=retryFileOperation(func()error{return os.Rename(backupPath,dst)},runtime.GOOS=="windows");err!=nil{return fmt.Errorf("恢复中断替换的文件失败: %w",err)}
+ for _,backup:=range backups[1:]{if err:=os.Remove(filepath.Join(parent,backup.Name()));err!=nil{return fmt.Errorf("清理多余文件备份失败: %w",err)}}
+ log.Printf("检测到上次进程中断，已恢复文件: %s",dst)
+ return nil
+}
 func replaceDownloadedFileForOS(src,dst string,windows bool)error{
  if !windows{return os.Rename(src,dst)}
  _,statErr:=os.Lstat(dst)
  if os.IsNotExist(statErr){return retryFileOperation(func()error{return os.Rename(src,dst)},true)}
  if statErr!=nil{return statErr}
- backupFile,err:=os.CreateTemp(filepath.Dir(dst),".minio-download-backup-*")
+ backup,err:=uniqueDownloadedFileBackupPath(dst)
  if err!=nil{return err}
- backup:=backupFile.Name()
- if err=backupFile.Close();err!=nil{_=os.Remove(backup);return err}
- if err=os.Remove(backup);err!=nil{return err}
  if err=retryFileOperation(func()error{return os.Rename(dst,backup)},true);err!=nil{return err}
  if err=retryFileOperation(func()error{return os.Rename(src,dst)},true);err!=nil{
   rollbackErr:=retryFileOperation(func()error{return os.Rename(backup,dst)},true)
