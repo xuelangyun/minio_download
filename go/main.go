@@ -1156,15 +1156,27 @@ func validateDisk(d DiskConfig)error{
 }
 func validateDiskSet(disks []DiskConfig)error{
  parts,err:=disk.Partitions(false);if err!=nil{return fmt.Errorf("读取磁盘挂载信息失败: %w",err)}
- devices:=map[string]string{}
+ identities:=map[string]string{}
  for _,d:=range disks{
   if err:=validateDisk(d);err!=nil{return err}
-  mount:=d.Mountpoint;if mount==""{mount=d.Path};resolved,err:=resolvePathWithMissingTail(mount);if err!=nil{return err}
+  mount:=d.Mountpoint;if mount==""{mount=d.Path}
+  resolved,err:=resolvePathWithMissingTail(mount);if err!=nil{return err}
+  identity,err:=filesystemIdentity(resolved);if err!=nil{return fmt.Errorf("读取磁盘 %s 的文件系统标识失败: %w",d.Name,err)}
+  keys:=[]string{}
+  if identity!=""{keys=append(keys,identity)}
   for _,part:=range parts{
    got,e:=resolvePathWithMissingTail(part.Mountpoint);if e!=nil{continue}
    same:=filepath.Clean(got)==filepath.Clean(resolved);if runtime.GOOS=="windows"{same=strings.EqualFold(filepath.Clean(got),filepath.Clean(resolved))}
-   if same&&part.Device!=""{if old,ok:=devices[part.Device];ok{return fmt.Errorf("磁盘 %s 和 %s 指向同一个文件系统设备 %s",old,d.Name,part.Device)};devices[part.Device]=d.Name}
+   if same&&part.Device!=""{
+    device:=strings.TrimSpace(part.Device)
+    if runtime.GOOS=="windows"{device=strings.ToLower(device)}
+    keys=append(keys,"device:"+device)
+   }
   }
+  for _,key:=range keys{
+   if old,ok:=identities[key];ok{return fmt.Errorf("磁盘 %s 和 %s 指向同一个文件系统（%s）",old,d.Name,key)}
+  }
+  for _,key:=range keys{identities[key]=d.Name}
  }
  return nil
 }
