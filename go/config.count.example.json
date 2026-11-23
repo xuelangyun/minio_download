@@ -24,6 +24,16 @@
       "name": "disk1",
       "path": "/mnt/temdata1",
       "mountpoint": "/mnt/temdata1"
+    },
+    {
+      "name": "disk2",
+      "path": "/mnt/temdata2",
+      "mountpoint": "/mnt/temdata2"
+    },
+    {
+      "name": "disk3",
+      "path": "/mnt/temdata3",
+      "mountpoint": "/mnt/temdata3"
     }
   ],
   "tasks": [
