@@ -1402,10 +1402,24 @@ func existingObjectComplete(dst string,expected minio.ObjectInfo)bool{
  if delta<0{delta=-delta}
  return delta<2*time.Second
 }
+const resumeBackoffBytes int64=64*1024*1024
 func existingPartialBytes(dst string,expected int64)int64{
  if expected<=0{return 0}
- if st,err:=os.Stat(dst+".minio-tmp");err==nil&&st.Size()>0&&st.Size()<expected{return st.Size()}
+ if st,err:=os.Stat(dst+".minio-tmp");err==nil&&st.Size()>0&&st.Size()<=expected{return st.Size()}
  return 0
+}
+func resumeOffset(have,expected int64,firstAttempt bool)int64{
+ if have<0||have>expected{return 0}
+ if firstAttempt&&have>resumeBackoffBytes{return have-resumeBackoffBytes}
+ return have
+}
+func truncateResumeFile(name string,size int64)error{
+ f,err:=os.OpenFile(name,os.O_WRONLY,0)
+ if err!=nil{return err}
+ truncateErr:=f.Truncate(size)
+ closeErr:=f.Close()
+ if truncateErr!=nil{return truncateErr}
+ return closeErr
 }
 func remainingObjectBytes(dst string,expected int64)int64{
  return expected-existingPartialBytes(dst,expected)
@@ -1519,7 +1533,15 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
   if a.ctx.Err()!=nil{return a.ctx.Err()}
   offset:=int64(0)
   if st,err:=os.Stat(tmp);err==nil{
-   if st.Size()>expected.Size{if err:=discardTemp();err!=nil{return err}}else{offset=st.Size()}
+   if st.Size()>expected.Size{if err:=discardTemp();err!=nil{return err}}else{
+    offset=resumeOffset(st.Size(),expected.Size,attempt==1)
+    if offset<st.Size(){
+     if err:=truncateResumeFile(tmp,offset);err!=nil{return fmt.Errorf("回退续传临时文件失败 %s: %w",key,err)}
+     backedOff:=st.Size()-offset
+     reservation.Restore(backedOff)
+     writtenThisCall-=backedOff
+    }
+   }
   }else if os.IsNotExist(err){restoreWritten()}else{return err}
   if offset>=expected.Size&&offset>0{if err:=discardTemp();err!=nil{return err};offset=0}
   if offset>0{
