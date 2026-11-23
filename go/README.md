@@ -86,3 +86,5 @@ Episode 目录发布具备启动时崩溃恢复：备份目录按 episode 正式
 Episode 备份路径使用随机且尚不存在的同级路径，不创建临时空目录占位，避免进程在占位目录创建后崩溃时被误恢复为空 Episode；恢复扫描会清理遗留空备份目录，只恢复含有内容的普通目录。
 
 跨进程磁盘锁文件位于配置的 `lock_file` 同级 `disk-locks` 目录。不同系统用户需要对该共享目录具有读写权限，并使用相同的 `lock_file` 路径，才能实现同机实例间协调。
+
+SQLite 完成状态校验：默认不再仅凭正式目录存在就认定 Episode 已完成；必须是非符号链接的普通目录，且包含普通文件 `task_info.json`。启用 `require_mcap` 时，还必须存在匹配 `mcap_pattern` 的普通文件。`trust_completed_records=true` 仍保留历史归档记录信任行为。
