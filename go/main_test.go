@@ -795,3 +795,44 @@ func TestValidatePlanPayloadRejectsDuplicateTasksAndInvalidCounts(t *testing.T) 
 		if _, err := validatePlanPayload(json.RawMessage(raw)); err == nil { t.Errorf("expected invalid payload: %s", raw) }
 	}
 }
+
+func TestWebPlanApplyReplaceAndMerge(t *testing.T) {
+	api := newPlanTestAPI(t)
+	db, err := sql.Open("sqlite", api.cfg.ConfigDB)
+	if err != nil { t.Fatal(err) }
+	schema := []string{
+		"CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)",
+		"CREATE TABLE scenes(id INTEGER PRIMARY KEY AUTOINCREMENT,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE)",
+		"CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE,target_count INTEGER NOT NULL,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]')",
+		"CREATE TABLE task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL,PRIMARY KEY(task_id,alias))",
+	}
+	for _, stmt := range schema { if _, err := db.Exec(stmt); err != nil { t.Fatal(err) } }
+	if err := db.Close(); err != nil { t.Fatal(err) }
+	payload := `{"data_version":"v2","scenes":[{"scene":"Office","tasks":[{"name":"文件整理","count":12,"aliases":["整理文件"],"dir":"文件整理","tags":["办公"]}]}]}`
+	created := httptest.NewRecorder()
+	api.planCreate(created, httptest.NewRequest(http.MethodPost, "/api/plans", strings.NewReader(`{"name":"办公方案","payload":`+payload+`}`)))
+	if created.Code != http.StatusOK { t.Fatalf("create failed: %d %s", created.Code, created.Body.String()) }
+	var result map[string]any
+	if err := json.Unmarshal(created.Body.Bytes(), &result); err != nil { t.Fatal(err) }
+	id := strconv.FormatInt(int64(result["id"].(float64)), 10)
+	req := httptest.NewRequest(http.MethodPost, "/api/plans/"+id+"/apply", strings.NewReader(`{"mode":"replace"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	api.planApply(rec, req)
+	if rec.Code != http.StatusOK { t.Fatalf("replace apply failed: %d %s", rec.Code, rec.Body.String()) }
+	if api.cfg.DataVersion != "v2" || len(api.cfg.Tasks) != 1 || api.cfg.Tasks[0].Name != "文件整理" || api.cfg.Tasks[0].Tags[0] != "办公" { t.Fatalf("config not replaced: %#v", api.cfg) }
+
+	mergePayload := `{"name":"追加方案","payload":{"data_version":"v2","scenes":[{"scene":"Office","tasks":[{"name":"文件整理","count":99},{"name":"邮件归档","count":5,"aliases":[],"dir":"邮件归档","tags":[]}]}]}}`
+	mergeCreate := httptest.NewRecorder()
+	api.planCreate(mergeCreate, httptest.NewRequest(http.MethodPost, "/api/plans", strings.NewReader(mergePayload)))
+	if mergeCreate.Code != http.StatusOK { t.Fatalf("merge plan create failed: %d %s", mergeCreate.Code, mergeCreate.Body.String()) }
+	var mergeResult map[string]any
+	if err := json.Unmarshal(mergeCreate.Body.Bytes(), &mergeResult); err != nil { t.Fatal(err) }
+	mergeID := strconv.FormatInt(int64(mergeResult["id"].(float64)), 10)
+	mergeReq := httptest.NewRequest(http.MethodPost, "/api/plans/"+mergeID+"/apply", strings.NewReader(`{"mode":"merge"}`))
+	mergeReq.SetPathValue("id", mergeID)
+	merged := httptest.NewRecorder()
+	api.planApply(merged, mergeReq)
+	if merged.Code != http.StatusOK { t.Fatalf("merge apply failed: %d %s", merged.Code, merged.Body.String()) }
+	if len(api.cfg.Tasks) != 2 || api.cfg.Tasks[1].Name != "邮件归档" { t.Fatalf("merge did not append only new task: %#v", api.cfg.Tasks) }
+}
