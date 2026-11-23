@@ -200,7 +200,6 @@ func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,e
   selected:=make([]Episode,0)
   todo:=make([]Episode,0,len(candidates))
   for _,ep:=range candidates{
-   if a.completed(ep.ID){selected=append(selected,ep);continue}
    if a.hasLocalCopy(task,ep){
     diskName,err:=findExistingTaskDisk(a.cfg.DataVersion,task,a.cfg.Disks,[]Episode{ep})
     if err!=nil{return nil,err}
@@ -215,6 +214,7 @@ func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,e
     if err:=a.set(ep,*chosen,final,"","completed","");err!=nil{return nil,err}
     selected=append(selected,ep);continue
    }
+   if a.completed(ep.ID){selected=append(selected,ep);continue}
    var state string
    _=a.db.QueryRow("SELECT status FROM downloads WHERE episode_id=?",ep.ID).Scan(&state)
    if !a.recheck&&(state=="missing_task_info"||state=="missing_mcap"){continue}
@@ -245,7 +245,7 @@ func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,e
 }
 func(a *App)run(all []Episode,nround int)error{
  groups:=map[string][]Episode{};for _,e:=range all{groups[e.Task]=append(groups[e.Task],e)}
- if a.mode=="count"{groups=a.prevalidateCount(groups)}
+ if a.mode=="count"{var err error;groups,err=a.prevalidateCount(groups);if err!=nil{return err}}
  for r:=1;r<=nround;r++{if a.ctx.Err()!=nil{return nil};selected:=map[string][]Episode{}
   for _,t:=range a.cfg.Tasks{s,n:=a.stats(t.Name);target,used:=t.TargetHours*3600,s;if a.mode=="count"{target=float64(t.TargetCount);used=float64(n)}
    addSec:=0.0;addN:=0
