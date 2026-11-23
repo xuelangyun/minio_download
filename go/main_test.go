@@ -700,3 +700,21 @@ func TestWebConfigMasksSecretsAndReturnsTaskTags(t *testing.T) {
 	if task["count"] != float64(40) || task["tags"].([]any)[0] != "家居" { t.Fatalf("task config/tags missing: %#v", task) }
 	if len(response["schema"].([]any)) < 20 { t.Fatalf("configuration schema incomplete: %d", len(response["schema"].([]any))) }
 }
+
+func TestForceStopRejectsNoActiveDownloader(t *testing.T) {
+	api := &WebAPI{cfg: Config{PIDFile: filepath.Join(t.TempDir(), "missing.pid")}}
+	req := httptest.NewRequest(http.MethodPost, "/api/stop", strings.NewReader(`{"force":true}`))
+	rec := httptest.NewRecorder()
+	api.stop(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 when no downloader is active, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestKillProcessTreeRejectsUnsafePID(t *testing.T) {
+	for _, pid := range []int32{0, 1, -1} {
+		if err := killProcessTree(pid); err == nil {
+			t.Fatalf("expected PID %d to be rejected", pid)
+		}
+	}
+}
