@@ -232,7 +232,7 @@
       "target_count": 5
     }
   ],
-  "trust_completed_records": false,
+  "trust_completed_records": true,
   "file_workers": 4,
   "lock_file": "minio_download.lock",
   "mode": "duration",
