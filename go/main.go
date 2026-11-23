@@ -784,7 +784,7 @@ func taskFolderKey(t Task)string{return safe(t.Scene)+"\x00"+safe(taskDir(t))}
  mux.HandleFunc("POST /api/stop",api.stop)
  handler:=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
   w.Header().Set("X-Content-Type-Options","nosniff");w.Header().Set("X-Frame-Options","DENY");w.Header().Set("Referrer-Policy","no-referrer")
-  if strings.HasPrefix(r.URL.Path,"/api/"){w.Header().Set("Cache-Control","no-store");if r.Method=="POST"&&r.Header.Get("Content-Type")!="application/json"{writeJSONStatus(w,415,map[string]any{"error":"写操作必须使用 Content-Type: application/json"});return};if !api.authorized(r){writeJSONStatus(w,401,map[string]any{"error":"口令缺失或错误"});return}}
+  if strings.HasPrefix(r.URL.Path,"/api/"){w.Header().Set("Cache-Control","no-store");if r.Method=="POST"&&!strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"),";")[0]),"application/json"){writeJSONStatus(w,415,map[string]any{"error":"写操作必须使用 Content-Type: application/json"});return};if !api.authorized(r){writeJSONStatus(w,401,map[string]any{"error":"口令缺失或错误"});return}}
   mux.ServeHTTP(w,r)
  })
  addr:=net.JoinHostPort(host,strconv.Itoa(port));log.Printf("Go Web API listening on http://%s",addr)
