@@ -77,7 +77,7 @@ func TestConfigRejectsAliasCollision(t *testing.T) {
 }
 
 func TestConfigRejectsDuplicateSceneDirectory(t *testing.T) {
-	cfg := validTestConfig()
+	cfg := validTestConfig(t)
 	cfg.Tasks = append(cfg.Tasks, Task{Name: "task-b", Scene: "scene-a", Dir: "dir-a"})
 	if err := cfg.normalize("count"); err == nil {
 		t.Fatal("expected duplicate scene directory to fail")
@@ -85,7 +85,7 @@ func TestConfigRejectsDuplicateSceneDirectory(t *testing.T) {
 }
 
 func TestConfigAcceptsSeparateSceneDirectories(t *testing.T) {
-	cfg := validTestConfig()
+	cfg := validTestConfig(t)
 	cfg.Tasks = append(cfg.Tasks, Task{Name: "task-b", Scene: "scene-b", Dir: "dir-a"})
 	if err := cfg.normalize("count"); err != nil {
 		t.Fatalf("different scenes may use the same directory name: %v", err)
