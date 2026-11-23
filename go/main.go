@@ -998,12 +998,12 @@ func setWithExec(db sqlExecer,e Episode,d DiskConfig,final,partial,status,msg st
  "completed_at=CASE WHEN excluded.status='completed' THEN excluded.updated_at WHEN excluded.status='running' THEN NULL ELSE downloads.completed_at END,updated_at=excluded.updated_at",
  e.ID,e.Task,e.ParentKey,d.Name,nullable(final),nullable(partial),e.Size,status,nullable(msg),nullableTime(status=="running",now),nullableTime(status=="completed",now),now)
  return err
-}}
+}
 func(a *App)set(e Episode,d DiskConfig,final,partial,status,msg string)error{return setWithExec(a.db,e,d,final,partial,status,msg)}
 func recordWithExec(db sqlExecer,e Episode,d DiskConfig,final string)error{ _,err:=db.Exec("INSERT INTO downloaded_episodes(episode_id,task_name,source_task_name,job_id,sn_code,parent_key,disk_name,target_path,file_size,content_time,create_time,downloaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "+
  "ON CONFLICT(episode_id) DO UPDATE SET task_name=excluded.task_name,source_task_name=excluded.source_task_name,job_id=excluded.job_id,sn_code=excluded.sn_code,parent_key=excluded.parent_key,disk_name=excluded.disk_name,target_path=excluded.target_path,file_size=excluded.file_size,content_time=excluded.content_time,create_time=excluded.create_time,downloaded_at=excluded.downloaded_at",
  e.ID,e.Task,e.SourceTask,e.JobID,e.SN,e.ParentKey,d.Name,final,e.Size,e.Duration,e.Created,time.Now().UTC().Format(time.RFC3339Nano));return err
-}}
+}
 func(a *App)record(e Episode,d DiskConfig,final string)error{return recordWithExec(a.db,e,d,final)}
 func(a *App)recordAndSet(e Episode,d DiskConfig,final string)error{
  tx,err:=a.db.Begin()
