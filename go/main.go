@@ -994,6 +994,7 @@ func(a *App)open()error{
  if e==nil{
   if e=ensureColumn(a.db,"downloads","started_at","TEXT");e!=nil{return e}
   if e=ensureColumn(a.db,"downloads","completed_at","TEXT");e!=nil{return e}
+  if e=a.recoverPendingCleanup();e!=nil{return fmt.Errorf("恢复上次未完成的缺失 mcap 清理失败: %w",e)}
   log.Printf("MinIO=%s bucket=%s；PostgreSQL=%s:%d/%s；SQLite=%s",a.cfg.Endpoint,a.cfg.Bucket,a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.StateDB)
  };return e
 }
@@ -1945,21 +1946,130 @@ func(a *App)fail(e Episode,d DiskConfig,final,partial string,err error)error{
  if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded){_=a.set(e,d,final,partial,"paused","已暂停，保留暂存文件供下次续传");return nil}
  _=a.set(e,d,final,partial,"failed",err.Error());log.Printf("下载失败 %s: %v",e.ID,err);return err
 }
-func(a *App)cleanup(preview bool)(int,error){
- rows,err:=a.db.Query("SELECT episode_id,target_path FROM downloads WHERE status='completed'");if err!=nil{return 0,err}
- type item struct{id string;path sql.NullString}
- items:=[]item{}
- for rows.Next(){var x item;if err=rows.Scan(&x.id,&x.path);err!=nil{rows.Close();return 0,err};items=append(items,x)}
- if err=rows.Err();err!=nil{rows.Close();return 0,err};if err=rows.Close();err!=nil{return 0,err}
- n:=0
- for _,x:=range items{if !x.path.Valid||!hasPattern(x.path.String,a.cfg.MCAPPattern){
-  n++;if preview{log.Printf("[dry-run] 缺 mcap: %s",x.path.String)}else{
-   if x.path.Valid{if err=os.RemoveAll(x.path.String);err!=nil{return n,err}}
-   if _,err=a.db.Exec("DELETE FROM downloads WHERE episode_id=?",x.id);err!=nil{return n,err}
-   if _,err=a.db.Exec("DELETE FROM downloaded_episodes WHERE episode_id=?",x.id);err!=nil{return n,err}
+func (a *App) markCleanupPending(episodeID string) error {
+ tx, err := a.db.Begin()
+ if err != nil {
+  return err
+ }
+ defer tx.Rollback()
+ result, err := tx.Exec(
+  "UPDATE downloads SET status='cleanup_pending',error=?,updated_at=? WHERE episode_id=? AND status='completed'",
+  "缺少 mcap，等待清理目录", time.Now().UTC().Format(time.RFC3339Nano), episodeID,
+ )
+ if err != nil {
+  return err
+ }
+ affected, err := result.RowsAffected()
+ if err != nil {
+  return err
+ }
+ if affected == 0 {
+  return fmt.Errorf("episode %s 的完成状态已变化", episodeID)
+ }
+ if _, err = tx.Exec("DELETE FROM downloaded_episodes WHERE episode_id=?", episodeID); err != nil {
+  return err
+ }
+ return tx.Commit()
+}
+
+func (a *App) completePendingCleanup(episodeID string, target sql.NullString) error {
+ if target.Valid && target.String != "" {
+  if err := os.RemoveAll(target.String); err != nil {
+   return fmt.Errorf("删除 episode 目录 %s 失败: %w", target.String, err)
   }
- }}
- return n,nil
+ }
+ tx, err := a.db.Begin()
+ if err != nil {
+  return err
+ }
+ defer tx.Rollback()
+ if _, err = tx.Exec("DELETE FROM downloaded_episodes WHERE episode_id=?", episodeID); err != nil {
+  return err
+ }
+ if _, err = tx.Exec("DELETE FROM downloads WHERE episode_id=? AND status='cleanup_pending'", episodeID); err != nil {
+  return err
+ }
+ return tx.Commit()
+}
+
+func (a *App) recoverPendingCleanup() error {
+ rows, err := a.db.Query("SELECT episode_id,target_path FROM downloads WHERE status='cleanup_pending'")
+ if err != nil {
+  return err
+ }
+ type item struct {
+  id string
+  path sql.NullString
+ }
+ items := []item{}
+ for rows.Next() {
+  var entry item
+  if err = rows.Scan(&entry.id, &entry.path); err != nil {
+   rows.Close()
+   return err
+  }
+  items = append(items, entry)
+ }
+ if err = rows.Err(); err != nil {
+  rows.Close()
+  return err
+ }
+ if err = rows.Close(); err != nil {
+  return err
+ }
+ for _, entry := range items {
+  if err = a.completePendingCleanup(entry.id, entry.path); err != nil {
+   return fmt.Errorf("恢复 episode %s 的清理失败: %w", entry.id, err)
+  }
+ }
+ if len(items) > 0 {
+  log.Printf("已恢复并完成 %d 条中断的缺失 mcap 清理记录", len(items))
+ }
+ return nil
+}
+
+func (a *App) cleanup(preview bool) (int, error) {
+ rows, err := a.db.Query("SELECT episode_id,target_path FROM downloads WHERE status='completed'")
+ if err != nil {
+  return 0, err
+ }
+ type item struct {
+  id string
+  path sql.NullString
+ }
+ items := []item{}
+ for rows.Next() {
+  var entry item
+  if err = rows.Scan(&entry.id, &entry.path); err != nil {
+   rows.Close()
+   return 0, err
+  }
+  items = append(items, entry)
+ }
+ if err = rows.Err(); err != nil {
+  rows.Close()
+  return 0, err
+ }
+ if err = rows.Close(); err != nil {
+  return 0, err
+ }
+ n := 0
+ for _, entry := range items {
+  if !entry.path.Valid || !hasPattern(entry.path.String, a.cfg.MCAPPattern) {
+   n++
+   if preview {
+    log.Printf("[dry-run] 缺 mcap: %s", entry.path.String)
+    continue
+   }
+   if err = a.markCleanupPending(entry.id); err != nil {
+    return n, fmt.Errorf("标记 episode %s 清理状态失败: %w", entry.id, err)
+   }
+   if err = a.completePendingCleanup(entry.id, entry.path); err != nil {
+    return n, fmt.Errorf("episode %s 已标记待清理，稍后会自动恢复: %w", entry.id, err)
+   }
+  }
+ }
+ return n, nil
 }
 func pathIsDir(p string)bool{st,e:=os.Stat(p);return e==nil&&st.IsDir()}
 func dirHasFiles(p string)bool{x,e:=os.ReadDir(p);return e==nil&&len(x)>0}
