@@ -386,6 +386,7 @@ func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
 	put("transfer.file_retries", 5)
 	put("transfer.retry_delay", 0.0)
 	put("transfer.verify_md5", true)
+	put("transfer.fsync", false)
 	if _, err := db.Exec("INSERT INTO scenes(id,position,name) VALUES(1,0,'Household')"); err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +406,7 @@ func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
 	if err := loadConfigDB(&cfg, "count"); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Endpoint != "http://minio.example:9000" || !cfg.MinioSkipVerify || cfg.PGHost != "db.example" || cfg.PGPort != 5433 || cfg.DataVersion != "银河2.2数据" {
+	if cfg.Endpoint != "http://minio.example:9000" || !cfg.MinioSkipVerify || cfg.Fsync == nil || *cfg.Fsync || cfg.PGHost != "db.example" || cfg.PGPort != 5433 || cfg.DataVersion != "银河2.2数据" {
 		t.Fatalf("connection settings were not imported: %+v", cfg)
 	}
 	if len(cfg.Tasks) != 1 || cfg.Tasks[0].Name != "桌面收纳" || cfg.Tasks[0].TargetCount != 40 || len(cfg.Tasks[0].Aliases) != 1 || cfg.Tasks[0].Aliases[0] != "0930桌面收纳" {
