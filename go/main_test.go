@@ -851,6 +851,15 @@ func TestValidatePlanPayloadAllowsEmptyDataVersion(t *testing.T) {
 func TestPlanReplaceInheritsCurrentDataVersion(t *testing.T) {
 	api := newPlanTestAPI(t)
 	api.cfg.DataVersion = "current-version"
+	db, err := sql.Open("sqlite", api.cfg.ConfigDB)
+	if err != nil { t.Fatal(err) }
+	for _, stmt := range []string{
+		"CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)",
+		"CREATE TABLE scenes(id INTEGER PRIMARY KEY AUTOINCREMENT,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE)",
+		"CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE,target_count INTEGER NOT NULL,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]')",
+		"CREATE TABLE task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL,PRIMARY KEY(task_id,alias))",
+	} { if _, err := db.Exec(stmt); err != nil { t.Fatal(err) } }
+	if err := db.Close(); err != nil { t.Fatal(err) }
 	payload := `{"data_version":"","scenes":[{"scene":"Office","tasks":[{"name":"文件整理","count":2,"dir":"文件整理","aliases":[],"tags":[]}]}]}`
 	created := httptest.NewRecorder()
 	api.planCreate(created, httptest.NewRequest(http.MethodPost, "/api/plans", strings.NewReader(`{"name":"空版本方案","payload":`+payload+`}`)))
