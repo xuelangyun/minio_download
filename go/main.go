@@ -41,7 +41,7 @@ type Config struct {
  Disks []DiskConfig `json:"disks"`; Tasks []Task `json:"tasks"`
 }
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
-type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; mode string; recheck bool }
+type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; mode string; recheck bool; validated map[string]bool }
 var configPath=flag.String("config","config.json","JSON 配置文件")
 var mode=flag.String("mode","duration","duration 或 count")
 var rounds=flag.Int("max-rounds",1,"缺少必需文件后的补选轮数")
@@ -60,7 +60,7 @@ func main(){
  f,e:=os.OpenFile(filepath.Join(c.LogDir,"go-downloader.log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0644);if e!=nil{log.Fatal(e)};defer f.Close()
  log.SetOutput(io.MultiWriter(os.Stdout,f));log.SetFlags(log.Ldate|log.Ltime|log.Lmicroseconds)
  ctx,stop:=signal.NotifyContext(context.Background(),os.Interrupt);defer stop()
- a:=&App{cfg:c,ctx:ctx,mode:*mode,recheck:*recheck}
+ a:=&App{cfg:c,ctx:ctx,mode:*mode,recheck:*recheck,validated:map[string]bool{}}
  lock:=flock.New(c.LockFile);locked,lockErr:=lock.TryLock();if lockErr!=nil{log.Fatalf("创建下载锁失败: %v",lockErr)};if !locked{log.Fatal("检测到另一个下载器实例正在运行")};defer lock.Unlock()
  if e=a.open();e!=nil{log.Fatal(e)};defer a.db.Close()
  if *cleanup{n,err:=a.cleanup(*dry);if err!=nil{log.Fatal(err)};log.Printf("清理结束：%d 条",n);if *dry{return}}else if *dry{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
@@ -176,8 +176,53 @@ func(a *App)fetch()([]Episode,error){
  for _,x:=range out{if ids[x.ID]||keys[x.ParentKey]{continue};ids[x.ID]=true;keys[x.ParentKey]=true;unique=append(unique,x)}
  log.Printf("查询并去重后 %d 条候选",len(unique));return unique,nil
 }
+func(a *App)checkRequiredFiles(parent string)(string,string,error){
+ direct:=map[string]bool{}
+ for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:parent+"/",Recursive:false}){
+  if obj.Err!=nil{return "error","MinIO 目录检查失败",obj.Err}
+  if !obj.IsDir&&!strings.HasSuffix(obj.Key,"/"){direct[path.Base(obj.Key)]=true}
+ }
+ if !direct["task_info.json"]{return "missing_task_info","缺少 task_info.json",nil}
+ if a.cfg.RequireMCAP{
+  found:=false;for name:=range direct{if ok,_:=path.Match(a.cfg.MCAPPattern,name);ok{found=true;break}}
+  if !found{return "missing_mcap","缺少 mcap",nil}
+ }
+ return "ok","",nil
+}
+func(a *App)hasLocalCopy(t Task,e Episode)bool{
+ for _,d:=range a.cfg.Disks{p,_:=episodePaths(a.cfg.DataVersion,t,d,e.ParentKey);if dirHasFiles(p){return true}}
+ return false
+}
+func(a *App)prevalidateCount(groups map[string][]Episode)map[string][]Episode{
+ validGroups:=map[string][]Episode{}
+ for _,task:=range a.cfg.Tasks{
+  candidates:=groups[task.Name];if len(candidates)==0{continue}
+  _,downloaded:=a.stats(task.Name);gap:=task.TargetCount-downloaded
+  if gap<=0{continue}
+  valid:=make([]Episode,0,gap);validNew:=0;skipped:=0
+  for _,ep:=range candidates{
+   if validNew>=gap{break}
+   if a.completed(ep.ID){valid=append(valid,ep);continue}
+   if a.hasLocalCopy(task,ep){valid=append(valid,ep);validNew++;continue}
+   var state string
+   _=a.db.QueryRow("SELECT status FROM downloads WHERE episode_id=?",ep.ID).Scan(&state)
+   if !a.recheck&&(state=="missing_task_info"||state=="missing_mcap"){skipped++;continue}
+   status,detail,err:=a.checkRequiredFiles(ep.ParentKey)
+   if err!=nil{log.Printf("条数预检查失败，跳过并留待下次重试 %s: %v",ep.ID,err);continue}
+   if status!="ok"{
+    _=a.set(ep,a.cfg.Disks[0],"","",""+status,detail);skipped++
+    continue
+   }
+   a.validated[ep.ID]=true;valid=append(valid,ep);validNew++
+  }
+  validGroups[task.Name]=valid
+  if validNew<gap{log.Printf("任务 %s 条数预检查后仍缺 %d 条：需要 %d，找到 %d 个有效候选，跳过/失败 %d 条",task.Name,gap-validNew,gap,validNew,skipped)}
+ }
+ return validGroups
+}
 func(a *App)run(all []Episode,nround int)error{
  groups:=map[string][]Episode{};for _,e:=range all{groups[e.Task]=append(groups[e.Task],e)}
+ if a.mode=="count"{groups=a.prevalidateCount(groups)}
  for r:=1;r<=nround;r++{if a.ctx.Err()!=nil{return nil};selected:=map[string][]Episode{}
   for _,t:=range a.cfg.Tasks{s,n:=a.stats(t.Name);target,used:=t.TargetHours*3600,s;if a.mode=="count"{target=float64(t.TargetCount);used=float64(n)}
    addSec:=0.0;addN:=0
@@ -292,9 +337,11 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  }
  final,partial:=episodePaths(a.cfg.DataVersion,t,d,e.ParentKey)
  if err:=os.MkdirAll(partial,0755);err!=nil{return a.fail(e,d,final,partial,err)}
- direct:=map[string]bool{};for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:false}){if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)};if !obj.IsDir{direct[path.Base(obj.Key)]=true}}
- if !direct["task_info.json"]{_=os.RemoveAll(partial);_=a.set(e,d,final,"","missing_task_info","缺少 task_info.json");return nil}
- if a.cfg.RequireMCAP{found:=false;for n:=range direct{if ok,_:=path.Match(a.cfg.MCAPPattern,n);ok{found=true}};if !found{_=os.RemoveAll(partial);_=a.set(e,d,final,"","missing_mcap","缺少 mcap");return nil}}
+ if !a.validated[e.ID]{
+  status,detail,checkErr:=a.checkRequiredFiles(e.ParentKey)
+  if checkErr!=nil{return a.fail(e,d,final,partial,checkErr)}
+  if status!="ok"{_=os.RemoveAll(partial);_=a.set(e,d,final,"",status,detail);return nil}
+ }
  _=a.set(e,d,final,partial,"running","")
  objects:=make([]minio.ObjectInfo,0)
  for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:true}){
