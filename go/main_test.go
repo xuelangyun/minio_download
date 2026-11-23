@@ -214,6 +214,15 @@ func TestReserveObjectSpaceRejectsInsufficientCapacity(t *testing.T) {
  _,err:=app.reserveObjectSpace(DiskConfig{Name:"disk-a",Path:t.TempDir()},int64(^uint64(0)>>1))
  if err==nil{t.Fatal("expected reservation larger than available capacity to fail")}
 }
+func TestExistingPartialBytesIgnoresInvalidOrCompleteTempFiles(t *testing.T) {
+ dir:=t.TempDir();dst:=filepath.Join(dir,"object.bin")
+ if got:=existingPartialBytes(dst,100);got!=0{t.Fatalf("missing temp: got %d want 0",got)}
+ if err:=os.WriteFile(dst+".minio-tmp",[]byte("12345"),0600);err!=nil{t.Fatal(err)}
+ if got:=existingPartialBytes(dst,100);got!=5{t.Fatalf("partial temp: got %d want 5",got)}
+ if err:=os.WriteFile(dst+".minio-tmp",make([]byte,100),0600);err!=nil{t.Fatal(err)}
+ if got:=existingPartialBytes(dst,100);got!=0{t.Fatalf("complete temp should be re-downloaded: got %d want 0",got)}
+ if got:=remainingObjectBytes(dst,100);got!=100{t.Fatalf("complete temp remaining: got %d want 100",got)}
+}
 func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
  dir:=t.TempDir();dst:=filepath.Join(dir,"object.bin")
  if got:=remainingObjectBytes(dst,100);got!=100{t.Fatalf("missing partial: got %d want 100",got)}
