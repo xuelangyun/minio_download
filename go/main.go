@@ -41,7 +41,7 @@ import (
  _ "modernc.org/sqlite"
 )
 
-type Task struct { Name string `json:"name"`; Scene string `json:"scene"`; Dir string `json:"dir"`; Aliases []string `json:"aliases"`; TargetHours float64 `json:"target_hours"`; TargetCount int `json:"target_count"` }
+type Task struct { Name string `json:"name"`; Scene string `json:"scene"`; Dir string `json:"dir"`; Aliases []string `json:"aliases"`; Tags []string `json:"tags"`; TargetHours float64 `json:"target_hours"`; TargetCount int `json:"target_count"` }
 type DiskConfig struct { Name string `json:"name"`; Path string `json:"path"`; Mountpoint string `json:"mountpoint"` }
 type Config struct {
  fromConfigDB bool
@@ -118,9 +118,9 @@ func serveWeb(c Config,host string,port int)error{
  if raw,ok:=settings["transfer.verify_md5"];ok{var v bool;if json.Unmarshal([]byte(raw),&v)==nil{c.VerifyMD5=&v}}
  if raw,ok:=settings["transfer.fsync"];ok{var v bool;if json.Unmarshal([]byte(raw),&v)==nil{c.Fsync=&v}}
  if raw,ok:=settings["tasks.data_version"];ok{var v string;if json.Unmarshal([]byte(raw),&v)==nil&&v!=""{c.DataVersion=v}}
- taskRows,err:=db.Query("SELECT s.name,t.name,t.target_count,t.directory,t.id FROM tasks t JOIN scenes s ON s.id=t.scene_id ORDER BY s.position,t.position");if err!=nil{return err}
+ taskRows,err:=db.Query("SELECT s.name,t.name,t.target_count,t.directory,t.id,t.tags FROM tasks t JOIN scenes s ON s.id=t.scene_id ORDER BY s.position,t.position");if err!=nil{return err}
  aliases:=map[int64][]string{};aliasRows,err:=db.Query("SELECT task_id,alias FROM task_aliases ORDER BY task_id,position");if err!=nil{taskRows.Close();return err};for aliasRows.Next(){var id int64;var alias string;if err=aliasRows.Scan(&id,&alias);err!=nil{aliasRows.Close();taskRows.Close();return err};aliases[id]=append(aliases[id],alias)};if err=aliasRows.Err();err!=nil{aliasRows.Close();taskRows.Close();return err};if err=aliasRows.Close();err!=nil{taskRows.Close();return err}
- tasks:=[]Task{};for taskRows.Next(){var t Task;var id int64;if err=taskRows.Scan(&t.Scene,&t.Name,&t.TargetCount,&t.Dir,&id);err!=nil{taskRows.Close();return err};t.Aliases=aliases[id];tasks=append(tasks,t)};if err=taskRows.Err();err!=nil{taskRows.Close();return err};if err=taskRows.Close();err!=nil{return err};if len(tasks)==0{return errors.New("SQLite 配置库中没有任务")};c.Tasks=tasks
+ tasks:=[]Task{};for taskRows.Next(){var t Task;var id int64;var tags string;if err=taskRows.Scan(&t.Scene,&t.Name,&t.TargetCount,&t.Dir,&id,&tags);err!=nil{taskRows.Close();return err};t.Aliases=aliases[id];if tags!=""{_ = json.Unmarshal([]byte(tags),&t.Tags)};tasks=append(tasks,t)};if err=taskRows.Err();err!=nil{taskRows.Close();return err};if err=taskRows.Close();err!=nil{return err};if len(tasks)==0{return errors.New("SQLite 配置库中没有任务")};c.Tasks=tasks
  diskRows,err:=db.Query("SELECT name,path,mountpoint FROM disks ORDER BY position");if err!=nil{return err};disks:=[]DiskConfig{};for diskRows.Next(){var d DiskConfig;if err=diskRows.Scan(&d.Name,&d.Path,&d.Mountpoint);err!=nil{diskRows.Close();return err};disks=append(disks,d)};if err=diskRows.Err();err!=nil{diskRows.Close();return err};if err=diskRows.Close();err!=nil{return err};if len(disks)==0{return errors.New("SQLite 配置库中没有目标磁盘")};c.Disks=disks
  c.Mode="count";c.fromConfigDB=true;log.Printf("已从 SQLite 配置库加载配置: %s（任务 %d 个，磁盘 %d 块）",c.ConfigDB,len(c.Tasks),len(c.Disks));return nil
 }
@@ -810,23 +810,32 @@ func pbkdf2SHA256(password,salt []byte,iterations,keyLen int)[]byte{
  return out[:keyLen]
 }
 func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
- scenes:=[]map[string]any{};sceneIndex:=map[string]int{}
+ scenes:=[]map[string]any{};sceneIndex:=map[string]int{};taskDisk:=map[string]string{}
+ rowsAssign,err:=a.db.Query("SELECT task_name,disk_name FROM task_disk_assignments");if err==nil{for rowsAssign.Next(){var task,diskName string;if rowsAssign.Scan(&task,&diskName)==nil{taskDisk[task]=diskName}};rowsAssign.Close()}
  for _,t:=range a.cfg.Tasks{
   idx,ok:=sceneIndex[t.Scene];if !ok{idx=len(scenes);sceneIndex[t.Scene]=idx;scenes=append(scenes,map[string]any{"scene":t.Scene,"tasks":[]map[string]any{}})}
-  rows:=scenes[idx]["tasks"].([]map[string]any);var count int;var seconds float64;var bytesCount int64
-  _=a.db.QueryRow("SELECT COUNT(*),COALESCE(SUM(content_time),0),COALESCE(SUM(file_size),0) FROM downloaded_episodes WHERE task_name=?",t.Name).Scan(&count,&seconds,&bytesCount)
-  rows=append(rows,map[string]any{"name":t.Name,"dir":taskDir(t),"target":t.TargetCount,"target_hours":t.TargetHours,"aliases":t.Aliases,"tags":[]string{},"downloaded":count,"hours":math.Round(seconds/3600*100)/100,"bytes":bytesCount,"issues":map[string]int{},"disk":nil});scenes[idx]["tasks"]=rows
+  rows:=scenes[idx]["tasks"].([]map[string]any);count:=0;seconds:=0.0;bytesCount:=int64(0);issues:=map[string]int{}
+  records,e:=a.db.Query("SELECT content_time,file_size,target_path FROM downloaded_episodes WHERE task_name=?",t.Name)
+  if e==nil{for records.Next(){var sec sql.NullFloat64;var size sql.NullInt64;var target sql.NullString;if records.Scan(&sec,&size,&target)!=nil{continue};if target.Valid&&pathIsDir(target.String){count++;seconds+=sec.Float64;bytesCount+=size.Int64}};records.Close()}
+  issueRows,e:=a.db.Query("SELECT status,COUNT(*) FROM downloads WHERE task_name=? AND status<>'completed' GROUP BY status",t.Name)
+  if e==nil{for issueRows.Next(){var state string;var n int;if issueRows.Scan(&state,&n)==nil{issues[state]=n}};issueRows.Close()}
+  var assigned any=nil;if name,ok:=taskDisk[t.Name];ok{assigned=name}
+  rows=append(rows,map[string]any{"name":t.Name,"dir":taskDir(t),"target":t.TargetCount,"target_hours":t.TargetHours,"aliases":t.Aliases,"tags":t.Tags,"downloaded":count,"hours":math.Round(seconds/3600*100)/100,"bytes":bytesCount,"issues":issues,"disk":assigned});scenes[idx]["tasks"]=rows
  }
  disks:=[]map[string]any{}
- for _,d:=range a.cfg.Disks{usage,err:=disk.Usage(d.Path);item:=map[string]any{"name":d.Name,"path":d.Path,"mounted":pathIsDir(d.Mountpoint),"exists":pathIsDir(d.Path),"total":uint64(0),"free":uint64(0),"used":uint64(0),"tasks":[]string{}};if err==nil{item["total"]=usage.Total;item["free"]=usage.Free;item["used"]=usage.Used};disks=append(disks,item)}
+ diskTasks:=map[string][]string{};for task,name:=range taskDisk{diskTasks[name]=append(diskTasks[name],task)}
+ for _,d:=range a.cfg.Disks{usage,e:=disk.Usage(d.Path);item:=map[string]any{"name":d.Name,"path":d.Path,"mounted":pathIsDir(d.Mountpoint),"exists":pathIsDir(d.Path),"total":uint64(0),"free":uint64(0),"used":uint64(0),"tasks":diskTasks[d.Name]};if e==nil{item["total"]=usage.Total;item["free"]=usage.Free;item["used"]=usage.Used};disks=append(disks,item)}
  state:=map[string]any{"running":false,"pid":nil,"by_web":false}
  if raw,e:=os.ReadFile(a.cfg.PIDFile);e==nil{var p pidRecord;if json.Unmarshal(raw,&p)==nil{if proc,e:=process.NewProcess(int32(p.PID));e==nil{alive,_:=proc.IsRunning();if alive{ct,_:=proc.CreateTime();if p.Created==0||math.Abs(float64(ct)/1000-p.Created)<2{state=map[string]any{"running":true,"pid":p.PID,"by_web":false}}}}}}
+ running,_:=state["running"].(bool)
  control:=map[string]string{};for _,key:=range []string{"stop_requested","last_run"}{var v string;if a.db.QueryRow("SELECT value FROM control WHERE key=?",key).Scan(&v)==nil{control[key]=v}}
  var last any=map[string]any{};if raw:=control["last_run"];raw!=""{var v map[string]any;if json.Unmarshal([]byte(raw),&v)==nil{last=v}}
+ runningEpisodes:=[]map[string]any{}
+ if running{rr,e:=a.db.Query("SELECT episode_id,task_name,disk_name,started_at,expected_bytes,partial_path FROM downloads WHERE status='running' ORDER BY updated_at DESC LIMIT 24");if e==nil{for rr.Next(){var id,taskName string;var diskName,started,partial sql.NullString;var expected sql.NullInt64;if rr.Scan(&id,&taskName,&diskName,&started,&expected,&partial)==nil{partialBytes:=int64(0);if partial.Valid{partialBytes,_=directorySizeBytes(partial.String)};runningEpisodes=append(runningEpisodes,map[string]any{"episode_id":id,"task_name":taskName,"disk_name":diskName.String,"started_at":started.String,"expected_bytes":expected.Int64,"partial_bytes":partialBytes})}};rr.Close()}}
  issues:=[]map[string]string{};if a.cfg.Endpoint==""||a.cfg.AccessKey==""||a.cfg.SecretKey==""{issues=append(issues,map[string]string{"page":"connection","text":"尚未配置 MinIO 连接"})};if len(a.cfg.Disks)==0{issues=append(issues,map[string]string{"page":"disks","text":"尚未配置目标磁盘"})};if len(a.cfg.Tasks)==0{issues=append(issues,map[string]string{"page":"tasks","text":"尚未配置下载任务"})}
  endpoint:=a.cfg.Endpoint;if u,e:=url.Parse(endpoint);e==nil&&u.Host!=""{endpoint=u.Scheme+"://"+u.Host}
  settings:=map[string]any{"min_free_gb":a.cfg.MinFreeGB,"writes_per_disk":a.cfg.Workers,"require_mcap":a.cfg.RequireMCAP,"mcap_pattern":a.cfg.MCAPPattern,"default_rounds":1}
- writeJSON(w,map[string]any{"version":"go-dev","data_version":a.cfg.DataVersion,"downloader":state,"stop_requested":isStopRequested(control["stop_requested"]),"setup_issues":issues,"minio":map[string]any{"endpoint":endpoint,"bucket":a.cfg.Bucket},"settings":settings,"last_run":last,"stale_records":0,"running_episodes":[]any{},"disks":disks,"scenes":scenes})
+ writeJSON(w,map[string]any{"version":"go-dev","data_version":a.cfg.DataVersion,"downloader":state,"stop_requested":running&&isStopRequested(control["stop_requested"]),"setup_issues":issues,"minio":map[string]any{"endpoint":endpoint,"bucket":a.cfg.Bucket},"settings":settings,"last_run":last,"stale_records":0,"running_episodes":runningEpisodes,"disks":disks,"scenes":scenes})
 }
 func(a *WebAPI)episodes(w http.ResponseWriter,r *http.Request){
  task:=r.URL.Query().Get("task");rows,err:=a.db.Query("SELECT episode_id,status,error,parent_key,updated_at FROM downloads WHERE task_name=? AND status<>'completed' ORDER BY updated_at DESC LIMIT 200",task)
