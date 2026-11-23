@@ -329,8 +329,8 @@ func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
 }
 func TestResumeOffsetBacksOffOnlyOnFirstAttempt(t *testing.T) {
  if got:=resumeOffset(resumeBackoffBytes+200,resumeBackoffBytes+300,true);got!=200{t.Fatalf("backoff offset=%d want 200",got)}
- if got:=resumeOffset(resumeBackoffBytes+10,300,true);got!=10{t.Fatalf("first-attempt offset=%d want 10",got)}
- if got:=resumeOffset(resumeBackoffBytes+10,300,false);got!=resumeBackoffBytes+10{t.Fatalf("retry offset=%d",got)}
+ if got:=resumeOffset(resumeBackoffBytes+10,resumeBackoffBytes+300,true);got!=10{t.Fatalf("first-attempt offset=%d want 10",got)}
+ if got:=resumeOffset(resumeBackoffBytes+10,resumeBackoffBytes+300,false);got!=resumeBackoffBytes+10{t.Fatalf("retry offset=%d",got)}
  if got:=resumeOffset(100,90,true);got!=0{t.Fatalf("oversized partial offset=%d want 0",got)}
  if got:=resumeOffset(10,100,true);got!=0{t.Fatalf("small partial offset=%d want 0",got)}
 }
