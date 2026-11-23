@@ -287,6 +287,11 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
    if st.Size()>expected.Size{_=os.Remove(tmp)}else{offset=st.Size()}
   }else if !os.IsNotExist(err){return err}
   if offset>=expected.Size&&offset>0{_=os.Remove(tmp);offset=0}
+  if offset>0&&expected.ETag!=""{
+   current,statErr:=a.mc.StatObject(a.ctx,a.cfg.Bucket,key,minio.StatObjectOptions{})
+   if statErr!=nil{if attempt<attempts{select{case <-a.ctx.Done():return a.ctx.Err();case <-time.After(time.Duration(attempt)*time.Second):};continue};return statErr}
+   if !sameETag(current.ETag,expected.ETag){_=os.Remove(tmp);return fmt.Errorf("续传前发现远端对象已变化，已丢弃旧临时文件: %s",key)}
+  }
   opts:=minio.GetObjectOptions{}
   if expected.ETag!=""{if err:=opts.SetMatchETag(strings.Trim(expected.ETag,"\""));err!=nil{return err}}
   if offset>0{if err:=opts.SetRange(offset,0);err!=nil{return err}}
@@ -302,10 +307,10 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
     out,err=os.OpenFile(tmp,flags,0644)
     if err==nil{
      var n int64
-     n,err=io.Copy(out,obj)
-     if err==nil{err=out.Sync()}
+     n,copyErr:=io.Copy(out,obj)
+     syncErr:=out.Sync()
      closeErr:=out.Close()
-     if err==nil{err=closeErr}
+     if copyErr!=nil{err=copyErr}else if syncErr!=nil{err=syncErr}else if closeErr!=nil{err=closeErr}
      if err==nil&&n!=expected.Size-offset{err=fmt.Errorf("对象分段长度不符 %s: got=%d want=%d",key,n,expected.Size-offset)}
     }
    }
