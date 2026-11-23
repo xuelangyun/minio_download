@@ -384,6 +384,14 @@ func addSpaceReservations(reserved,additional,minFree uint64)(uint64,bool){
  if max-total<minFree{return 0,false}
  return total+minFree,true
 }
+func chooseTaskDisk(task Task,disks []DiskConfig,loads map[string]int,folderDisk map[string]*DiskConfig)*DiskConfig{
+ folder:=safe(taskDir(task))
+ if assigned:=folderDisk[folder];assigned!=nil{return assigned}
+ var chosen *DiskConfig
+ for i:=range disks{candidate:=&disks[i];if chosen==nil||loads[candidate.Name]<loads[chosen.Name]{chosen=candidate}}
+ if chosen!=nil{folderDisk[folder]=chosen;loads[chosen.Name]++}
+ return chosen
+}
 func(a *App)downloadSelected(sel map[string][]Episode)error{
  loads:=map[string]int{};existing:=map[string]*DiskConfig{};folderDisk:=map[string]*DiskConfig{}
  // Existing task footprints (including .partial directories) are authoritative.
@@ -400,13 +408,7 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
  for _,task:=range a.cfg.Tasks{
   rows:=sel[task.Name];if len(rows)==0{continue}
   d:=existing[task.Name]
-  if d==nil{
-   folder:=safe(taskDir(task))
-   if shared,ok:=folderDisk[folder];ok{d=shared}else{
-    for i:=range a.cfg.Disks{candidate:=&a.cfg.Disks[i];if d==nil||loads[candidate.Name]<loads[d.Name]{d=candidate}}
-    if d!=nil{folderDisk[folder]=d;loads[d.Name]++}
-   }
-  }
+  if d==nil{d=chooseTaskDisk(task,a.cfg.Disks,loads,folderDisk)}
   if d==nil{return errors.New("没有配置目标磁盘")}
   if err:=os.MkdirAll(d.Path,0755);err!=nil{return err}
   usage,err:=disk.Usage(d.Path);if err!=nil{return err}
