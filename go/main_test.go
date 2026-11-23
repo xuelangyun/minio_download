@@ -1167,6 +1167,16 @@ func TestMaxInt64(t *testing.T) {
  if got:=maxInt64(5,3);got!=5{t.Fatalf("maxInt64(5,3)=%d",got)}
 }
 
+func TestDiskLockKeysCollapseDirectoriesOnSameFilesystem(t *testing.T) {
+ root:=t.TempDir()
+ first:=filepath.Join(root,"first")
+ second:=filepath.Join(root,"second")
+ if err:=os.MkdirAll(first,0755);err!=nil{t.Fatal(err)}
+ if err:=os.MkdirAll(second,0755);err!=nil{t.Fatal(err)}
+ keys,err:=diskLockKeys([]DiskConfig{{Name:"one",Path:first},{Name:"two",Path:second}})
+ if err!=nil{t.Fatalf("diskLockKeys: %v",err)}
+ if len(keys)!=1{t.Fatalf("same filesystem should produce one lock key, got %d: %v",len(keys),keys)}
+}
 func TestFilesystemIdentityDetectsDirectoriesOnSameFilesystem(t *testing.T) {
 	root:=t.TempDir()
 	first:=filepath.Join(root,"first")
