@@ -119,6 +119,7 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("POST /api/plans/{id}/apply",api.planApply)
  mux.HandleFunc("PUT /api/config/tasks",api.configTasks)
  mux.HandleFunc("PUT /api/config/disks",api.configDisks)
+ mux.HandleFunc("POST /api/config/disks/check",api.configDisksCheck)
  mux.HandleFunc("GET /api/config",api.config)
  mux.HandleFunc("GET /api/status",api.status)
  mux.HandleFunc("POST /api/run",api.run)
@@ -452,6 +453,47 @@ func(a *WebAPI)configTasks(w http.ResponseWriter,r *http.Request){
  a.cfg.Tasks=tasks;a.cfg.DataVersion=p.DataVersion
  _,running,_:=a.activeDownloader()
  writeJSON(w,map[string]any{"ok":true,"running":running})
+}
+
+func nearestExistingDir(path string)string{
+ cur:=filepath.Clean(path)
+ for {
+  info,err:=os.Stat(cur);if err==nil&&info.IsDir(){return cur}
+  parent:=filepath.Dir(cur);if parent==cur{return ""}
+  cur=parent
+ }
+}
+func diskPathWithinMount(path,mount string)bool{
+ p,err:=filepath.Abs(path);if err!=nil{return false};m,err:=filepath.Abs(mount);if err!=nil{return false}
+ rel,err:=filepath.Rel(m,p);if err!=nil{return false}
+ if rel=="."{return true}
+ return rel!=".."&&!strings.HasPrefix(rel,".."+string(os.PathSeparator))&&!filepath.IsAbs(rel)
+}
+func probeWritable(path string)error{
+ f,err:=os.CreateTemp(path,".minio-downloader-check-*");if err!=nil{return err}
+ name:=f.Name();if _,err=f.Write([]byte("ok"));err!=nil{f.Close();os.Remove(name);return err}
+ if err=f.Close();err!=nil{os.Remove(name);return err};return os.Remove(name)
+}
+func(a *WebAPI)configDisksCheck(w http.ResponseWriter,r *http.Request){
+ var body struct{Disks []DiskConfig `json:"disks"`}
+ if err:=json.NewDecoder(io.LimitReader(r.Body,1<<20)).Decode(&body);err!=nil&&err!=io.EOF{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
+ if body.Disks==nil{body.Disks=append([]DiskConfig{},a.cfg.Disks...)}
+ results:=[]map[string]any{}
+ for _,d:=range body.Disks{
+  name:=strings.TrimSpace(d.Name);path:=strings.TrimSpace(d.Path);mount:=strings.TrimSpace(d.Mountpoint);if mount==""{mount=path}
+  notes:=[]map[string]string{};ok:=true;free:=uint64(0);total:=uint64(0)
+  if name==""||path==""{ok=false;notes=append(notes,map[string]string{"level":"bad","text":"磁盘名称和路径不能为空"})}
+  if _,err:=os.Stat(mount);err!=nil{ok=false;notes=append(notes,map[string]string{"level":"bad","text":"挂载点不存在："+mount})}else if !isMountedPath(mount){ok=false;notes=append(notes,map[string]string{"level":"bad","text":"挂载点没有真正挂载："+mount+"（下载器会拒绝写入未挂载目录）"})}else{notes=append(notes,map[string]string{"level":"ok","text":"挂载点正常"})}
+  if path!=""&&mount!=""&&!diskPathWithinMount(path,mount){ok=false;notes=append(notes,map[string]string{"level":"bad","text":"下载路径不在指定挂载点之下"})}
+  probe:=path
+  if probe!=""{if info,err:=os.Stat(probe);err!=nil||!info.IsDir(){probe=nearestExistingDir(probe)}}
+  if probe==""{ok=false;notes=append(notes,map[string]string{"level":"bad","text":"下载路径及其上级目录均不存在"})}else{
+   if err:=probeWritable(probe);err!=nil{ok=false;notes=append(notes,map[string]string{"level":"bad","text":"目录不可写："+err.Error()})}else{notes=append(notes,map[string]string{"level":"ok","text":"目录可写"})}
+   if usage,err:=disk.Usage(probe);err==nil{free=usage.Free;total=usage.Total}else{notes=append(notes,map[string]string{"level":"bad","text":"读取磁盘空间失败："+err.Error()});ok=false}
+  }
+  results=append(results,map[string]any{"name":name,"ok":ok,"free":free,"total":total,"notes":notes})
+ }
+ writeJSON(w,map[string]any{"results":results})
 }
 func(a *WebAPI)configDisks(w http.ResponseWriter,r *http.Request){
  var body struct{Disks []DiskConfig `json:"disks"`}
