@@ -336,6 +336,39 @@ func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
  if err:=os.WriteFile(dst+".minio-tmp",make([]byte,100),0600);err!=nil{t.Fatal(err)}
  if got:=remainingObjectBytes(dst,100);got!=0{t.Fatalf("complete temp remaining: got %d want 0",got)}
 }
+func TestRecoverEpisodeDirectoryRestoresBackupAfterInterruptedPublish(t *testing.T) {
+ parent:=t.TempDir();final:=filepath.Join(parent,"episode");partial:=filepath.Join(parent,".episode.partial")
+ backup:=filepath.Join(parent,".episode.minio-episode-backup-crash")
+ if err:=os.Mkdir(backup,0755);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(backup,"old.txt"),[]byte("old-complete"),0600);err!=nil{t.Fatal(err)}
+ if err:=os.Mkdir(partial,0755);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(partial,"new.txt"),[]byte("new-partial"),0600);err!=nil{t.Fatal(err)}
+ if err:=recoverEpisodeDirectory(final);err!=nil{t.Fatal(err)}
+ got,err:=os.ReadFile(filepath.Join(final,"old.txt"));if err!=nil{t.Fatal(err)}
+ if string(got)!="old-complete"{t.Fatalf("restored old data=%q",got)}
+ if _,err=os.Stat(filepath.Join(partial,"new.txt"));err!=nil{t.Fatalf("partial download should be retained: %v",err)}
+ if _,err=os.Stat(backup);!os.IsNotExist(err){t.Fatalf("backup should be moved to final, stat err=%v",err)}
+}
+func TestRecoverEpisodeDirectoryCleansBackupAfterSuccessfulPublish(t *testing.T) {
+ parent:=t.TempDir();final:=filepath.Join(parent,"episode")
+ backup:=filepath.Join(parent,".episode.minio-episode-backup-crash")
+ if err:=os.Mkdir(final,0755);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(final,"new.txt"),[]byte("new"),0600);err!=nil{t.Fatal(err)}
+ if err:=os.Mkdir(backup,0755);err!=nil{t.Fatal(err)}
+ if err:=os.WriteFile(filepath.Join(backup,"old.txt"),[]byte("old"),0600);err!=nil{t.Fatal(err)}
+ if err:=recoverEpisodeDirectory(final);err!=nil{t.Fatal(err)}
+ if _,err:=os.Stat(filepath.Join(final,"new.txt"));err!=nil{t.Fatalf("published final was changed: %v",err)}
+ if _,err:=os.Stat(backup);!os.IsNotExist(err){t.Fatalf("stale backup should be removed, stat err=%v",err)}
+}
+func TestRecoverEpisodeDirectoryRejectsSymlinkBackup(t *testing.T) {
+ parent:=t.TempDir();final:=filepath.Join(parent,"episode");target:=filepath.Join(parent,"target")
+ if err:=os.Mkdir(target,0755);err!=nil{t.Fatal(err)}
+ backup:=filepath.Join(parent,".episode.minio-episode-backup-link")
+ if err:=os.Symlink(target,backup);err!=nil{t.Skipf("symlink unavailable: %v",err)}
+ if err:=recoverEpisodeDirectory(final);err==nil{t.Fatal("expected symlink backup to be rejected")}
+ if _,err:=os.Stat(target);err!=nil{t.Fatalf("symlink target should remain untouched: %v",err)}
+}
+
 func TestReplaceEpisodeDirectoryForWindowsReplacesExistingDirectory(t *testing.T) {
  parent:=t.TempDir()
  final:=filepath.Join(parent,"episode")
