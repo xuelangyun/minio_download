@@ -1125,3 +1125,25 @@ func TestAcquireSemaphoreAcquiresAvailableSlot(t *testing.T) {
  if !acquireSemaphore(ctx,sem){t.Fatal("available semaphore slot was not acquired")}
  if len(sem)!=1{t.Fatalf("semaphore occupancy=%d, want 1",len(sem))}
 }
+
+func TestUpdateTransferSampleCalculatesRateETAAndProgress(t *testing.T) {
+ api:=&WebAPI{}
+ start:=time.Date(2026,1,1,0,0,0,0,time.UTC)
+ speed,eta,percent:=api.updateTransferSample(start,1000,3000)
+ if speed!=0||eta!=nil||percent<33.33||percent>33.34{t.Fatalf("initial sample = speed %v eta %v progress %v",speed,eta,percent)}
+ speed,eta,percent=api.updateTransferSample(start.Add(2*time.Second),2000,3000)
+ if speed<499.9||speed>500.1{t.Fatalf("speed=%v, want 500 B/s",speed)}
+ if eta!=int64(2){t.Fatalf("eta=%v, want 2 seconds",eta)}
+ if percent<66.66||percent>66.67{t.Fatalf("progress=%v, want 66.67%%",percent)}
+}
+func TestUpdateTransferSampleResetsAfterCounterDecrease(t *testing.T) {
+ api:=&WebAPI{}
+ start:=time.Date(2026,1,1,0,0,0,0,time.UTC)
+ api.updateTransferSample(start,5000,10000)
+ speed,eta,percent:=api.updateTransferSample(start.Add(time.Second),100,10000)
+ if speed!=0||eta!=nil||percent!=1{t.Fatalf("reset sample = speed %v eta %v progress %v",speed,eta,percent)}
+}
+func TestMaxInt64(t *testing.T) {
+ if got:=maxInt64(-1,0);got!=0{t.Fatalf("maxInt64(-1,0)=%d",got)}
+ if got:=maxInt64(5,3);got!=5{t.Fatalf("maxInt64(5,3)=%d",got)}
+}
