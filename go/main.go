@@ -972,8 +972,7 @@ func completedEpisodeDir(dir string,requireMCAP bool,mcapPattern string)bool{
  entries,err:=os.ReadDir(dir);if err!=nil{return false}
  taskInfoFound:=false;mcapFound:=!requireMCAP
  for _,entry:=range entries{
-  if entry.Type()&os.ModeSymlink!=0{continue}
-  info,err:=entry.Info();if err!=nil||!info.Mode().IsRegular(){continue}
+  info,err:=os.Lstat(filepath.Join(dir,entry.Name()));if err!=nil||!info.Mode().IsRegular()||info.Mode()&os.ModeSymlink!=0{continue}
   if entry.Name()=="task_info.json"{taskInfoFound=true}
   if requireMCAP{
    matched,matchErr:=path.Match(mcapPattern,entry.Name())
@@ -991,9 +990,9 @@ func(a *App)completed(id string)bool{
  if err==nil&&p.Valid&&a.completedPath(p.String){return true}
  p=sql.NullString{}
  err=a.db.QueryRow("SELECT target_path FROM downloaded_episodes WHERE episode_id=?",id).Scan(&p)
- return err==nil&&p.Valid&&(a.cfg.TrustCompletedRecords||pathIsDir(p.String))
+ return err==nil&&p.Valid&&a.completedPath(p.String)
 }
-func(a *App)stats(task string)(float64,int){rows,err:=a.db.Query("SELECT content_time,target_path FROM downloaded_episodes WHERE task_name=?",task);if err!=nil{return 0,0};defer rows.Close();var seconds float64;count:=0;for rows.Next(){var v sql.NullFloat64;var p sql.NullString;if rows.Scan(&v,&p)!=nil{continue};if a.cfg.TrustCompletedRecords||(p.Valid&&pathIsDir(p.String)){seconds+=v.Float64;count++}};return seconds,count}
+func(a *App)stats(task string)(float64,int){rows,err:=a.db.Query("SELECT content_time,target_path FROM downloaded_episodes WHERE task_name=?",task);if err!=nil{return 0,0};defer rows.Close();var seconds float64;count:=0;for rows.Next(){var v sql.NullFloat64;var p sql.NullString;if rows.Scan(&v,&p)!=nil{continue};if p.Valid&&a.completedPath(p.String){seconds+=v.Float64;count++}};return seconds,count}
 func(a *App)assign(task,disk string)error{tx,err:=a.db.Begin();if err!=nil{return err};defer tx.Rollback();if _,err=tx.Exec("DELETE FROM task_disk_assignments WHERE task_name=?",task);err!=nil{return err};if _,err=tx.Exec("INSERT INTO task_disk_assignments(task_name,disk_name,last_used_at) VALUES(?,?,?)",task,disk,time.Now().UTC().Format(time.RFC3339Nano));err!=nil{return err};return tx.Commit()}
 func(a *App)assigned(task string)string{var d string;_=a.db.QueryRow("SELECT disk_name FROM task_disk_assignments WHERE task_name=? ORDER BY last_used_at DESC LIMIT 1",task).Scan(&d);return d}
 func(a *App)record(e Episode,d DiskConfig,final string)error{
@@ -1064,7 +1063,7 @@ func(a *App)syncLocalCopies(groups map[string][]Episode)error{
      if err:=a.set(ep,d,statePath.String,"","completed","");err!=nil{return err}
     }
    }
-   diskName,err:=findExistingTaskDisk(a.cfg.DataVersion,task,a.cfg.Disks,[]Episode{ep})
+   diskName,err:=findExistingTaskDisk(a.cfg.DataVersion,task,a.cfg.Disks,[]Episode{ep},a.cfg.RequireMCAP,a.cfg.MCAPPattern)
    if err!=nil{return err};if diskName==""{continue}
    var chosen *DiskConfig
    for i:=range a.cfg.Disks{if a.cfg.Disks[i].Name==diskName{chosen=&a.cfg.Disks[i];break}}
@@ -1140,12 +1139,12 @@ func(a *App)run(all []Episode,nround int)error{
  };return nil
 }
 type batch struct{t Task;d DiskConfig;rows []Episode}
-func findExistingTaskDisk(version string,t Task,disks []DiskConfig,rows []Episode)(string,error){
+func findExistingTaskDisk(version string,t Task,disks []DiskConfig,rows []Episode,requireMCAP bool,mcapPattern string)(string,error){
  found:=""
  for _,ep:=range rows{
   for _,d:=range disks{
    final,_:=episodePaths(version,t,d,ep.ParentKey)
-   if completedEpisodeDir(final,false,""){
+   if completedEpisodeDir(final,requireMCAP,mcapPattern){
     if found!=""&&found!=d.Name{return "",fmt.Errorf("任务 %s 的已有数据分布在多块磁盘（%s、%s）",t.Name,found,d.Name)}
     found=d.Name
    }
