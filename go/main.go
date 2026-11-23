@@ -62,8 +62,10 @@ var defaultCountConfigJSON []byte
 
 var errRemoteObjectChanged = errors.New("远端对象元数据已变化")
 
-var configPath=flag.String("config","config.json","JSON 配置文件")
-var mode=flag.String("mode","","duration 或 count；未指定时根据配置自动选择")
+var configPath=flag.String("config","","兼容旧版 JSON 配置；新方式无需此参数")
+var dbPath=flag.String("db","minio_download.sqlite3","SQLite 数据库路径；配置、日志和下载记录统一保存在此文件")
+var workerFlag=flag.Bool("worker",false,"内部参数：启动下载工作进程")
+var mode=flag.String("mode","","duration 或 count；未指定时默认 count")
 var rounds=flag.Int("max-rounds",0,"缺少必需文件后的补选轮数；默认使用配置项 run.default_rounds")
 var recheck=flag.Bool("recheck-missing",false,"重新检查缺文件数据")
 var cleanup=flag.Bool("cleanup-missing-mcap",false,"清理缺少 mcap 的已下载目录")
@@ -77,37 +79,118 @@ var preserveStopRequest=flag.Bool("preserve-stop-request",false,"内部参数：
 func main(){
  flag.Parse()
  if *rounds<0{log.Fatal("--max-rounds 不能为负数")}
- b,e:=os.ReadFile(*configPath);if e!=nil{log.Fatalf("读取配置失败: %v；请复制 config.example.json 为 config.json",e)}
- var c Config;if e=json.Unmarshal(b,&c);e!=nil{log.Fatalf("配置 JSON 无效: %v",e)}
- if *stopFlag{if e=requestStop(c);e!=nil{log.Fatal(e)};log.Print("已写入安全暂停请求");return}
- if *mode==""{if c.ConfigDB!=""{*mode="count"}else if c.Mode!=""{*mode=c.Mode}else{*mode="duration"}}
+ dbName:=strings.TrimSpace(*dbPath)
+ if dbName==""{log.Fatal("--db 不能为空")}
+ dbName,err:=filepath.Abs(dbName);if err!=nil{log.Fatal(err)}
+ var c Config
+ legacyJSON:=strings.TrimSpace(*configPath)!=""
+ if legacyJSON{
+  raw,e:=os.ReadFile(*configPath);if e!=nil{log.Fatalf("读取兼容配置失败: %v",e)}
+  if e=json.Unmarshal(raw,&c);e!=nil{log.Fatalf("配置 JSON 无效: %v",e)}
+  if c.StateDB==""{c.StateDB=dbName}
+  if c.ConfigDB!=""{c.ConfigDB,e=filepath.Abs(c.ConfigDB);if e!=nil{log.Fatal(e)}}
+ }else{
+  c=Config{Mode:"count",ConfigDB:dbName,StateDB:dbName,WebHost:"127.0.0.1",WebPort:8765,DataVersion:"银河2.2数据",MinFreeGB:3,SafetyFactor:1.15,Workers:2,FileWorkers:4,FileRetries:5,RetryDelaySeconds:1,ValidateWorkers:16,DefaultRounds:1,ConnectTimeout:10,ReadTimeout:120,RequireMCAP:true,MCAPPattern:"*.SYNC.mcap"}
+ }
+ if c.StateDB==""{c.StateDB=dbName}
+ c.StateDB,err=filepath.Abs(c.StateDB);if err!=nil{log.Fatal(err)}
+ if !legacyJSON||*webFlag||*workerFlag{
+  if c.ConfigDB==""{c.ConfigDB=c.StateDB}
+  c.ConfigDB,err=filepath.Abs(c.ConfigDB);if err!=nil{log.Fatal(err)}
+ }
+ if *stopFlag{if err=requestStop(c);err!=nil{log.Fatal(err)};log.Print("已写入 SQLite 安全暂停请求");return}
+ if err=initializeSQLiteDatabase(c.StateDB);err!=nil{log.Fatalf("初始化 SQLite 数据库失败: %v",err)}
+ if c.ConfigDB!=""&&c.ConfigDB!=c.StateDB{
+  if err=initializeSQLiteDatabase(c.ConfigDB);err!=nil{log.Fatalf("初始化配置 SQLite 失败: %v",err)}
+ }
+ logDB,err:=sql.Open("sqlite",c.StateDB);if err!=nil{log.Fatal(err)}
+ logDB.SetMaxOpenConns(1)
+ defer logDB.Close()
+ log.SetOutput(io.MultiWriter(os.Stdout,&sqliteLogWriter{db:logDB}))
+ log.SetFlags(log.Ldate|log.Ltime|log.Lmicroseconds)
+ isWorker:=*workerFlag||(legacyJSON&&!*webFlag)
+ if !isWorker{
+  if *mode==""{*mode="count"}
+  if err=loadConfigDB(&c,*mode);err!=nil{log.Fatalf("读取 SQLite 配置失败: %v",err)}
+  c.Mode=*mode
+  host:=c.WebHost;port:=c.WebPort
+  if *webHost!=""{host=*webHost};if *webPort>0{port=*webPort}
+  if err=serveWeb(c,host,port);err!=nil{log.Fatal(err)}
+  return
+ }
+ if *mode==""{if c.Mode!=""{*mode=c.Mode}else{*mode="count"}}
  if *mode!="duration"&&*mode!="count"{log.Fatal("--mode 只能是 duration 或 count")}
- if e=loadConfigDB(&c,*mode);e!=nil{log.Fatalf("读取 SQLite 配置库失败: %v",e)}
- if e=c.normalize(*mode);e!=nil{log.Fatal(e)}
- if *cleanup&&!c.RequireMCAP{log.Fatal("require_mcap 已关闭，不能清理缺少 mcap 的目录；请先在配置中启用 require_mcap")}
+ if err=loadConfigDB(&c,*mode);err!=nil{log.Fatalf("读取 SQLite 配置失败: %v",err)}
+ if err=c.normalize(*mode);err!=nil{log.Fatal(err)}
+ if *cleanup&&!c.RequireMCAP{log.Fatal("require_mcap 已关闭，不能清理缺少 mcap 的目录；请先在网页配置中启用 require_mcap")}
  effectiveRounds:=c.DefaultRounds;if *rounds>0{effectiveRounds=*rounds};if effectiveRounds<1||effectiveRounds>50{log.Fatal("--max-rounds / run.default_rounds 必须在 1 到 50 之间")}
- if *webFlag{host:=c.WebHost;port:=c.WebPort;if *webHost!=""{host=*webHost};if *webPort>0{port=*webPort};if e=serveWeb(c,host,port);e!=nil{log.Fatal(e)};return}
- _=os.MkdirAll(filepath.Dir(c.StateDB),0755);_=os.MkdirAll(filepath.Dir(c.LockFile),0755);_=os.MkdirAll(c.LogDir,0755)
- f,e:=os.OpenFile(filepath.Join(c.LogDir,"minio_task_downloader.log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0644);if e!=nil{log.Fatal(e)};defer f.Close()
- log.SetOutput(io.MultiWriter(os.Stdout,f));log.SetFlags(log.Ldate|log.Ltime|log.Lmicroseconds)
  baseCtx,stop:=signal.NotifyContext(context.Background(),os.Interrupt);defer stop()
  ctx,cancel:=context.WithCancel(baseCtx);defer cancel()
  a:=&App{cfg:c,ctx:ctx,cancel:cancel,mode:*mode,recheck:*recheck,validated:map[string]bool{},spaceInFlight:map[string]uint64{}}
- lock:=flock.New(c.LockFile);locked,lockErr:=lock.TryLock();if lockErr!=nil{log.Fatalf("创建下载锁失败: %v",lockErr)};if !locked{log.Fatal("检测到另一个下载器实例正在运行")};defer lock.Unlock()
- if !*preserveStopRequest{if e=clearStopRequestDB(c.StateDB);e!=nil{log.Fatal(e)}}
- if e=a.open();e!=nil{log.Fatal(e)};defer a.db.Close()
- if e=writePIDFile(c.PIDFile,*mode);e!=nil{log.Fatal(e)};defer removePIDFile(c.PIDFile)
+ if err=a.open();err!=nil{log.Fatal(err)};defer a.db.Close()
+ if err=a.registerProcess();err!=nil{log.Fatal(err)};defer a.unregisterProcess()
  watcherDone:=a.startStopWatcher();defer func(){cancel();<-watcherDone}()
- if e=validateDiskSet(a.cfg.Disks);e!=nil{log.Fatal(e)}
+ if err=validateDiskSet(a.cfg.Disks);err!=nil{log.Fatal(err)}
  if *dry{
   if !*cleanup{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
-  n,err:=a.cleanup(true);if err!=nil{log.Fatal(err)};log.Printf("清理预览结束：%d 条",n);return
+  n,e:=a.cleanup(true);if e!=nil{log.Fatal(e)};log.Printf("清理预览结束：%d 条",n);return
  }
- if e=a.recoverPendingCleanup();e!=nil{log.Fatalf("恢复上次未完成的缺失 mcap 清理失败: %v",e)}
- if *cleanup{n,err:=a.cleanup(false);if err!=nil{log.Fatal(err)};log.Printf("清理结束：%d 条",n)}
- rows,e:=a.fetch();if e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停（候选查询期间收到暂停请求）");a.saveLastRun("paused",nil);return};log.Printf("候选查询失败: %v",e);a.saveLastRun("error",e);return}
- if e=a.run(rows,effectiveRounds);e!=nil{if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil);return};log.Printf("下载执行失败: %v",e);a.saveLastRun("error",e);return}
+ if err=a.recoverPendingCleanup();err!=nil{log.Fatalf("恢复上次未完成的缺失 mcap 清理失败: %v",err)}
+ if *cleanup{n,e:=a.cleanup(false);if e!=nil{log.Fatal(e)};log.Printf("清理结束：%d 条",n)}
+ rows,err:=a.fetch();if err!=nil{if ctx.Err()!=nil{log.Print("已安全暂停（候选查询期间收到暂停请求）");a.saveLastRun("paused",nil);return};log.Printf("候选查询失败: %v",err);a.saveLastRun("error",err);return}
+ if err=a.run(rows,effectiveRounds);err!=nil{if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil);return};log.Printf("下载执行失败: %v",err);a.saveLastRun("error",err);return}
  if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil)}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH);a.saveLastRun("finished",nil)}
+}
+
+type sqliteLogWriter struct{db *sql.DB;mu sync.Mutex}
+func(w *sqliteLogWriter)Write(p []byte)(int,error){
+ if w==nil||w.db==nil{return len(p),nil}
+ w.mu.Lock();defer w.mu.Unlock()
+ lines:=strings.Split(strings.TrimRight(string(p),"\r\n"),"\n")
+ for _,line:=range lines{if line==""{continue};_,_=w.db.Exec("INSERT INTO runtime_logs(created_at,message) VALUES(?,?)",controlTimestamp(),line)}
+ return len(p),nil
+}
+func initializeSQLiteDatabase(name string)error{
+ if strings.TrimSpace(name)==""{return errors.New("SQLite 路径不能为空")}
+ if err:=os.MkdirAll(filepath.Dir(name),0755);err!=nil{return err}
+ db,err:=sql.Open("sqlite",name);if err!=nil{return err};defer db.Close();db.SetMaxOpenConns(1)
+ if _,err=db.Exec("PRAGMA busy_timeout=30000; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;"+
+  "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);"+
+  "CREATE TABLE IF NOT EXISTS scenes(id INTEGER PRIMARY KEY AUTOINCREMENT,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE);"+
+  "CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL,target_count INTEGER NOT NULL DEFAULT 0,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]');"+
+  "CREATE TABLE IF NOT EXISTS task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL,PRIMARY KEY(task_id,position));"+
+  "CREATE TABLE IF NOT EXISTS disks(name TEXT PRIMARY KEY,position INTEGER NOT NULL,path TEXT NOT NULL,mountpoint TEXT NOT NULL);"+
+  "CREATE TABLE IF NOT EXISTS plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,note TEXT NOT NULL DEFAULT '',payload TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);"+
+  "CREATE TABLE IF NOT EXISTS control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL);"+
+  "CREATE TABLE IF NOT EXISTS downloads(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,parent_key TEXT,disk_name TEXT,target_path TEXT,partial_path TEXT,expected_bytes INTEGER,status TEXT NOT NULL DEFAULT 'pending',error TEXT,updated_at TEXT NOT NULL,started_at TEXT,completed_at TEXT);"+
+  "CREATE TABLE IF NOT EXISTS task_disk_assignments(task_name TEXT NOT NULL,disk_name TEXT NOT NULL,last_used_at TEXT NOT NULL,PRIMARY KEY(task_name,disk_name));"+
+  "CREATE TABLE IF NOT EXISTS downloaded_episodes(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,source_task_name TEXT,job_id INTEGER,sn_code TEXT,parent_key TEXT,disk_name TEXT,target_path TEXT,file_size INTEGER,content_time REAL,create_time TEXT,downloaded_at TEXT NOT NULL);"+
+  "CREATE TABLE IF NOT EXISTS runtime_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,message TEXT NOT NULL);"+
+  "CREATE TABLE IF NOT EXISTS process_state(id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,created REAL NOT NULL,mode TEXT NOT NULL,updated_at TEXT NOT NULL);"+
+  "CREATE INDEX IF NOT EXISTS idx_download_task_status ON downloads(task_name,status);"+
+  "CREATE INDEX IF NOT EXISTS idx_downloaded_task ON downloaded_episodes(task_name);"+
+  "CREATE INDEX IF NOT EXISTS idx_runtime_logs_created ON runtime_logs(created_at);");err!=nil{return err}
+ for _,item:=range webConfigSchema(){
+  key,ok:=item["key"].(string);if !ok{continue};value:=item["default"];if value==nil{continue}
+  encoded,e:=json.Marshal(value);if e!=nil{return e}
+  if _,e=db.Exec("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES(?,?,?)",key,string(encoded),controlTimestamp());e!=nil{return e}
+ }
+ var taskCount int
+ if err=db.QueryRow("SELECT COUNT(*) FROM tasks").Scan(&taskCount);err!=nil{return err}
+ if taskCount==0{
+  var defaults Config
+  if err=json.Unmarshal(defaultCountConfigJSON,&defaults);err!=nil{return err}
+  payload:=currentPlanPayload(defaults)
+  if err=persistPlanPayload(db,payload);err!=nil{return fmt.Errorf("写入内置默认任务失败: %w",err)}
+ }
+ return nil
+}
+func processIdentity(pid int,created float64)bool{
+ if pid<=0{return false}
+ proc,err:=process.NewProcess(int32(pid));if err!=nil{return false}
+ alive,err:=proc.IsRunning();if err!=nil||!alive{return false}
+ if created>0{ms,err:=proc.CreateTime();if err!=nil||math.Abs(float64(ms)/1000-created)>=2{return false}}
+ return true
 }
 
 type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time}
