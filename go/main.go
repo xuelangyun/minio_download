@@ -76,7 +76,7 @@ func main(){
  if *mode!="duration"&&*mode!="count"{log.Fatal("--mode 只能是 duration 或 count")}
  if e=loadConfigDB(&c,*mode);e!=nil{log.Fatalf("读取 SQLite 配置库失败: %v",e)}
  if e=c.normalize(*mode);e!=nil{log.Fatal(e)}
- if *webFlag{if e=serveWeb(c,*webHost,*webPort);e!=nil{log.Fatal(e)};return}
+ if *webFlag{if *webHost=="127.0.0.1"&&c.WebHost!=""{*webHost=c.WebHost};if *webPort==8765&&c.WebPort>0{*webPort=c.WebPort};if e=serveWeb(c,*webHost,*webPort);e!=nil{log.Fatal(e)};return}
  _=os.MkdirAll(filepath.Dir(c.StateDB),0755);_=os.MkdirAll(filepath.Dir(c.LockFile),0755);_=os.MkdirAll(c.LogDir,0755)
  f,e:=os.OpenFile(filepath.Join(c.LogDir,"minio_task_downloader.log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0644);if e!=nil{log.Fatal(e)};defer f.Close()
  log.SetOutput(io.MultiWriter(os.Stdout,f));log.SetFlags(log.Ldate|log.Ltime|log.Lmicroseconds)
@@ -532,8 +532,7 @@ func(a *WebAPI)configTest(w http.ResponseWriter,r *http.Request){
  if body.Target=="minio"{
   endpoint:=strings.TrimPrefix(strings.TrimPrefix(cfg.Endpoint,"https://"),"http://")
   secure:=cfg.SSL||strings.HasPrefix(cfg.Endpoint,"https://")
-  transport:=http.DefaultTransport.(*http.Transport).Clone()
-  if cfg.MinioSkipVerify{transport.TLSClientConfig=&tls.Config{InsecureSkipVerify:true} /* #nosec: explicitly configured by operator */}
+  transport:=minioHTTPTransport(cfg)
   client,e:=minio.New(endpoint,&minio.Options{Creds:credentials.NewStaticV4(cfg.AccessKey,cfg.SecretKey,""),Secure:secure,Region:cfg.Region,Transport:transport})
   if e==nil{var exists bool;exists,e=client.BucketExists(ctx,cfg.Bucket);if e==nil&&!exists{e=fmt.Errorf("MinIO bucket 不存在：%s",cfg.Bucket)}}
   if e!=nil{writeJSON(w,map[string]any{"ok":false,"message":fmt.Sprintf("%T: %v",e,e)});return}
@@ -840,15 +839,25 @@ func(a *App)startStopWatcher()<-chan struct{}{
 func postgresDSN(c Config) string {
  q:=url.Values{}
  q.Set("sslmode","prefer")
- q.Set("connect_timeout","10")
+ connectTimeout:=c.ConnectTimeout;if connectTimeout<=0{connectTimeout=10};q.Set("connect_timeout",strconv.Itoa(connectTimeout))
  q.Set("application_name","minio_task_downloader_go")
  u:=url.URL{Scheme:"postgres",User:url.UserPassword(c.PGUser,c.PGPassword),Host:net.JoinHostPort(c.PGHost,strconv.Itoa(c.PGPort)),Path:"/"+c.PGDB,RawQuery:q.Encode()}
  return u.String()
 }
+func minioHTTPTransport(c Config)*http.Transport{
+ t:=http.DefaultTransport.(*http.Transport).Clone()
+ connect:=c.ConnectTimeout;if connect<=0{connect=10}
+ read:=c.ReadTimeout;if read<=0{read=120}
+ dialer:=&net.Dialer{Timeout:time.Duration(connect)*time.Second,KeepAlive:30*time.Second}
+ t.DialContext=dialer.DialContext
+ t.TLSHandshakeTimeout=time.Duration(connect)*time.Second
+ t.ResponseHeaderTimeout=time.Duration(read)*time.Second
+ if c.MinioSkipVerify{t.TLSClientConfig=&tls.Config{InsecureSkipVerify:true} /* #nosec: explicitly configured by operator */}
+ return t
+}
 func(a *App)open()error{
  endpoint:=strings.TrimPrefix(strings.TrimPrefix(a.cfg.Endpoint,"https://"),"http://");secure:=a.cfg.SSL||strings.HasPrefix(a.cfg.Endpoint,"https://")
- transport:=http.DefaultTransport.(*http.Transport).Clone()
- if a.cfg.MinioSkipVerify{transport.TLSClientConfig=&tls.Config{InsecureSkipVerify:true} /* #nosec: explicitly configured to match Python minio.cert_check=false */}
+ transport:=minioHTTPTransport(a.cfg)
  mc,e:=minio.New(endpoint,&minio.Options{Creds:credentials.NewStaticV4(a.cfg.AccessKey,a.cfg.SecretKey,""),Secure:secure,Region:a.cfg.Region,Transport:transport});if e!=nil{return e};a.mc=mc
  pg:=postgresDSN(a.cfg)
  p,e:=sql.Open("pgx",pg);if e!=nil{return e};defer p.Close();ctx,cancel:=context.WithTimeout(a.ctx,15*time.Second);defer cancel();if e=p.PingContext(ctx);e!=nil{return fmt.Errorf("PostgreSQL 连接失败: %w",e)}
