@@ -880,3 +880,28 @@ func TestPlanReplaceInheritsCurrentDataVersion(t *testing.T) {
 		t.Fatalf("expected current version to be inherited, got %q", api.cfg.DataVersion)
 	}
 }
+
+func TestWebConfigDisksPersistsAndDefaultsMountpoint(t *testing.T) {
+	api := newPlanTestAPI(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/config/disks", strings.NewReader(`{"disks":[{"name":"diskA","path":"/mnt/data"}]}`))
+	api.configDisks(rec, req)
+	if rec.Code != http.StatusOK { t.Fatalf("disk update failed: %d %s", rec.Code, rec.Body.String()) }
+	if len(api.cfg.Disks) != 1 || api.cfg.Disks[0].Mountpoint != "/mnt/data" { t.Fatalf("disk config not updated/defaulted: %#v", api.cfg.Disks) }
+	db, err := sql.Open("sqlite", api.cfg.ConfigDB)
+	if err != nil { t.Fatal(err) }
+	defer db.Close()
+	var name, path, mount string
+	if err := db.QueryRow("SELECT name,path,mountpoint FROM disks WHERE name='diskA'").Scan(&name,&path,&mount); err != nil { t.Fatal(err) }
+	if path != "/mnt/data" || mount != "/mnt/data" { t.Fatalf("unexpected persisted disk: %s %s",path,mount) }
+}
+
+func TestWebConfigDisksRejectsDuplicateNamesWithoutChangingConfig(t *testing.T) {
+	api := newPlanTestAPI(t)
+	api.cfg.Disks = []DiskConfig{{Name:"existing",Path:"/mnt/existing",Mountpoint:"/mnt/existing"}}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/config/disks", strings.NewReader(`{"disks":[{"name":"same","path":"/mnt/a"},{"name":"same","path":"/mnt/b"}]}`))
+	api.configDisks(rec, req)
+	if rec.Code != http.StatusBadRequest { t.Fatalf("expected 400, got %d: %s",rec.Code,rec.Body.String()) }
+	if len(api.cfg.Disks)!=1 || api.cfg.Disks[0].Name!="existing" { t.Fatalf("invalid update mutated in-memory config: %#v",api.cfg.Disks) }
+}
