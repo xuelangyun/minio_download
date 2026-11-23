@@ -139,3 +139,15 @@ func TestEpisodePathsUseParentKeyLeaf(t *testing.T) {
 		t.Fatalf("partial leaf mismatch: %q", partial)
 	}
 }
+
+func TestNormalizeParentKey(t *testing.T) {
+	got, err := normalizeParentKey("/prefix/episode/")
+	if err != nil || got != "prefix/episode" {
+		t.Fatalf("normalization failed: got=%q err=%v", got, err)
+	}
+	for _, bad := range []string{"", "/", "../escape", "prefix/../escape", "./episode"} {
+		if _, err := normalizeParentKey(bad); err == nil {
+			t.Errorf("expected invalid parent_key %q to fail", bad)
+		}
+	}
+}
