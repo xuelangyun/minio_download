@@ -1044,6 +1044,12 @@ func TestMinioTransportUsesConfiguredTimeouts(t *testing.T) {
 
 func TestWebConfigTasksResetRestoresDefaultsAndPreservesTags(t *testing.T) {
  api:=newPlanTestAPI(t)
+ db,err:=sql.Open("sqlite",api.cfg.ConfigDB);if err!=nil{t.Fatal(err)}
+ schema:=`CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);
+ CREATE TABLE scenes(id INTEGER PRIMARY KEY AUTOINCREMENT,position INTEGER NOT NULL,name TEXT NOT NULL);
+ CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL,target_count INTEGER NOT NULL,directory TEXT NOT NULL,tags TEXT NOT NULL);
+ CREATE TABLE task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL);`
+ if _,err=db.Exec(schema);err!=nil{t.Fatal(err)};db.Close()
  api.cfg.Tasks=append(api.cfg.Tasks,Task{Scene:"Household(家居)",Name:"桌面收纳",Dir:"桌面收纳",TargetCount:2,Tags:[]string{"用户自定义标签"}})
  rec:=httptest.NewRecorder()
  api.configTasksReset(rec,httptest.NewRequest(http.MethodPost,"/api/config/tasks/reset",strings.NewReader(`{}`)))
