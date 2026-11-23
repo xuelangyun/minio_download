@@ -184,7 +184,7 @@
 
 ### `POST /api/config/tasks/reset`
 
-恢复为程序内置的默认任务列表（同名任务的标签保留）。`{ "ok": true }`。
+恢复为 Go 内置 count 模式默认任务列表（同名任务的标签保留）。`{ "ok": true }`。此接口当前只适用于 Go count 模式。
 
 ### `PUT /api/config/disks`
 
