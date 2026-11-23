@@ -1035,7 +1035,21 @@ func(a *App)completed(id string)bool{
  err=a.db.QueryRow("SELECT target_path FROM downloaded_episodes WHERE episode_id=?",id).Scan(&p)
  return err==nil&&p.Valid&&a.completedPath(p.String)
 }
-func(a *App)stats(task string)(float64,int){rows,err:=a.db.Query("SELECT content_time,target_path FROM downloaded_episodes WHERE task_name=?",task);if err!=nil{return 0,0};defer rows.Close();var seconds float64;count:=0;for rows.Next(){var v sql.NullFloat64;var p sql.NullString;if rows.Scan(&v,&p)!=nil{continue};if p.Valid&&a.completedPath(p.String){seconds+=v.Float64;count++}};return seconds,count}
+func(a *App)stats(task string)(float64,int,error){
+ rows,err:=a.db.Query("SELECT content_time,target_path FROM downloaded_episodes WHERE task_name=?",task)
+ if err!=nil{return 0,0,fmt.Errorf("读取任务 %s 的完成统计失败: %w",task,err)}
+ defer rows.Close()
+ var seconds float64
+ count:=0
+ for rows.Next(){
+  var v sql.NullFloat64
+  var p sql.NullString
+  if err:=rows.Scan(&v,&p);err!=nil{return 0,0,fmt.Errorf("读取任务 %s 的完成统计记录失败: %w",task,err)}
+  if p.Valid&&a.completedPath(p.String){seconds+=v.Float64;count++}
+ }
+ if err:=rows.Err();err!=nil{return 0,0,fmt.Errorf("遍历任务 %s 的完成统计失败: %w",task,err)}
+ return seconds,count,nil
+}
 func(a *App)assign(task,disk string)error{tx,err:=a.db.Begin();if err!=nil{return err};defer tx.Rollback();if _,err=tx.Exec("DELETE FROM task_disk_assignments WHERE task_name=?",task);err!=nil{return err};if _,err=tx.Exec("INSERT INTO task_disk_assignments(task_name,disk_name,last_used_at) VALUES(?,?,?)",task,disk,time.Now().UTC().Format(time.RFC3339Nano));err!=nil{return err};return tx.Commit()}
 func(a *App)assigned(task string)string{var d string;_=a.db.QueryRow("SELECT disk_name FROM task_disk_assignments WHERE task_name=? ORDER BY last_used_at DESC LIMIT 1",task).Scan(&d);return d}
 func(a *App)record(e Episode,d DiskConfig,final string)error{
@@ -1136,7 +1150,7 @@ func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,e
    if !a.recheck&&(state=="missing_task_info"||state=="missing_mcap"){skipped++;continue}
    todo=append(todo,ep)
   }
-  _,downloaded:=a.stats(task.Name);gap:=task.TargetCount-downloaded
+  _,downloaded,statsErr:=a.stats(task.Name);if statsErr!=nil{return nil,statsErr};gap:=task.TargetCount-downloaded
   if gap<=0{validGroups[task.Name]=selected;continue}
   chosenCount:=0
   for pos:=0;pos<len(todo)&&chosenCount<gap;{
@@ -1206,7 +1220,7 @@ func(a *App)run(all []Episode,nround int)error{
  if err:=a.syncLocalCopies(groups);err!=nil{return err}
  if a.mode=="count"{var err error;groups,err=a.prevalidateCount(groups);if err!=nil{if a.ctx.Err()!=nil{return nil};return err}}
  for r:=1;r<=nround;r++{if a.ctx.Err()!=nil{return nil};selected:=map[string][]Episode{}
-  for _,t:=range a.cfg.Tasks{s,n:=a.stats(t.Name);target,used:=t.TargetHours*3600,s;if a.mode=="count"{target=float64(t.TargetCount);used=float64(n)}
+  for _,t:=range a.cfg.Tasks{s,n,statsErr:=a.stats(t.Name);if statsErr!=nil{return statsErr};target,used:=t.TargetHours*3600,s;if a.mode=="count"{target=float64(t.TargetCount);used=float64(n)}
    candidates:=groups[t.Name]
    if a.mode=="duration"{missing:=map[string]bool{};for _,ep:=range candidates{missing[ep.ID]=a.isMissingStatus(ep.ID)};sort.SliceStable(candidates,func(i,j int)bool{return !missing[candidates[i].ID]&&missing[candidates[j].ID]})}
    addSec:=0.0;addN:=0
