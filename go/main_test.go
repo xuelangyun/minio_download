@@ -658,3 +658,45 @@ func TestWebRunRejectsUnsupportedMode(t *testing.T) {
 		t.Fatalf("expected unsupported mode to be rejected, got %d", recorder.Code)
 	}
 }
+
+func TestWebConfigMasksSecretsAndReturnsTaskTags(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "config.sqlite3")
+	db, err := sql.Open("sqlite", name)
+	if err != nil { t.Fatal(err) }
+	if _, err := db.Exec("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)"); err != nil { t.Fatal(err) }
+	for key, value := range map[string]any{
+		"minio.endpoint": "http://minio.example:9000",
+		"minio.secret_key": "minio-secret",
+		"pg.password": "pg-secret",
+		"web.token_hash": "pbkdf2_sha256$1$73616c74$00",
+	} {
+		raw, marshalErr := json.Marshal(value)
+		if marshalErr != nil { t.Fatal(marshalErr) }
+		if _, err := db.Exec("INSERT INTO settings(key,value) VALUES(?,?)", key, string(raw)); err != nil { t.Fatal(err) }
+	}
+	if err := db.Close(); err != nil { t.Fatal(err) }
+
+	api := &WebAPI{
+		cfg: Config{
+			ConfigDB: name, DataVersion: "银河2.2数据",
+			Tasks: []Task{{Name: "桌面收纳", Scene: "Household", TargetCount: 40, Aliases: []string{"0930桌面收纳"}, Tags: []string{"家居"}}},
+			Disks: []DiskConfig{{Name: "disk1", Path: "/mnt/data", Mountpoint: "/mnt/data"}},
+		},
+		tokenHash: "pbkdf2_sha256$1$73616c74$00",
+	}
+	recorder := httptest.NewRecorder()
+	api.config(recorder, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if recorder.Code != http.StatusOK { t.Fatalf("unexpected status %d: %s", recorder.Code, recorder.Body.String()) }
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil { t.Fatal(err) }
+	values := response["values"].(map[string]any)
+	if values["minio.endpoint"] != "http://minio.example:9000" { t.Fatalf("regular setting missing: %#v", values["minio.endpoint"]) }
+	if values["minio.secret_key"] != "" || values["pg.password"] != "" { t.Fatalf("secret leaked to response: %#v", values) }
+	secrets := response["secrets_set"].([]any)
+	if len(secrets) != 2 { t.Fatalf("expected two masked secrets, got %#v", secrets) }
+	if response["token_set"] != true { t.Fatalf("expected token_set=true, got %#v", response["token_set"]) }
+	tasks := response["tasks"].(map[string]any)["scenes"].([]any)
+	task := tasks[0].(map[string]any)["tasks"].([]any)[0].(map[string]any)
+	if task["count"] != float64(40) || task["tags"].([]any)[0] != "家居" { t.Fatalf("task config/tags missing: %#v", task) }
+	if len(response["schema"].([]any)) < 20 { t.Fatalf("configuration schema incomplete: %d", len(response["schema"].([]any))) }
+}
