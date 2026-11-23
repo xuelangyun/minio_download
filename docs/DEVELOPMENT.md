@@ -603,7 +603,7 @@ Go 实现位于 `go/`，与 Python 版本并行维护，不替换 `py_sample/` �
 
 | 文件 | 说明 |
 |---|---|
-| `go/main.go` | CLI、PostgreSQL 候选查询、任务调度、MinIO 下载、SQLite 状态 |
+| `go/main.go` | CLI、PostgreSQL 候选查询、任务调度、MinIO 下载、兼容 Python 历史完成台账的 SQLite 状态恢复 |
 | `go/config.example.json` | 按时长任务模板，对应 `py_shell/minio_task_downloader.py` |
 | `go/config.count.example.json` | 按条数任务模板，对应 `py_shell/minio_task_downloader_by_count.py`；43 个任务，默认每任务 40 条 |
 | `.github/workflows/go-release.yml` | Windows amd64、Linux amd64、Linux arm64 交叉构建与打包 |
@@ -619,6 +619,6 @@ go build -o minio-download .
 
 按时长运行使用时长模板；按条数运行使用条数模板。两个模板的任务名、历史别名和目标目录必须分开维护，不能简单把两份 Python 清单合并，因为部分任务在两种脚本中的当前名称 / 历史别名方向不同。
 
-Go 首版已覆盖：质量过滤、任务别名归并、排序后去重、按时长 / 条数选取、条数模式并发预检必需文件并补足有效候选、时长模式将上次缺文件任务排到候选末尾、按实际任务目录和磁盘负载分配任务、任务级空间预检（扣除已有临时文件大小）、每盘 episode 并发、单条内文件并发、Range 续传、ETag 条件请求、标准 MD5 ETag 校验、暂存目录清理、文件锁、SQLite 状态记录和原子目录发布。
+Go 首版已覆盖：质量过滤、任务别名归并、排序后去重、按时长 / 条数选取、条数模式并发预检必需文件并补足有效候选、时长模式将上次缺文件任务排到候选末尾、按实际任务目录和磁盘负载分配任务、任务级空间预检（扣除已有临时文件大小，并累计预留同一磁盘上排队任务的预计空间）、每盘 episode 并发、单条内文件并发、Range 续传、ETag 条件请求、标准 MD5 ETag 校验、暂存目录清理、文件锁、SQLite 状态记录和原子目录发布。
 
 **尚未达到 Python 全功能等价**：配置 SQLite、Web 控制台 / API、任务方案与标签、跨进程暂停控制、PID 与强制结束、磁盘空间原子预留 / 写满换盘、完整 Python 状态机和历史状态库兼容。Go 当前的状态表与 Python 主要表字段尽量对齐，但不应假设两种实现可无条件共享同一个状态库。Go 首版必须先通过本地 `go test`、三个目标平台交叉构建和真实 MinIO / PostgreSQL 小样本联调，才可用于正式数据。
