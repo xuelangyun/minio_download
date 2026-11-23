@@ -168,7 +168,7 @@ func(a *App)record(e Episode,d DiskConfig,final string)error{
 }
 func(a *App)fetch()([]Episode,error){
  names:=[]string{};aliases:=map[string]string{};for _,t:=range a.cfg.Tasks{names=append(names,t.Name);for _,x:=range t.Aliases{names=append(names,x);aliases[x]=t.Name}}
- pg:=fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=prefer connect_timeout=10",a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.PGUser,a.cfg.PGPassword)
+ pg:=postgresDSN(a.cfg)
  db,e:=sql.Open("pgx",pg);if e!=nil{return nil,e};defer db.Close()
  quality:="j.quality_status NOT IN ('不合格','未解析','未质检')";if a.cfg.IncludeNull{quality="(j.quality_status IS NULL OR "+quality+")"}
  q:="SELECT j.episode_id::text,j.job_id,j.task_name,COALESCE(j.sn_code,''),j.parent_key,COALESCE(j.file_size,0),COALESCE(j.content_time,0),j.create_time "+
