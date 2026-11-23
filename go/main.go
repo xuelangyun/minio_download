@@ -1317,7 +1317,19 @@ func acquireSemaphore(ctx context.Context,sem chan struct{})bool{
 }
 func(a *App)downloadTask(b batch)error{
  sem:=make(chan struct{},a.cfg.Workers);var wg sync.WaitGroup;var mu sync.Mutex;var first error
- for _,ep:=range b.rows{if !acquireSemaphore(a.ctx,sem){break};wg.Add(1);go func(e Episode){defer wg.Done();defer func(){<-sem}();if err:=a.downloadOne(b.t,b.d,e);err!=nil{mu.Lock();if first==nil{first=err};mu.Unlock()}}(ep)}
+ var stopStarting atomic.Bool
+ for _,ep:=range b.rows{
+  if !acquireSemaphore(a.ctx,sem){break}
+  wg.Add(1)
+  go func(e Episode){
+   defer wg.Done();defer func(){<-sem}()
+   if stopStarting.Load(){return}
+   if err:=a.downloadOne(b.t,b.d,e);err!=nil{
+    if errors.Is(err,errInsufficientDiskSpace){stopStarting.Store(true)}
+    mu.Lock();if first==nil{first=err};mu.Unlock()
+   }
+  }(ep)
+ }
  wg.Wait();return first
 }
 func episodePaths(version string,t Task,d DiskConfig,parentKey string)(string,string){
@@ -1417,6 +1429,10 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  }
  if err:=sweepPartial(partial,e.ParentKey,objects);err!=nil{return a.fail(e,d,final,partial,err)}
  sem:=make(chan struct{},a.cfg.FileWorkers);var wg sync.WaitGroup;var total atomic.Int64;var mu sync.Mutex;var first error
+ // Serialize the admission check with the first capacity failure so workers
+ // that have not reserved space yet cannot start additional object downloads.
+ var admissionMu sync.Mutex
+ stopStarting:=false
  for _,item:=range objects{
   item:=item
   if !acquireSemaphore(a.ctx,sem){break}
@@ -1427,7 +1443,14 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
    dst,err:=safeJoin(partial,rel)
    if err==nil{err=os.MkdirAll(filepath.Dir(dst),0755)}
    if err==nil{
+    admissionMu.Lock()
+    if stopStarting {
+     admissionMu.Unlock()
+     return
+    }
     reservation,spaceErr:=a.reserveObjectSpace(d,item.Size)
+    if errors.Is(spaceErr,errInsufficientDiskSpace){stopStarting=true}
+    admissionMu.Unlock()
     if spaceErr!=nil{err=spaceErr}else{reservation.Consume(existingPartialBytes(dst,item.Size));defer reservation.Release();err=a.fetchObject(item.Key,dst,item,reservation)}
    }
    if err!=nil{mu.Lock();if first==nil{first=err};mu.Unlock();return}
