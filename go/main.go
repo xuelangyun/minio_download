@@ -224,6 +224,7 @@ func validateDiskSet(disks []DiskConfig)error{
  parts,err:=disk.Partitions(false);if err!=nil{return fmt.Errorf("读取磁盘挂载信息失败: %w",err)}
  devices:=map[string]string{}
  for _,d:=range disks{
+  if err:=validateDisk(d);err!=nil{return err}
   mount:=d.Mountpoint;if mount==""{mount=d.Path};resolved,err:=resolvePathWithMissingTail(mount);if err!=nil{return err}
   for _,part:=range parts{
    got,e:=resolvePathWithMissingTail(part.Mountpoint);if e!=nil{continue}
