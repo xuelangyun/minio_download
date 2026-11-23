@@ -93,7 +93,7 @@ func main(){
  if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil)}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH);a.saveLastRun("finished",nil)}
 }
 
-type WebAPI struct{cfg Config;db *sql.DB;tokenHash string}
+type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;authMu sync.Mutex;failures map[string][]time.Time;lockouts map[string]time.Time}
 func serveWeb(c Config,host string,port int)error{
  if port<1||port>65535{return errors.New("web-port 必须在 1 到 65535 之间")}
  if err:=os.MkdirAll(filepath.Dir(c.StateDB),0755);err!=nil{return err}
@@ -803,11 +803,21 @@ func writeJSONStatus(w http.ResponseWriter,status int,v any){w.Header().Set("Con
 func(a *WebAPI)authorized(r *http.Request)bool{
  if origin:=r.Header.Get("Origin");origin!=""{u,err:=url.Parse(origin);if err!=nil||!strings.EqualFold(u.Host,r.Host){return false}}
  if a.tokenHash==""{return isLoopbackHost(r.Hostname())&&isLoopbackRemote(r.RemoteAddr)&&r.Header.Get("X-Forwarded-For")==""}
- supplied:=strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"),"Bearer "));parts:=strings.Split(a.tokenHash,"$")
- if len(parts)!=4||parts[0]!="pbkdf2_sha256"{return false}
- iterations,err:=strconv.Atoi(parts[1]);if err!=nil||iterations<1||iterations>1000000{return false}
+ supplied:=strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"),"Bearer "));addr:=r.RemoteAddr;now:=time.Now()
+ a.authMu.Lock()
+ if a.lockouts!=nil{if until:=a.lockouts[addr];now.Before(until){a.authMu.Unlock();return false}}
+ if a.failures==nil{a.failures=map[string][]time.Time{}};if a.lockouts==nil{a.lockouts=map[string]time.Time{}}
+ attempts:=a.failures[addr];kept:=attempts[:0];for _,at:=range attempts{if now.Sub(at)<=5*time.Minute{kept=append(kept,at)}};attempts=kept
+ if len(attempts)>=8&&now.Sub(attempts[len(attempts)-1])<60*time.Second{a.lockouts[addr]=attempts[len(attempts)-1].Add(60*time.Second);a.authMu.Unlock();return false}
+ a.authMu.Unlock()
+ parts:=strings.Split(a.tokenHash,"$");if len(parts)!=4||parts[0]!="pbkdf2_sha256"{return false}
+ iterations,err:=strconv.Atoi(parts[1]);if err!=nil||iterations<1||iterations>200000{return false}
  salt,err:=hex.DecodeString(parts[2]);if err!=nil{return false};want,err:=hex.DecodeString(parts[3]);if err!=nil{return false}
- got:=pbkdf2SHA256([]byte(supplied),salt,iterations,len(want));return hmac.Equal(got,want)
+ got:=pbkdf2SHA256([]byte(supplied),salt,iterations,len(want));valid:=hmac.Equal(got,want)
+ a.authMu.Lock();defer a.authMu.Unlock()
+ if valid{delete(a.failures,addr);delete(a.lockouts,addr);return true}
+ if supplied!=""{a.failures[addr]=append(attempts,now);if len(a.failures[addr])>=8{a.lockouts[addr]=now.Add(60*time.Second)}}
+ return false
 }
 func pbkdf2SHA256(password,salt []byte,iterations,keyLen int)[]byte{
  hLen:=sha256.Size;blocks:=(keyLen+hLen-1)/hLen;out:=make([]byte,0,blocks*hLen)
