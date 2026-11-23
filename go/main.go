@@ -1325,6 +1325,7 @@ func episodePaths(version string,t Task,d DiskConfig,parentKey string)(string,st
  leaf:=safe(path.Base(strings.Trim(parentKey,"/")))
  return filepath.Join(root,leaf),filepath.Join(root,"."+leaf+".partial")
 }
+var errInsufficientDiskSpace=errors.New("动态磁盘空间不足")
 type spaceReservation struct { app *App; diskName string; mu sync.Mutex; remaining uint64; consumed uint64 }
 func(a *App)reserveObjectSpace(d DiskConfig,size int64)(*spaceReservation,error){
  if size<0{return nil,fmt.Errorf("对象大小无效: %d",size)}
@@ -1335,7 +1336,7 @@ func(a *App)reserveObjectSpace(d DiskConfig,size int64)(*spaceReservation,error)
  reserved:=a.spaceInFlight[d.Name]
  minFree:=uint64(math.Ceil(a.cfg.MinFreeGB*1024*1024*1024))
  next,ok:=addSpaceReservations(reserved,uint64(size),minFree)
- if !ok||usage.Free<next{a.spaceMu.Unlock();return nil,fmt.Errorf("动态磁盘空间不足，暂停启动新对象: disk=%s free=%d reserved=%d object=%d min_free=%d",d.Name,usage.Free,reserved,size,minFree)}
+ if !ok||usage.Free<next{a.spaceMu.Unlock();return nil,fmt.Errorf("%w，暂停启动新对象: disk=%s free=%d reserved=%d object=%d min_free=%d",errInsufficientDiskSpace,d.Name,usage.Free,reserved,size,minFree)}
  a.spaceInFlight[d.Name]=reserved+uint64(size)
  a.spaceMu.Unlock()
  return &spaceReservation{app:a,diskName:d.Name,remaining:uint64(size)},nil
@@ -1434,7 +1435,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
   }()
  }
  wg.Wait()
- if first!=nil{return a.fail(e,d,final,partial,first)}
+ if first!=nil{if errors.Is(first,errInsufficientDiskSpace){_=a.set(e,d,final,partial,"waiting_space",first.Error());return first};return a.fail(e,d,final,partial,first)}
  if a.ctx.Err()!=nil{return a.fail(e,d,final,partial,a.ctx.Err())}
  if total.Load()==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
  if err:=os.RemoveAll(final);err!=nil{return a.fail(e,d,final,partial,err)};if err:=os.Rename(partial,final);err!=nil{return a.fail(e,d,final,partial,err)};if *a.cfg.Fsync{syncDirectory(filepath.Dir(final))}
