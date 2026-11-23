@@ -59,7 +59,7 @@ func TestWindowsObjectNameRules(t *testing.T) {
 	}
 }
 
-func validTestConfig() Config {
+func validTestConfig(t *testing.T) Config {
 	return Config{
 		Endpoint: "http://127.0.0.1:9000", AccessKey: "access", SecretKey: "secret", Bucket: "bucket",
 		PGHost: "127.0.0.1", PGDB: "db", PGUser: "user", PGPassword: "password",
@@ -69,7 +69,7 @@ func validTestConfig() Config {
 }
 
 func TestConfigRejectsAliasCollision(t *testing.T) {
-	cfg := validTestConfig()
+	cfg := validTestConfig(t)
 	cfg.Tasks = append(cfg.Tasks, Task{Name: "task-b", Scene: "scene-b", Dir: "dir-b", Aliases: []string{"task-a"}})
 	if err := cfg.normalize("count"); err == nil {
 		t.Fatal("expected alias/current task name collision to fail")
