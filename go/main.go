@@ -210,6 +210,7 @@ func(a *App)syncLocalCopies(groups map[string][]Episode)error{
 func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,error){
  validGroups:=map[string][]Episode{}
  for _,task:=range a.cfg.Tasks{
+  if a.ctx.Err()!=nil{return nil,a.ctx.Err()}
   candidates:=groups[task.Name];if len(candidates)==0{continue}
   selected:=make([]Episode,0)
   todo:=make([]Episode,0,len(candidates));skipped:=0
@@ -218,13 +219,14 @@ func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,e
    if ep.Size<=0{d:=a.cfg.Disks[0];if err:=a.set(ep,d,"","","invalid_size","file_size 无效");err!=nil{return nil,err};skipped++;continue}
    var state string
    _=a.db.QueryRow("SELECT status FROM downloads WHERE episode_id=?",ep.ID).Scan(&state)
-   if !a.recheck&&(state=="missing_task_info"||state=="missing_mcap"){continue}
+   if !a.recheck&&(state=="missing_task_info"||state=="missing_mcap"){skipped++;continue}
    todo=append(todo,ep)
   }
   _,downloaded:=a.stats(task.Name);gap:=task.TargetCount-downloaded
   if gap<=0{validGroups[task.Name]=selected;continue}
   chosenCount:=0
   for pos:=0;pos<len(todo)&&chosenCount<gap;{
+   if a.ctx.Err()!=nil{return nil,a.ctx.Err()}
    batchSize:=gap-chosenCount;if batchSize>len(todo)-pos{batchSize=len(todo)-pos}
    batch:=todo[pos:pos+batchSize];pos+=batchSize
    type checkResult struct{episode Episode;status,detail string;err error}
@@ -252,7 +254,7 @@ func(a *App)isMissingStatus(id string)bool{
 func(a *App)run(all []Episode,nround int)error{
  groups:=map[string][]Episode{};for _,e:=range all{groups[e.Task]=append(groups[e.Task],e)}
  if err:=a.syncLocalCopies(groups);err!=nil{return err}
- if a.mode=="count"{var err error;groups,err=a.prevalidateCount(groups);if err!=nil{return err}}
+ if a.mode=="count"{var err error;groups,err=a.prevalidateCount(groups);if err!=nil{if a.ctx.Err()!=nil{return nil};return err}}
  for r:=1;r<=nround;r++{if a.ctx.Err()!=nil{return nil};selected:=map[string][]Episode{}
   for _,t:=range a.cfg.Tasks{s,n:=a.stats(t.Name);target,used:=t.TargetHours*3600,s;if a.mode=="count"{target=float64(t.TargetCount);used=float64(n)}
    candidates:=groups[t.Name]
