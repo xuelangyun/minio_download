@@ -257,7 +257,7 @@ func TestReserveObjectSpaceConcurrentAccounting(t *testing.T) {
 func TestProgressWriterReportsOnlyWrittenBytes(t *testing.T) {
  var out bytes.Buffer
  var reported int64
- writer:=progressWriter{writer:&out,onWrite:func(n int64){reported+=n}}
+ writer:=&progressWriter{writer:&out,onWrite:func(n int64){reported+=n}}
  payload:=[]byte("transfer-data")
  n,err:=writer.Write(payload)
  if err!=nil{t.Fatal(err)}
@@ -266,6 +266,15 @@ func TestProgressWriterReportsOnlyWrittenBytes(t *testing.T) {
  }
 }
 
+func TestProgressWriterSyncsAtConfiguredInterval(t *testing.T) {
+ var out bytes.Buffer
+ syncs:=0
+ writer:=&progressWriter{writer:&out,syncEvery:4,syncFn:func()error{syncs++;return nil}}
+ if _,err:=writer.Write([]byte("abc"));err!=nil{t.Fatal(err)}
+ if syncs!=0{t.Fatalf("sync count after 3 bytes=%d want 0",syncs)}
+ if _,err:=writer.Write([]byte("de"));err!=nil{t.Fatal(err)}
+ if syncs!=1{t.Fatalf("sync count after crossing interval=%d want 1",syncs)}
+}
 func TestSpaceReservationConsumeAndRelease(t *testing.T) {
  app:=&App{cfg:Config{MinFreeGB:0}}
  diskCfg:=DiskConfig{Name:"disk-a",Path:t.TempDir()}
