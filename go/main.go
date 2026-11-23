@@ -385,7 +385,7 @@ func addSpaceReservations(reserved,additional,minFree uint64)(uint64,bool){
  return total+minFree,true
 }
 func(a *App)downloadSelected(sel map[string][]Episode)error{
- loads:=map[string]int{};existing:=map[string]*DiskConfig{}
+ loads:=map[string]int{};existing:=map[string]*DiskConfig{};folderDisk:=map[string]*DiskConfig{}
  // Existing task footprints (including .partial directories) are authoritative.
  // Stale SQLite assignments without any on-disk data are deliberately ignored.
  for _,task:=range a.cfg.Tasks{
@@ -394,14 +394,18 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
    has,err:=taskRootHasEntries(a.cfg.DataVersion,task,a.cfg.Disks[i]);if err!=nil{return err}
    if has{if found!=nil{return fmt.Errorf("任务 %s 的目录同时存在于多块磁盘（%s、%s）",task.Name,found.Name,a.cfg.Disks[i].Name)};found=&a.cfg.Disks[i]}
   }
-  if found!=nil{existing[task.Name]=found;loads[found.Name]++}
+  if found!=nil{existing[task.Name]=found;folder:=safe(taskDir(task));if assigned,ok:=folderDisk[folder];ok&&assigned.Name!=found.Name{return fmt.Errorf("共用目录 %s 的任务分布在不同磁盘（%s、%s）",folder,assigned.Name,found.Name)};if _,ok:=folderDisk[folder];!ok{folderDisk[folder]=found;loads[found.Name]++}}
  }
  byDisk:=map[string][]batch{};waitingSpace:=false;reservedBytes:=map[string]uint64{}
  for _,task:=range a.cfg.Tasks{
   rows:=sel[task.Name];if len(rows)==0{continue}
   d:=existing[task.Name]
   if d==nil{
-   for i:=range a.cfg.Disks{candidate:=&a.cfg.Disks[i];if d==nil||loads[candidate.Name]<loads[d.Name]{d=candidate}}
+   folder:=safe(taskDir(task))
+   if shared,ok:=folderDisk[folder];ok{d=shared}else{
+    for i:=range a.cfg.Disks{candidate:=&a.cfg.Disks[i];if d==nil||loads[candidate.Name]<loads[d.Name]{d=candidate}}
+    if d!=nil{folderDisk[folder]=d;loads[d.Name]++}
+   }
   }
   if d==nil{return errors.New("没有配置目标磁盘")}
   if err:=os.MkdirAll(d.Path,0755);err!=nil{return err}
@@ -424,7 +428,6 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
   }
   reservedBytes[d.Name]+=estimated
   if err:=a.assign(task.Name,d.Name);err!=nil{return fmt.Errorf("保存任务磁盘分配失败 %s: %w",task.Name,err)}
-  if existing[task.Name]==nil{loads[d.Name]++}
   byDisk[d.Name]=append(byDisk[d.Name],batch{task,*d,rows})
  }
  var wg sync.WaitGroup;errs:=make(chan error,len(byDisk))
