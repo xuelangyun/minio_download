@@ -182,6 +182,14 @@ func TestAcquireNamedDiskLocksSortsAndReleasesPartialSet(t *testing.T) {
  if err!=nil{t.Fatalf("reacquire locks after release: %v",err)}
  release2()
 }
+func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
+ dir:=t.TempDir();dst:=filepath.Join(dir,"object.bin")
+ if got:=remainingObjectBytes(dst,100);got!=100{t.Fatalf("missing partial: got %d want 100",got)}
+ if err:=os.WriteFile(dst+".minio-tmp",[]byte("12345"),0600);err!=nil{t.Fatal(err)}
+ if got:=remainingObjectBytes(dst,100);got!=95{t.Fatalf("partial resume: got %d want 95",got)}
+ if err:=os.WriteFile(dst+".minio-tmp",make([]byte,100),0600);err!=nil{t.Fatal(err)}
+ if got:=remainingObjectBytes(dst,100);got!=100{t.Fatalf("complete temp will be discarded and redownloaded: got %d want 100",got)}
+}
 func TestAddSpaceReservations(t *testing.T) {
 	got, ok := addSpaceReservations(100, 200, 30)
 	if !ok || got != 330 {
