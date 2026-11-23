@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"net/url"
 	"os"
@@ -242,4 +243,58 @@ func TestChooseTaskDiskKeepsSharedOutputFolderTogether(t *testing.T) {
 	if loads[chosenFirst.Name] != 1 {
 		t.Fatalf("shared folder should count as one disk load, got loads=%v", loads)
 	}
+}
+
+func TestSQLiteStopRequestCanBeSetAndCleared(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if err := writeStopRequest(db); err != nil {
+		t.Fatal(err)
+	}
+	var value string
+	if err := db.QueryRow("SELECT value FROM control WHERE key='stop_requested'").Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	if value != "1" {
+		t.Fatalf("expected stop_requested=1, got %q", value)
+	}
+	app := &App{db: db}
+	if err := app.clearStopRequest(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT value FROM control WHERE key='stop_requested'").Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	if value != "0" {
+		t.Fatalf("expected stop_requested=0 after startup cleanup, got %q", value)
+	}
+}
+
+func TestStopWatcherCancelsApplicationContext(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "watcher.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	app := &App{db: db, ctx: ctx, cancel: cancel}
+	done := app.startStopWatcher()
+	if err := writeStopRequest(db); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(2500 * time.Millisecond):
+		cancel()
+		t.Fatal("pause watcher did not cancel the context")
+	}
+	<-done
 }
