@@ -109,7 +109,7 @@ func serveWeb(c Config,host string,port int)error{
  configFile,_:=filepath.Abs(*configPath);api:=&WebAPI{cfg:c,db:state,configFile:configFile,mode:*mode}
  if c.ConfigDB!=""{
   db,e:=sql.Open("sqlite",c.ConfigDB);if e!=nil{return e};defer db.Close()
-  if e=db.QueryRow("SELECT CASE WHEN value='null' THEN '' ELSE trim(value,char(34)) END").Scan(&api.tokenHash);e!=nil&&e!=sql.ErrNoRows{return e}
+  if e=db.QueryRow("SELECT CASE WHEN value='null' THEN '' ELSE trim(value,char(34)) END FROM settings WHERE key='web.token_hash'").Scan(&api.tokenHash);e!=nil&&e!=sql.ErrNoRows{return e}
  }
  if !isLoopbackHost(host)&&api.tokenHash==""{return errors.New("监听非本机地址之前必须先在 Python Web 配置库设置访问口令")}
  mux:=http.NewServeMux()
