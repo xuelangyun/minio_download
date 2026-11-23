@@ -8,7 +8,6 @@ import (
  "encoding/hex"
  "bytes"
  "crypto/md5"
- "encoding/hex"
  "database/sql"
  "encoding/json"
  "errors"
