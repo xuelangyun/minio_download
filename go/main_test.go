@@ -1739,3 +1739,45 @@ func TestMissingMCAPCleanupCanRecoverAfterInterruption(t *testing.T) {
   t.Fatalf("unsafe cleanup state should remain pending, got %d rows", downloads)
  }
 }
+
+
+func TestFirstRunUsesSingleSQLiteDatabase(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "minio_download.sqlite3")
+	if err := initializeSQLiteDatabase(dbPath); err != nil {
+		t.Fatalf("initialize first-run database: %v", err)
+	}
+	cfg := Config{ConfigDB: dbPath, StateDB: dbPath}
+	if err := loadConfigDB(&cfg, "count"); err != nil {
+		t.Fatalf("load first-run defaults: %v", err)
+	}
+	if len(cfg.Tasks) == 0 {
+		t.Fatal("expected built-in task defaults to be stored in SQLite")
+	}
+	if len(cfg.Disks) != 0 {
+		t.Fatalf("new installation should wait for web disk configuration, got %d disks", len(cfg.Disks))
+	}
+	if cfg.Endpoint != "" || cfg.SecretKey != "" {
+		t.Fatal("new installation must not invent MinIO credentials")
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	writer := &sqliteLogWriter{db: db}
+	if _, err = writer.Write([]byte("first-run log entry\n")); err != nil {
+		t.Fatal(err)
+	}
+	var savedLog string
+	if err = db.QueryRow("SELECT message FROM runtime_logs ORDER BY id DESC LIMIT 1").Scan(&savedLog); err != nil || savedLog != "first-run log entry" {
+		t.Fatalf("expected log line in SQLite, got %q, err=%v", savedLog, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "minio_download.sqlite3" {
+		t.Fatalf("expected a single persistent SQLite file, found %v", entries)
+	}
+}
