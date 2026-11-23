@@ -399,5 +399,6 @@
       "target_hours": 0,
       "target_count": 40
     }
-  ]
+  ],
+  "trust_completed_records": true
 }
