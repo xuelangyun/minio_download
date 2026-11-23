@@ -104,12 +104,13 @@ func(a *App)open()error{
  pg:=fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=prefer connect_timeout=10",a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.PGUser,a.cfg.PGPassword)
  p,e:=sql.Open("pgx",pg);if e!=nil{return e};defer p.Close();ctx,cancel:=context.WithTimeout(a.ctx,15*time.Second);defer cancel();if e=p.PingContext(ctx);e!=nil{return fmt.Errorf("PostgreSQL 连接失败: %w",e)}
  ok,e:=mc.BucketExists(ctx,a.cfg.Bucket);if e!=nil{return e};if !ok{return fmt.Errorf("MinIO bucket 不存在: %s",a.cfg.Bucket)}
- a.db,e=sql.Open("sqlite",a.cfg.StateDB);if e!=nil{return e};a.db.SetMaxOpenConns(8)
+ a.db,e=sql.Open("sqlite",a.cfg.StateDB);if e!=nil{return e};a.db.SetMaxOpenConns(1)
  _,e=a.db.Exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=30000;"+
  "CREATE TABLE IF NOT EXISTS downloads(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,parent_key TEXT,disk_name TEXT,target_path TEXT,partial_path TEXT,expected_bytes INTEGER,status TEXT NOT NULL DEFAULT 'pending',error TEXT,updated_at TEXT NOT NULL);"+
  "CREATE INDEX IF NOT EXISTS idx_download_task_status ON downloads(task_name,status);"+
  "CREATE TABLE IF NOT EXISTS task_disk_assignments(task_name TEXT NOT NULL,disk_name TEXT NOT NULL,last_used_at TEXT NOT NULL,PRIMARY KEY(task_name,disk_name));"+
  "CREATE TABLE IF NOT EXISTS downloaded_episodes(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,source_task_name TEXT,job_id INTEGER,sn_code TEXT,parent_key TEXT,disk_name TEXT,target_path TEXT,file_size INTEGER,content_time REAL,create_time TEXT,downloaded_at TEXT NOT NULL);"+
+ "CREATE INDEX IF NOT EXISTS idx_downloaded_task ON downloaded_episodes(task_name);"+
  "CREATE TABLE IF NOT EXISTS control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL);")
  if e==nil{
   if e=ensureColumn(a.db,"downloads","started_at","TEXT");e!=nil{return e}
@@ -363,7 +364,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo)error{
   if err==nil{
    var info minio.ObjectInfo
    info,err=obj.Stat()
-   if err==nil&&(info.Size!=expected.Size||!sameETag(info.ETag,expected.ETag)){err=fmt.Errorf("对象元数据发生变化: %s",key)}
+   if err==nil&&(info.Size!=expected.Size||(expected.ETag!=""&&!sameETag(info.ETag,expected.ETag))||(!expected.LastModified.IsZero()&&!info.LastModified.Equal(expected.LastModified))){err=fmt.Errorf("对象元数据发生变化: %s",key)}
    if err==nil{
     flags:=os.O_CREATE|os.O_WRONLY
     if offset>0{flags|=os.O_APPEND}else{flags|=os.O_TRUNC}
@@ -416,8 +417,20 @@ func(a *App)fail(e Episode,d DiskConfig,final,partial string,err error)error{
  _=a.set(e,d,final,partial,"failed",err.Error());log.Printf("下载失败 %s: %v",e.ID,err);return err
 }
 func(a *App)cleanup(preview bool)(int,error){
- rows,e:=a.db.Query("SELECT episode_id,target_path FROM downloads WHERE status='completed'");if e!=nil{return 0,e};defer rows.Close();n:=0
- for rows.Next(){var id string;var p sql.NullString;if e=rows.Scan(&id,&p);e!=nil{return n,e};if !p.Valid||!hasPattern(p.String,a.cfg.MCAPPattern){n++;if preview{log.Printf("[dry-run] 缺 mcap: %s",p.String)}else{_=os.RemoveAll(p.String);_,_=a.db.Exec("DELETE FROM downloads WHERE episode_id=?",id);_,_=a.db.Exec("DELETE FROM downloaded_episodes WHERE episode_id=?",id)}}};return n,rows.Err()
+ rows,err:=a.db.Query("SELECT episode_id,target_path FROM downloads WHERE status='completed'");if err!=nil{return 0,err}
+ type item struct{id string;path sql.NullString}
+ items:=[]item{}
+ for rows.Next(){var x item;if err=rows.Scan(&x.id,&x.path);err!=nil{rows.Close();return 0,err};items=append(items,x)}
+ if err=rows.Err();err!=nil{rows.Close();return 0,err};if err=rows.Close();err!=nil{return 0,err}
+ n:=0
+ for _,x:=range items{if !x.path.Valid||!hasPattern(x.path.String,a.cfg.MCAPPattern){
+  n++;if preview{log.Printf("[dry-run] 缺 mcap: %s",x.path.String)}else{
+   if x.path.Valid{if err=os.RemoveAll(x.path.String);err!=nil{return n,err}}
+   if _,err=a.db.Exec("DELETE FROM downloads WHERE episode_id=?",x.id);err!=nil{return n,err}
+   if _,err=a.db.Exec("DELETE FROM downloaded_episodes WHERE episode_id=?",x.id);err!=nil{return n,err}
+  }
+ }}
+ return n,nil
 }
 func dirHasFiles(p string)bool{x,e:=os.ReadDir(p);return e==nil&&len(x)>0}
 func hasPattern(p,pat string)bool{x,e:=os.ReadDir(p);if e!=nil{return false};for _,v:=range x{if !v.IsDir(){if ok,_:=path.Match(pat,v.Name());ok{return true}}};return false}
