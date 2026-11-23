@@ -182,6 +182,19 @@ func TestAcquireNamedDiskLocksSortsAndReleasesPartialSet(t *testing.T) {
  if err!=nil{t.Fatalf("reacquire locks after release: %v",err)}
  release2()
 }
+func TestSpaceReservationRestoreAfterDiscardedPartial(t *testing.T) {
+ app:=&App{cfg:Config{MinFreeGB:0}}
+ reservation,err:=app.reserveObjectSpace(DiskConfig{Name:"disk-a",Path:t.TempDir()},100)
+ if err!=nil{t.Fatal(err)}
+ reservation.Consume(40)
+ if app.spaceInFlight["disk-a"]!=60{t.Fatalf("after consume=%d want 60",app.spaceInFlight["disk-a"])}
+ reservation.Restore(25)
+ if app.spaceInFlight["disk-a"]!=85{t.Fatalf("after restore=%d want 85",app.spaceInFlight["disk-a"])}
+ reservation.Restore(100)
+ if app.spaceInFlight["disk-a"]!=100{t.Fatalf("restore must not exceed consumed bytes: got %d want 100",app.spaceInFlight["disk-a"])}
+ reservation.Release()
+ if _,ok:=app.spaceInFlight["disk-a"];ok{t.Fatal("release should clear remaining reservation")}
+}
 func TestSpaceReservationConsumeAndRelease(t *testing.T) {
  app:=&App{cfg:Config{MinFreeGB:0}}
  diskCfg:=DiskConfig{Name:"disk-a",Path:t.TempDir()}
