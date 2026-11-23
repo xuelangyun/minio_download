@@ -93,9 +93,9 @@ func(a *App)set(e Episode,d DiskConfig,final,partial,status,msg string)error{
  e.ID,e.Task,e.ParentKey,d.Name,nullable(final),nullable(partial),e.Size,status,nullable(msg),time.Now().UTC().Format(time.RFC3339Nano));return err
 }
 func nullable(s string)any{if s==""{return nil};return s}
-func(a *App)completed(id string)bool{var n int;_=a.db.QueryRow("SELECT COUNT(*) FROM downloads WHERE episode_id=? AND status='completed'",id).Scan(&n);return n>0}
-func(a *App)stats(task string)(float64,int){var s sql.NullFloat64;var n int;_=a.db.QueryRow("SELECT COALESCE(SUM(content_time),0),COUNT(*) FROM downloaded_episodes WHERE task_name=?",task).Scan(&s,&n);return s.Float64,n}
-func(a *App)assign(task,disk string){_,_=a.db.Exec("INSERT INTO task_disk_assignments(task_name,disk_name,last_used_at) VALUES(?,?,?) ON CONFLICT(task_name,disk_name) DO UPDATE SET last_used_at=excluded.last_used_at",task,disk,time.Now().UTC().Format(time.RFC3339Nano))}
+func(a *App)completed(id string)bool{var p sql.NullString;err:=a.db.QueryRow("SELECT target_path FROM downloads WHERE episode_id=? AND status='completed'",id).Scan(&p);return err==nil&&p.Valid&&dirHasFiles(p.String)}
+func(a *App)stats(task string)(float64,int){rows,err:=a.db.Query("SELECT content_time,target_path FROM downloaded_episodes WHERE task_name=?",task);if err!=nil{return 0,0};defer rows.Close();var seconds float64;count:=0;for rows.Next(){var v sql.NullFloat64;var p sql.NullString;if rows.Scan(&v,&p)!=nil{continue};if p.Valid&&dirHasFiles(p.String){seconds+=v.Float64;count++}};return seconds,count}
+func(a *App)assign(task,disk string){tx,err:=a.db.Begin();if err!=nil{return};_,_=tx.Exec("DELETE FROM task_disk_assignments WHERE task_name=?",task);_,_=tx.Exec("INSERT INTO task_disk_assignments(task_name,disk_name,last_used_at) VALUES(?,?,?)",task,disk,time.Now().UTC().Format(time.RFC3339Nano));_=tx.Commit()}
 func(a *App)assigned(task string)string{var d string;_=a.db.QueryRow("SELECT disk_name FROM task_disk_assignments WHERE task_name=? ORDER BY last_used_at DESC LIMIT 1",task).Scan(&d);return d}
 func(a *App)record(e Episode,d DiskConfig,final string)error{
  _,err:=a.db.Exec("INSERT INTO downloaded_episodes(episode_id,task_name,source_task_name,job_id,sn_code,parent_key,disk_name,target_path,file_size,content_time,create_time,downloaded_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "+
@@ -107,7 +107,7 @@ func(a *App)fetch()([]Episode,error){
  pg:=fmt.Sprintf("host=%s port=%d dbname=%s user=%s password=%s sslmode=prefer connect_timeout=10",a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.PGUser,a.cfg.PGPassword)
  db,e:=sql.Open("pgx",pg);if e!=nil{return nil,e};defer db.Close()
  quality:="j.quality_status NOT IN ('不合格','未解析','未质检')";if a.cfg.IncludeNull{quality="(j.quality_status IS NULL OR "+quality+")"}
- q:="SELECT j.episode_id::text,j.job_id,j.task_name,j.sn_code,j.parent_key,j.file_size,j.content_time,j.create_time "+
+ q:="SELECT j.episode_id::text,j.job_id,j.task_name,COALESCE(j.sn_code,''),j.parent_key,COALESCE(j.file_size,0),COALESCE(j.content_time,0),j.create_time "+
  "FROM public.minio_galbot_scene_task_jobs j WHERE j.del_flag=0 AND "+quality+
  " AND j.job_id IN (SELECT t.job_id FROM public.minio_galbot_scene_task t WHERE t.task_name=ANY($1)) ORDER BY j.task_name,j.create_time NULLS LAST,j.episode_id"
  rows,e:=db.QueryContext(a.ctx,q,names);if e!=nil{return nil,e};defer rows.Close()
@@ -163,7 +163,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  _=a.set(e,d,final,partial,"running","");var total int64
  for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:true}){if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)};if obj.IsDir||strings.HasSuffix(obj.Key,"/"){continue}
   rel:=strings.TrimPrefix(obj.Key,e.ParentKey+"/");dst,err:=safeJoin(partial,rel);if err!=nil{return a.fail(e,d,final,partial,err)};if err=os.MkdirAll(filepath.Dir(dst),0755);err!=nil{return a.fail(e,d,final,partial,err)}
-  tmp:=dst+".minio-tmp";if err=a.fetchObject(obj.Key,tmp);err!=nil{return a.fail(e,d,final,partial,err)};if err=os.Rename(tmp,dst);err!=nil{return a.fail(e,d,final,partial,err)};total+=obj.Size
+  tmp:=dst+".minio-tmp";if err=a.fetchObject(obj.Key,tmp);err!=nil{return a.fail(e,d,final,partial,err)};if err=os.Remove(dst);err!=nil&&!os.IsNotExist(err){return a.fail(e,d,final,partial,err)};if err=os.Rename(tmp,dst);err!=nil{return a.fail(e,d,final,partial,err)};total+=obj.Size
  }
  if total==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
  if err:=os.RemoveAll(final);err!=nil{return a.fail(e,d,final,partial,err)};if err:=os.Rename(partial,final);err!=nil{return a.fail(e,d,final,partial,err)}
