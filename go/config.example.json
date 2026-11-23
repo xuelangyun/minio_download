@@ -241,5 +241,6 @@
   "retry_delay_seconds": 1,
   "validate_workers": 8,
   "pid_file": "minio_download.pid",
-  "config_db": ""
+  "config_db": "",
+  "minio_skip_verify": false
 }
