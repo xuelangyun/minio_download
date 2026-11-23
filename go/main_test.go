@@ -905,3 +905,33 @@ func TestWebConfigDisksRejectsDuplicateNamesWithoutChangingConfig(t *testing.T) 
 	if rec.Code != http.StatusBadRequest { t.Fatalf("expected 400, got %d: %s",rec.Code,rec.Body.String()) }
 	if len(api.cfg.Disks)!=1 || api.cfg.Disks[0].Name!="existing" { t.Fatalf("invalid update mutated in-memory config: %#v",api.cfg.Disks) }
 }
+
+func TestWebConfigTasksPersistsAndUpdatesRuntime(t *testing.T) {
+	api := newPlanTestAPI(t)
+	db, err := sql.Open("sqlite", api.cfg.ConfigDB)
+	if err != nil { t.Fatal(err) }
+	for _, stmt := range []string{
+		"CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)",
+		"CREATE TABLE scenes(id INTEGER PRIMARY KEY AUTOINCREMENT,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE)",
+		"CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE,target_count INTEGER NOT NULL,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]')",
+		"CREATE TABLE task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL,PRIMARY KEY(task_id,alias))",
+	} { if _, err := db.Exec(stmt); err != nil { t.Fatal(err) } }
+	if err := db.Close(); err != nil { t.Fatal(err) }
+	body := `{"data_version":"v-next","scenes":[{"scene":"Office","tasks":[{"name":"邮件归档","count":8,"aliases":["归档邮件"],"dir":"邮件归档","tags":["办公"]}]}]}`
+	req := httptest.NewRequest(http.MethodPut, "/api/config/tasks", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	api.configTasks(rec, req)
+	if rec.Code != http.StatusOK { t.Fatalf("config tasks failed: %d %s", rec.Code, rec.Body.String()) }
+	if api.cfg.DataVersion != "v-next" || len(api.cfg.Tasks) != 1 || api.cfg.Tasks[0].Name != "邮件归档" || api.cfg.Tasks[0].TargetCount != 8 {
+		t.Fatalf("runtime config not updated: %#v", api.cfg)
+	}
+	db, err = sql.Open("sqlite", api.cfg.ConfigDB)
+	if err != nil { t.Fatal(err) }
+	defer db.Close()
+	var value string
+	if err := db.QueryRow("SELECT value FROM settings WHERE key='tasks.data_version'").Scan(&value); err != nil { t.Fatal(err) }
+	if value != `"v-next"` { t.Fatalf("data_version not persisted as Python JSON setting: %s", value) }
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM tasks WHERE name='邮件归档'").Scan(&count); err != nil { t.Fatal(err) }
+	if count != 1 { t.Fatalf("expected persisted task, got %d", count) }
+}
