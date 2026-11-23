@@ -189,9 +189,23 @@ func(a *App)checkRequiredFiles(parent string)(string,string,error){
  }
  return "ok","",nil
 }
-func(a *App)hasLocalCopy(t Task,e Episode)bool{
- for _,d:=range a.cfg.Disks{p,_:=episodePaths(a.cfg.DataVersion,t,d,e.ParentKey);if dirHasFiles(p){return true}}
- return false
+func(a *App)syncLocalCopies(groups map[string][]Episode)error{
+ for _,task:=range a.cfg.Tasks{
+  for _,ep:=range groups[task.Name]{
+   diskName,err:=findExistingTaskDisk(a.cfg.DataVersion,task,a.cfg.Disks,[]Episode{ep})
+   if err!=nil{return err};if diskName==""{continue}
+   var chosen *DiskConfig
+   for i:=range a.cfg.Disks{if a.cfg.Disks[i].Name==diskName{chosen=&a.cfg.Disks[i];break}}
+   if chosen==nil{return fmt.Errorf("找不到 episode %s 的本地磁盘 %s",ep.ID,diskName)}
+   pinned:=a.assigned(task.Name)
+   if pinned!=""&&pinned!=diskName{return fmt.Errorf("任务 %s 固定在磁盘 %s，但 episode %s 已存在于 %s",task.Name,pinned,ep.ID,diskName)}
+   if pinned==""{if err:=a.assign(task.Name,diskName);err!=nil{return err}}
+   final,_:=episodePaths(a.cfg.DataVersion,task,*chosen,ep.ParentKey)
+   if err:=a.record(ep,*chosen,final);err!=nil{return err}
+   if err:=a.set(ep,*chosen,final,"","completed","");err!=nil{return err}
+  }
+ }
+ return nil
 }
 func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,error){
  validGroups:=map[string][]Episode{}
@@ -200,20 +214,6 @@ func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,e
   selected:=make([]Episode,0)
   todo:=make([]Episode,0,len(candidates))
   for _,ep:=range candidates{
-   if a.hasLocalCopy(task,ep){
-    diskName,err:=findExistingTaskDisk(a.cfg.DataVersion,task,a.cfg.Disks,[]Episode{ep})
-    if err!=nil{return nil,err}
-    var chosen *DiskConfig
-    for i:=range a.cfg.Disks{if a.cfg.Disks[i].Name==diskName{chosen=&a.cfg.Disks[i];break}}
-    if chosen==nil{return nil,fmt.Errorf("找不到 episode %s 的本地磁盘 %s",ep.ID,diskName)}
-    pinned:=a.assigned(task.Name)
-    if pinned!=""&&pinned!=diskName{return nil,fmt.Errorf("任务 %s 固定在磁盘 %s，但 episode %s 已存在于 %s",task.Name,pinned,ep.ID,diskName)}
-    if pinned==""{if err:=a.assign(task.Name,diskName);err!=nil{return nil,err}}
-    final,_:=episodePaths(a.cfg.DataVersion,task,*chosen,ep.ParentKey)
-    if err:=a.record(ep,*chosen,final);err!=nil{return nil,err}
-    if err:=a.set(ep,*chosen,final,"","completed","");err!=nil{return nil,err}
-    selected=append(selected,ep);continue
-   }
    if a.completed(ep.ID){selected=append(selected,ep);continue}
    var state string
    _=a.db.QueryRow("SELECT status FROM downloads WHERE episode_id=?",ep.ID).Scan(&state)
@@ -250,6 +250,7 @@ func(a *App)isMissingStatus(id string)bool{
 }
 func(a *App)run(all []Episode,nround int)error{
  groups:=map[string][]Episode{};for _,e:=range all{groups[e.Task]=append(groups[e.Task],e)}
+ if err:=a.syncLocalCopies(groups);err!=nil{return err}
  if a.mode=="count"{var err error;groups,err=a.prevalidateCount(groups);if err!=nil{return err}}
  for r:=1;r<=nround;r++{if a.ctx.Err()!=nil{return nil};selected:=map[string][]Episode{}
   for _,t:=range a.cfg.Tasks{s,n:=a.stats(t.Name);target,used:=t.TargetHours*3600,s;if a.mode=="count"{target=float64(t.TargetCount);used=float64(n)}
