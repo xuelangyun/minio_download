@@ -232,5 +232,6 @@
       "target_count": 5
     }
   ],
-  "trust_completed_records": false
+  "trust_completed_records": false,
+  "file_workers": 4
 }
