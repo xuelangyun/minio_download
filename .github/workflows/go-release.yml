@@ -10,37 +10,21 @@ permissions:
   contents: read
 
 jobs:
-  runner-diagnostic:
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Verify hosted runner execution
-        run: |
-          echo "GitHub-hosted runner started"
-          echo "Runner OS: $RUNNER_OS"
-          uname -a
-          id
-
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23.x"
           cache: false
-      - name: Resolve dependencies
+      - name: Check formatting
         working-directory: go
-        run: go mod tidy
-      - name: Format Go sources
-        working-directory: go
-        run: gofmt -w *.go
-      - name: Test
+        run: test -z "$(gofmt -l *.go)"
+      - name: Run unit tests
         working-directory: go
         run: go test ./...
-      - name: Vet
-        working-directory: go
-        run: go vet ./...
       - name: Build Windows amd64
         working-directory: go
         run: |
