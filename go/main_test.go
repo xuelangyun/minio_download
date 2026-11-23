@@ -618,3 +618,43 @@ func TestWebStopWritesSharedPauseRequest(t *testing.T) {
 		t.Fatalf("expected shared stop request value 1, got %q", value)
 	}
 }
+
+func TestClearStopRequestDBAndSetNewRequest(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "state.db")
+	db, err := sql.Open("sqlite", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL); INSERT INTO control VALUES('stop_requested','old','old-time')"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if err := clearStopRequestDB(name); err != nil {
+		t.Fatal(err)
+	}
+	db, err = sql.Open("sqlite", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var value string
+	if err := db.QueryRow("SELECT value FROM control WHERE key='stop_requested'").Scan(&value); err != sql.ErrNoRows {
+		t.Fatalf("expected stale pause to be cleared, got value=%q err=%v", value, err)
+	}
+	if err := writeStopRequest(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT value FROM control WHERE key='stop_requested'").Scan(&value); err != nil || value != "1" {
+		t.Fatalf("new pause request should survive startup clear, value=%q err=%v", value, err)
+	}
+}
+
+func TestWebRunRejectsUnsupportedMode(t *testing.T) {
+	api := &WebAPI{}
+	request := httptest.NewRequest(http.MethodPost, "/api/run", strings.NewReader(`{"mode":"cleanup"}`))
+	recorder := httptest.NewRecorder()
+	api.run(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected unsupported mode to be rejected, got %d", recorder.Code)
+	}
+}
