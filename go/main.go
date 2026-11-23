@@ -158,8 +158,11 @@ func(a *App)fetch()([]Episode,error){
  out:=[]Episode{}
  for rows.Next(){var x Episode;var src string;var key sql.NullString;var duration sql.NullFloat64
   if e=rows.Scan(&x.ID,&x.JobID,&src,&x.SN,&key,&x.Size,&duration,&x.Created);e!=nil{return nil,e}
-  x.SourceTask=src;x.Task=src;if v,ok:=aliases[src];ok{x.Task=v};x.ParentKey=strings.Trim(key.String,"/");x.Duration=duration.Float64
-  if x.ID==""||x.ParentKey==""{continue};out=append(out,x)
+  x.SourceTask=src;x.Task=src;if v,ok:=aliases[src];ok{x.Task=v};x.Duration=duration.Float64
+  normalized,normalizeErr:=normalizeParentKey(key.String)
+  if normalizeErr!=nil{log.Printf("跳过无效 parent_key episode_id=%s: %v",x.ID,normalizeErr);continue}
+  x.ParentKey=normalized
+  if x.ID==""{continue};out=append(out,x)
  }
  if e=rows.Err();e!=nil{return nil,e}
  order:=map[string]int{};for i,t:=range a.cfg.Tasks{order[t.Name]=i}
@@ -434,6 +437,12 @@ func(a *App)cleanup(preview bool)(int,error){
 }
 func dirHasFiles(p string)bool{x,e:=os.ReadDir(p);return e==nil&&len(x)>0}
 func hasPattern(p,pat string)bool{x,e:=os.ReadDir(p);if e!=nil{return false};for _,v:=range x{if !v.IsDir(){if ok,_:=path.Match(pat,v.Name());ok{return true}}};return false}
+func normalizeParentKey(value string)(string,error){
+ key:=strings.TrimSpace(value);key=strings.Trim(key,"/")
+ if key==""{return "",errors.New("parent_key 为空")}
+ for _,part:=range strings.Split(key,"/"){if part=="."||part==".."{return "",fmt.Errorf("parent_key 含有不允许的路径段: %q",key)}}
+ return key,nil
+}
 func safe(s string)string{
  s=strings.TrimSpace(s)
  if s==""||s=="."||s==".."{return "_"}
