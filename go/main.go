@@ -20,6 +20,7 @@ import (
  "time"
 
  _ "github.com/jackc/pgx/v5/stdlib"
+ "github.com/gofrs/flock"
  "github.com/minio/minio-go/v7"
  "github.com/minio/minio-go/v7/pkg/credentials"
  "github.com/shirou/gopsutil/v4/disk"
@@ -31,7 +32,7 @@ type DiskConfig struct { Name string `json:"name"`; Path string `json:"path"`; M
 type Config struct {
  Endpoint string `json:"minio_endpoint"`; AccessKey string `json:"minio_access_key"`; SecretKey string `json:"minio_secret_key"`; Bucket string `json:"minio_bucket"`; Region string `json:"minio_region"`; SSL bool `json:"minio_use_ssl"`
  PGHost string `json:"pg_host"`; PGPort int `json:"pg_port"`; PGDB string `json:"pg_database"`; PGUser string `json:"pg_user"`; PGPassword string `json:"pg_password"`
- DataVersion string `json:"data_version"`; StateDB string `json:"state_db"`; LogDir string `json:"log_dir"`; MinFreeGB float64 `json:"min_free_gb"`; SafetyFactor float64 `json:"space_safety_factor"`
+ DataVersion string `json:"data_version"`; LockFile string `json:"lock_file"`; StateDB string `json:"state_db"`; LogDir string `json:"log_dir"`; MinFreeGB float64 `json:"min_free_gb"`; SafetyFactor float64 `json:"space_safety_factor"`
  Workers int `json:"max_writes_per_disk"`; FileWorkers int `json:"file_workers"`; RequireMCAP bool `json:"require_mcap"`; MCAPPattern string `json:"mcap_pattern"`; IncludeNull bool `json:"include_null_quality"`; TrustCompletedRecords bool `json:"trust_completed_records"`
  Disks []DiskConfig `json:"disks"`; Tasks []Task `json:"tasks"`
 }
@@ -56,6 +57,7 @@ func main(){
  log.SetOutput(io.MultiWriter(os.Stdout,f));log.SetFlags(log.Ldate|log.Ltime|log.Lmicroseconds)
  ctx,stop:=signal.NotifyContext(context.Background(),os.Interrupt);defer stop()
  a:=&App{cfg:c,ctx:ctx,mode:*mode,recheck:*recheck}
+ lock:=flock.New(c.LockFile);locked,lockErr:=lock.TryLock();if lockErr!=nil{log.Fatalf("创建下载锁失败: %v",lockErr)};if !locked{log.Fatal("检测到另一个下载器实例正在运行")};defer lock.Unlock()
  if e=a.open();e!=nil{log.Fatal(e)};defer a.db.Close()
  if *cleanup{n,err:=a.cleanup(*dry);if err!=nil{log.Fatal(err)};log.Printf("清理结束：%d 条",n);if *dry{return}}else if *dry{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
  rows,e:=a.fetch();if e!=nil{log.Fatal(e)}
@@ -65,7 +67,7 @@ func main(){
 func(c *Config)normalize(m string)error{
  if c.Endpoint==""||c.AccessKey==""||c.SecretKey==""||c.Bucket==""{return errors.New("MinIO endpoint/access_key/secret_key/bucket 必须填写")}
  if c.PGHost==""||c.PGDB==""||c.PGUser==""||c.PGPassword==""{return errors.New("PostgreSQL 连接参数必须填写")}
- if c.PGPort==0{c.PGPort=5432};if c.DataVersion==""{c.DataVersion="银河2.2数据"};if c.StateDB==""{c.StateDB="minio_download_state.sqlite3"};if c.LogDir==""{c.LogDir="logs"}
+ if c.PGPort==0{c.PGPort=5432};if c.DataVersion==""{c.DataVersion="银河2.2数据"};if c.LockFile==""{c.LockFile="minio_download.lock"};if c.StateDB==""{c.StateDB="minio_download_state.sqlite3"};if c.LogDir==""{c.LogDir="logs"}
  if c.MinFreeGB==0{c.MinFreeGB=3};if c.SafetyFactor==0{c.SafetyFactor=1.15};if c.Workers<=0{c.Workers=2};if c.FileWorkers<=0{c.FileWorkers=4};if c.MCAPPattern==""{c.MCAPPattern="*.SYNC.mcap"}
  if len(c.Disks)==0||len(c.Tasks)==0{return errors.New("disks/tasks 不能为空")}
  seen:=map[string]bool{};aliases:=map[string]string{};dirs:=map[string]string{}
