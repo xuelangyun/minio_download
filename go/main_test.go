@@ -1035,7 +1035,7 @@ func TestApplyWebSettingCoversAllRuntimeSettings(t *testing.T) {
  }
 }
 func TestMinioTransportUsesConfiguredTimeouts(t *testing.T) {
- tr:=minioTransport(Config{ConnectTimeout:23,ReadTimeout:321})
+ tr:=minioHTTPTransport(Config{ConnectTimeout:23,ReadTimeout:321})
  defer tr.CloseIdleConnections()
  if tr.TLSHandshakeTimeout!=23*time.Second{t.Fatalf("TLS handshake timeout=%s",tr.TLSHandshakeTimeout)}
  if tr.ResponseHeaderTimeout!=321*time.Second{t.Fatalf("response header timeout=%s",tr.ResponseHeaderTimeout)}
