@@ -21,7 +21,7 @@ Go 版本按 Python 的两个 py_shell 脚本拆分了任务配置模板：
 - `config.example.json`：按时长任务清单，对应 `minio_task_downloader.py`。
 - `config.count.example.json`：按条数任务清单，对应 `minio_task_downloader_by_count.py`（43 个任务，默认每个任务 40 条）。
 
-将所需模板复制为 `config.json`，填写 MinIO、PostgreSQL、磁盘路径。不要提交真实密钥。时长模式的 `target_hours` 单位为小时，数据库 `content_time` 按秒累计；条数模式使用 `target_count`。两种模式必须使用各自对应的任务配置，避免历史别名和任务目录发生冲突。按条数模板默认启用 `trust_completed_records`，兼容 py_shell 更换/归档磁盘后仍按历史台账计数；按时长模板默认要求正式目录仍存在，避免把本地已删除的数据计入目标。
+将所需模板复制为 `config.json`，填写 MinIO、PostgreSQL、磁盘路径。不要提交真实密钥。时长模式的 `target_hours` 单位为小时，数据库 `content_time` 按秒累计；条数模式使用 `target_count`。两种模式必须使用各自对应的任务配置，避免历史别名和任务目录发生冲突。两个模板默认启用 `trust_completed_records`，与 py_shell 两个直接下载脚本一致：更换 / 归档磁盘后仍按历史完成台账计入目标。若希望按 py_sample 的“正式目录必须存在”策略统计，可将该项改为 `false`。
 
 需要 Go 1.23+：
 
