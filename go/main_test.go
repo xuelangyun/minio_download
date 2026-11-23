@@ -1009,3 +1009,13 @@ func TestWebConfigTestRejectsUnknownTarget(t *testing.T) {
  api.configTest(rec,req)
  if rec.Code!=http.StatusBadRequest{t.Fatalf("expected 400, got %d",rec.Code)}
 }
+
+func TestConfiguredConnectionTimeoutsAreApplied(t *testing.T) {
+	cfg:=Config{ConnectTimeout:7,ReadTimeout:91,MinioSkipVerify:true}
+	transport:=minioHTTPTransport(cfg)
+	if transport.TLSHandshakeTimeout!=7*time.Second || transport.ResponseHeaderTimeout!=91*time.Second { t.Fatalf("transport timeouts not applied: tls=%s response=%s",transport.TLSHandshakeTimeout,transport.ResponseHeaderTimeout) }
+	if transport.TLSClientConfig==nil || !transport.TLSClientConfig.InsecureSkipVerify { t.Fatal("explicit certificate skip setting was not applied") }
+	u,err:=url.Parse(postgresDSN(cfg))
+	if err!=nil { t.Fatal(err) }
+	if u.Query().Get("connect_timeout")!="7" { t.Fatalf("PostgreSQL connect_timeout mismatch: %s",u.Query().Get("connect_timeout")) }
+}
