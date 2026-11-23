@@ -117,6 +117,7 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("GET /api/plans/{id}/export",api.planExport)
  mux.HandleFunc("POST /api/plans/import",api.planImport)
  mux.HandleFunc("POST /api/plans/{id}/apply",api.planApply)
+ mux.HandleFunc("PUT /api/config/disks",api.configDisks)
  mux.HandleFunc("GET /api/config",api.config)
  mux.HandleFunc("GET /api/status",api.status)
  mux.HandleFunc("POST /api/run",api.run)
@@ -436,6 +437,27 @@ func(a *WebAPI)planImport(w http.ResponseWriter,r *http.Request){
  payload,_:=json.Marshal(p);now:=time.Now().UTC().Format(time.RFC3339)
  res,err:=db.Exec("INSERT INTO plans(name,note,payload,created_at,updated_at) VALUES(?,?,?,?,?)",name,strings.TrimSpace(doc.Note),string(payload),now,now);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"导入方案失败："+err.Error()});return};id,_:=res.LastInsertId()
  writeJSON(w,map[string]any{"ok":true,"id":id,"name":name})
+}
+
+func(a *WebAPI)configDisks(w http.ResponseWriter,r *http.Request){
+ var body struct{Disks []DiskConfig `json:"disks"`}
+ if err:=json.NewDecoder(io.LimitReader(r.Body,1<<20)).Decode(&body);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
+ if body.Disks==nil{writeJSONStatus(w,400,map[string]any{"error":"请求内容不是有效的 JSON"});return}
+ seen:=map[string]bool{};for i:=range body.Disks{
+  d:=&body.Disks[i];d.Name=strings.TrimSpace(d.Name);d.Path=strings.TrimSpace(d.Path);d.Mountpoint=strings.TrimSpace(d.Mountpoint)
+  if d.Name==""||d.Path==""{writeJSONStatus(w,400,map[string]any{"error":fmt.Sprintf("第 %d 块磁盘：名称和路径都不能为空",i+1)});return}
+  if seen[d.Name]{writeJSONStatus(w,400,map[string]any{"error":"磁盘名称重复："+d.Name});return};seen[d.Name]=true
+  if d.Mountpoint==""{d.Mountpoint=d.Path}
+ }
+ if strings.TrimSpace(a.cfg.ConfigDB)==""{writeJSONStatus(w,500,map[string]any{"error":"未配置 SQLite 配置库"});return}
+ db,err:=sql.Open("sqlite",a.cfg.ConfigDB);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close();db.SetMaxOpenConns(1);_,_=db.Exec("PRAGMA busy_timeout=30000")
+ if _,err=db.Exec("CREATE TABLE IF NOT EXISTS disks(name TEXT PRIMARY KEY,position INTEGER NOT NULL,path TEXT NOT NULL,mountpoint TEXT NOT NULL)");err!=nil{writeJSONStatus(w,500,map[string]any{"error":"初始化磁盘配置失败："+err.Error()});return}
+ tx,err:=db.Begin();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer tx.Rollback()
+ if _,err=tx.Exec("DELETE FROM disks");err!=nil{writeJSONStatus(w,500,map[string]any{"error":"更新磁盘配置失败："+err.Error()});return}
+ for i,d:=range body.Disks{if _,err=tx.Exec("INSERT INTO disks(name,position,path,mountpoint) VALUES(?,?,?,?)",d.Name,i,d.Path,d.Mountpoint);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"保存磁盘配置失败："+err.Error()});return}}
+ if err=tx.Commit();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"提交磁盘配置失败："+err.Error()});return}
+ a.cfg.Disks=append([]DiskConfig{},body.Disks...)
+ _,running,_:=a.activeDownloader();writeJSON(w,map[string]any{"ok":true,"running":running})
 }
 func(a *WebAPI)config(w http.ResponseWriter,r *http.Request) {
  groups:=map[string]string{"minio":"MinIO 连接","pg":"PostgreSQL（任务元数据）","run":"运行与空间","transfer":"传输与校验","web":"Web 控制台"}
