@@ -194,9 +194,12 @@ func TestResumeReservationTracksOnlyRemainingBytes(t *testing.T) {
  if err!=nil{t.Fatalf("reserve remaining bytes: %v",err)}
  reservation.consumed=uint64(partial)
  if got:=app.spaceInFlight["disk-a"];got!=60{t.Fatalf("in-flight reservation=%d want 60",got)}
- // If the remote object changes and the partial file is discarded, its
- // previously occupied bytes must become reserved again for a full restart.
- reservation.Restore(partial)
+ // The partial may disappear between reservation and opening the temp file.
+ // The downloader must retain this baseline so discard recovery restores it.
+ if got:=reservation.ConsumedBytes();got!=partial{t.Fatalf("consumed baseline=%d want %d",got,partial)}
+ // If the remote object changes or the temp file disappears, its previously
+ // occupied bytes must become reserved again for a full restart.
+ reservation.Restore(reservation.ConsumedBytes())
  if got:=app.spaceInFlight["disk-a"];got!=100{t.Fatalf("reservation after discarding partial=%d want 100",got)}
  reservation.Release()
 }
