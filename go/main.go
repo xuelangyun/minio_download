@@ -147,7 +147,7 @@ func(a *App)completed(id string)bool{
  err=a.db.QueryRow("SELECT target_path FROM downloaded_episodes WHERE episode_id=?",id).Scan(&p)
  return err==nil&&p.Valid&&(a.cfg.TrustCompletedRecords||pathIsDir(p.String))
 }
-func(a *App)stats(task string)(float64,int){rows,err:=a.db.Query("SELECT content_time,target_path FROM downloaded_episodes WHERE task_name=?",task);if err!=nil{return 0,0};defer rows.Close();var seconds float64;count:=0;for rows.Next(){var v sql.NullFloat64;var p sql.NullString;if rows.Scan(&v,&p)!=nil{continue};if a.cfg.TrustCompletedRecords||(p.Valid&&dirHasFiles(p.String)){seconds+=v.Float64;count++}};return seconds,count}
+func(a *App)stats(task string)(float64,int){rows,err:=a.db.Query("SELECT content_time,target_path FROM downloaded_episodes WHERE task_name=?",task);if err!=nil{return 0,0};defer rows.Close();var seconds float64;count:=0;for rows.Next(){var v sql.NullFloat64;var p sql.NullString;if rows.Scan(&v,&p)!=nil{continue};if a.cfg.TrustCompletedRecords||(p.Valid&&pathIsDir(p.String)){seconds+=v.Float64;count++}};return seconds,count}
 func(a *App)assign(task,disk string)error{tx,err:=a.db.Begin();if err!=nil{return err};defer tx.Rollback();if _,err=tx.Exec("DELETE FROM task_disk_assignments WHERE task_name=?",task);err!=nil{return err};if _,err=tx.Exec("INSERT INTO task_disk_assignments(task_name,disk_name,last_used_at) VALUES(?,?,?)",task,disk,time.Now().UTC().Format(time.RFC3339Nano));err!=nil{return err};return tx.Commit()}
 func(a *App)assigned(task string)string{var d string;_=a.db.QueryRow("SELECT disk_name FROM task_disk_assignments WHERE task_name=? ORDER BY last_used_at DESC LIMIT 1",task).Scan(&d);return d}
 func(a *App)record(e Episode,d DiskConfig,final string)error{
@@ -398,7 +398,7 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
   var bytes int64
   for _,ep:=range rows{
    final,partial:=episodePaths(a.cfg.DataVersion,task,*d,ep.ParentKey)
-   if dirHasFiles(final){continue}
+   if pathIsDir(final){continue}
    partialBytes,sizeErr:=directorySizeBytes(partial);if sizeErr!=nil{return sizeErr}
    remaining:=ep.Size-partialBytes;if remaining<0{remaining=0};bytes+=remaining
   }
@@ -441,7 +441,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  var existing *DiskConfig;var existingPath string
  for i:=range a.cfg.Disks{
   candidate:=&a.cfg.Disks[i];candidateFinal,_:=episodePaths(a.cfg.DataVersion,t,*candidate,e.ParentKey)
-  if dirHasFiles(candidateFinal){
+  if pathIsDir(candidateFinal){
    if existing!=nil{return fmt.Errorf("episode %s 在多个磁盘存在正式目录，违反单副本规则",e.ID)}
    existing=candidate;existingPath=candidateFinal
   }
