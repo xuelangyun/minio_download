@@ -183,6 +183,21 @@ func TestAcquireNamedDiskLocksSortsAndReleasesPartialSet(t *testing.T) {
  if err!=nil{t.Fatalf("reacquire locks after release: %v",err)}
  release2()
 }
+func TestResumeReservationTracksOnlyRemainingBytes(t *testing.T) {
+ app:=&App{cfg:Config{MinFreeGB:0}}
+ dst:=filepath.Join(t.TempDir(),"object.bin")
+ if err:=os.WriteFile(dst+".minio-tmp",make([]byte,40),0600);err!=nil{t.Fatal(err)}
+ partial:=existingPartialBytes(dst,100)
+ reservation,err:=app.reserveObjectSpace(DiskConfig{Name:"disk-a",Path:filepath.Dir(dst)},remainingObjectBytes(dst,100))
+ if err!=nil{t.Fatalf("reserve remaining bytes: %v",err)}
+ reservation.consumed=uint64(partial)
+ if got:=app.spaceInFlight["disk-a"];got!=60{t.Fatalf("in-flight reservation=%d want 60",got)}
+ // If the remote object changes and the partial file is discarded, its
+ // previously occupied bytes must become reserved again for a full restart.
+ reservation.Restore(partial)
+ if got:=app.spaceInFlight["disk-a"];got!=100{t.Fatalf("reservation after discarding partial=%d want 100",got)}
+ reservation.Release()
+}
 func TestSpaceReservationRestoreAfterDiscardedPartial(t *testing.T) {
  app:=&App{cfg:Config{MinFreeGB:0}}
  reservation,err:=app.reserveObjectSpace(DiskConfig{Name:"disk-a",Path:t.TempDir()},100)
