@@ -239,5 +239,6 @@
   "verify_md5": true,
   "file_retries": 5,
   "retry_delay_seconds": 1,
-  "validate_workers": 8
+  "validate_workers": 8,
+  "pid_file": "minio_download.pid"
 }
