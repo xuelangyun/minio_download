@@ -764,11 +764,23 @@ func(a *WebAPI)childProcessSnapshot()(int32,float64){
 }
 func(a *WebAPI)activeDownloader()(int,bool,bool){
  childPID,childCreated:=a.childProcessSnapshot()
- if childPID>0{if proc,err:=process.NewProcess(childPID);err==nil{alive,_:=proc.IsRunning();if alive{created,err:=proc.CreateTime();if err!=nil||childCreated==0||math.Abs(float64(created)/1000-childCreated)<2{return int(childPID),true,true}}}}
+ if childPID>0&&childCreated>0{
+  if proc,err:=process.NewProcess(childPID);err==nil{
+   alive,aliveErr:=proc.IsRunning()
+   if aliveErr==nil&&alive{
+    created,createdErr:=proc.CreateTime()
+    if createdErr==nil&&math.Abs(float64(created)/1000-childCreated)<2{return int(childPID),true,true}
+   }
+  }
+ }
  raw,err:=os.ReadFile(a.cfg.PIDFile);if err!=nil{return 0,false,false}
  var record pidRecord;if json.Unmarshal(raw,&record)!=nil||record.PID<=0{return 0,false,false}
- proc,err:=process.NewProcess(int32(record.PID));if err!=nil{return 0,false,false};alive,err:=proc.IsRunning();if err!=nil||!alive{return 0,false,false}
- created,err:=proc.CreateTime();if err==nil&&record.Created>0&&math.Abs(float64(created)/1000-record.Created)>=2{return 0,false,false}
+ proc,err:=process.NewProcess(int32(record.PID));if err!=nil{return 0,false,false}
+ alive,err:=proc.IsRunning();if err!=nil||!alive{return 0,false,false}
+ if record.Created>0{
+  created,err:=proc.CreateTime()
+  if err!=nil||math.Abs(float64(created)/1000-record.Created)>=2{return 0,false,false}
+ }
  return record.PID,true,false
 }
 func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
