@@ -481,13 +481,13 @@ func(a *WebAPI)configDisksCheck(w http.ResponseWriter,r *http.Request){
  results:=[]map[string]any{}
  for _,d:=range body.Disks{
   name:=strings.TrimSpace(d.Name);path:=strings.TrimSpace(d.Path);mount:=strings.TrimSpace(d.Mountpoint);if mount==""{mount=path}
-  notes:=[]map[string]string{};ok:=true;free:=uint64(0);total:=uint64(0)
-  if name==""||path==""{ok=false;notes=append(notes,map[string]string{"level":"bad","text":"磁盘名称和路径不能为空"})}
-  if _,err:=os.Stat(mount);err!=nil{ok=false;notes=append(notes,map[string]string{"level":"bad","text":"挂载点不存在："+mount})}else if !isMountedPath(mount){ok=false;notes=append(notes,map[string]string{"level":"bad","text":"挂载点没有真正挂载："+mount+"（下载器会拒绝写入未挂载目录）"})}else{notes=append(notes,map[string]string{"level":"ok","text":"挂载点正常"})}
-  if path!=""&&mount!=""&&!diskPathWithinMount(path,mount){ok=false;notes=append(notes,map[string]string{"level":"bad","text":"下载路径不在指定挂载点之下"})}
-  probe:=path
-  if probe!=""{if info,err:=os.Stat(probe);err!=nil||!info.IsDir(){probe=nearestExistingDir(probe)}}
-  if probe==""{ok=false;notes=append(notes,map[string]string{"level":"bad","text":"下载路径及其上级目录均不存在"})}else{
+  notes:=[]map[string]string{};ok:=true;free:=uint64(0);total:=uint64(0);safeToProbe:=true
+  if name==""||path==""{ok=false;safeToProbe=false;notes=append(notes,map[string]string{"level":"bad","text":"磁盘名称和路径不能为空"})}
+  if _,err:=os.Stat(mount);err!=nil{ok=false;safeToProbe=false;notes=append(notes,map[string]string{"level":"bad","text":"挂载点不存在："+mount})}else if !isMountedPath(mount){ok=false;safeToProbe=false;notes=append(notes,map[string]string{"level":"bad","text":"挂载点没有真正挂载："+mount+"（下载器会拒绝写入未挂载目录）"})}else{notes=append(notes,map[string]string{"level":"ok","text":"挂载点正常"})}
+  if path!=""&&mount!=""&&!diskPathWithinMount(path,mount){ok=false;safeToProbe=false;notes=append(notes,map[string]string{"level":"bad","text":"下载路径不在指定挂载点之下"})}
+  probe:=""
+  if safeToProbe{probe=path;if probe!=""{if info,err:=os.Stat(probe);err!=nil||!info.IsDir(){probe=nearestExistingDir(probe)}}}
+  if safeToProbe&&probe==""{ok=false;notes=append(notes,map[string]string{"level":"bad","text":"下载路径及其上级目录均不存在"})}else if safeToProbe{
    if err:=probeWritable(probe);err!=nil{ok=false;notes=append(notes,map[string]string{"level":"bad","text":"目录不可写："+err.Error()})}else{notes=append(notes,map[string]string{"level":"ok","text":"目录可写"})}
    if usage,err:=disk.Usage(probe);err==nil{free=usage.Free;total=usage.Total}else{notes=append(notes,map[string]string{"level":"bad","text":"读取磁盘空间失败："+err.Error()});ok=false}
   }
