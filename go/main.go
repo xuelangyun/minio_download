@@ -342,6 +342,13 @@ func directorySizeBytes(root string)(int64,error){
  })
  return total,err
 }
+func addSpaceReservations(reserved,additional,minFree uint64)(uint64,bool){
+ const max=^uint64(0)
+ if max-reserved<additional{return 0,false}
+ total:=reserved+additional
+ if max-total<minFree{return 0,false}
+ return total+minFree,true
+}
 func(a *App)downloadSelected(sel map[string][]Episode)error{
  loads:=map[string]int{};existing:=map[string]*DiskConfig{}
  // Existing task footprints (including .partial directories) are authoritative.
@@ -354,7 +361,7 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
   }
   if found!=nil{existing[task.Name]=found;loads[found.Name]++}
  }
- byDisk:=map[string][]batch{};waitingSpace:=false
+ byDisk:=map[string][]batch{};waitingSpace:=false;reservedBytes:=map[string]uint64{}
  for _,task:=range a.cfg.Tasks{
   rows:=sel[task.Name];if len(rows)==0{continue}
   d:=existing[task.Name]
@@ -371,12 +378,16 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
    partialBytes,sizeErr:=directorySizeBytes(partial);if sizeErr!=nil{return sizeErr}
    remaining:=ep.Size-partialBytes;if remaining<0{remaining=0};bytes+=remaining
   }
-  need:=uint64(math.Ceil(float64(bytes)*a.cfg.SafetyFactor)+a.cfg.MinFreeGB*1024*1024*1024)
+  estimated:=uint64(math.Ceil(float64(bytes)*a.cfg.SafetyFactor))
+  minFree:=uint64(math.Ceil(a.cfg.MinFreeGB*1024*1024*1024))
+  need,ok:=addSpaceReservations(reservedBytes[d.Name],estimated,minFree)
+  if !ok{return fmt.Errorf("磁盘空间预检数值溢出: %s",d.Name)}
   if usage.Free<need{
    log.Printf("任务整体空间预检不通过，未启动: %s disk=%s free=%d need=%d",task.Name,d.Name,usage.Free,need)
    for _,ep:=range rows{if err:=a.set(ep,*d,"","","waiting_space","磁盘剩余空间不足，任务整体未启动");err!=nil{return err}}
    waitingSpace=true;continue
   }
+  reservedBytes[d.Name]+=estimated
   if err:=a.assign(task.Name,d.Name);err!=nil{return fmt.Errorf("保存任务磁盘分配失败 %s: %w",task.Name,err)}
   if existing[task.Name]==nil{loads[d.Name]++}
   byDisk[d.Name]=append(byDisk[d.Name],batch{task,*d,rows})
