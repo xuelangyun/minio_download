@@ -1448,10 +1448,12 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
      admissionMu.Unlock()
      return
     }
-    reservation,spaceErr:=a.reserveObjectSpace(d,item.Size)
+    partialBytes:=existingPartialBytes(dst,item.Size)
+    reservation,spaceErr:=a.reserveObjectSpace(d,remainingObjectBytes(dst,item.Size))
     if errors.Is(spaceErr,errInsufficientDiskSpace){stopStarting=true}
+    if spaceErr==nil{reservation.consumed=uint64(partialBytes)}
     admissionMu.Unlock()
-    if spaceErr!=nil{err=spaceErr}else{reservation.Consume(existingPartialBytes(dst,item.Size));defer reservation.Release();err=a.fetchObject(item.Key,dst,item,reservation)}
+    if spaceErr!=nil{err=spaceErr}else{defer reservation.Release();err=a.fetchObject(item.Key,dst,item,reservation)}
    }
    if err!=nil{mu.Lock();if first==nil{first=err};mu.Unlock();return}
    total.Add(item.Size)
