@@ -9,10 +9,10 @@ Go 实现与 Python 版本并行维护。当前首版提供 Windows / Linux 命�
 - 质量状态过滤、创建时间优先、episode_id / parent_key 去重。
 - 使用 MinIO Go SDK，不调用 mc。
 - 检查 task_info.json 与可选的 *.SYNC.mcap。
-- 多磁盘任务固定分配；每盘任务顺序调度，任务内并发下载。
+- 多磁盘任务固定分配；每盘任务顺序调度，每盘并发 episode 数可配；每条 episode 内文件并行下载（默认 4）。
 - SQLite WAL 状态库与下载台账。
 - 暂存目录下载完成后原子 rename 发布。
-- 任务级磁盘空间预检，默认预留 3 GiB，按 1.15 安全系数估算。
+- 任务级磁盘空间预检，默认预留 3 GiB，按 1.15 安全系数估算。文件并发参数 `file_workers` 默认 4，与 `max_writes_per_disk` 分开控制。
 
 ## 配置和运行
 
@@ -41,4 +41,4 @@ Windows PowerShell：
 
 ## 当前首版限制
 
-已实现文件级 Range 续传、ETag 条件请求、标准 MD5 ETag 校验、下载后远端元数据复核和 Windows 对象文件名检查。仍未移植 Python Web 控制台、配置 SQLite、任务方案/标签、跨进程暂停控制、PID/单实例锁、完整崩溃恢复与 Python 状态库兼容层。Go 使用自己的 SQLite 状态表，不会直接复用 Python 状态库。生产使用前应先在测试 bucket 验证。
+已实现文件级 Range 续传、ETag 条件请求、标准 MD5 ETag 校验、下载后远端元数据复核和 Windows 对象文件名检查。仍未移植 Python Web 控制台、配置 SQLite、任务方案/标签、Web 发起的跨进程暂停控制、PID/单实例锁、磁盘预留锁、完整崩溃恢复与 Python 配置库兼容层。命令行 Ctrl+C 可取消当前 context，并将正在下载的 episode 标记为 `paused`，保留 `.minio-tmp` 供下次 Range 续传。Go 使用自己的 SQLite 状态表，不会直接复用 Python 状态库。生产使用前应先在测试 bucket 验证。
