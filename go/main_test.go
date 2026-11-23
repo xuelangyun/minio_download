@@ -336,6 +336,21 @@ func TestRemainingObjectBytesAccountsForPartialFile(t *testing.T) {
  if err:=os.WriteFile(dst+".minio-tmp",make([]byte,100),0600);err!=nil{t.Fatal(err)}
  if got:=remainingObjectBytes(dst,100);got!=0{t.Fatalf("complete temp remaining: got %d want 0",got)}
 }
+func TestUniqueEpisodeBackupPathDoesNotCreatePlaceholder(t *testing.T) {
+ parent:=t.TempDir()
+ final:=filepath.Join(parent,"episode")
+ candidate,err:=uniqueEpisodeBackupPath(final);if err!=nil{t.Fatal(err)}
+ if _,err=os.Lstat(candidate);!os.IsNotExist(err){t.Fatalf("backup candidate must not exist before rename, stat err=%v",err)}
+}
+func TestRecoverEpisodeDirectoryIgnoresEmptyInterruptedBackup(t *testing.T) {
+ parent:=t.TempDir();final:=filepath.Join(parent,"episode")
+ emptyBackup:=filepath.Join(parent,".episode.minio-episode-backup-empty")
+ if err:=os.Mkdir(emptyBackup,0755);err!=nil{t.Fatal(err)}
+ if err:=recoverEpisodeDirectory(final);err!=nil{t.Fatal(err)}
+ if _,err:=os.Stat(final);!os.IsNotExist(err){t.Fatalf("empty backup must not become a final episode, stat err=%v",err)}
+ if _,err:=os.Stat(emptyBackup);!os.IsNotExist(err){t.Fatalf("empty interrupted backup should be removed, stat err=%v",err)}
+}
+
 func TestRecoverEpisodeDirectoryRestoresBackupAfterInterruptedPublish(t *testing.T) {
  parent:=t.TempDir();final:=filepath.Join(parent,"episode");partial:=filepath.Join(parent,".episode.partial")
  backup:=filepath.Join(parent,".episode.minio-episode-backup-crash")
