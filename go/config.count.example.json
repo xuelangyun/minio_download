@@ -403,5 +403,6 @@
   "trust_completed_records": true,
   "file_workers": 4,
   "lock_file": "minio_download.lock",
-  "mode": "count"
+  "mode": "count",
+  "verify_md5": true
 }
