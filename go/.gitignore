@@ -1,0 +1,6 @@
+config.json
+*.sqlite*
+logs/
+dist/
+minio-download
+minio-download.exe
