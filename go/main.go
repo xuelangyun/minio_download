@@ -99,7 +99,7 @@ func serveWeb(c Config,host string,port int)error{
  if port<1||port>65535{return errors.New("web-port 必须在 1 到 65535 之间")}
  if err:=os.MkdirAll(filepath.Dir(c.StateDB),0755);err!=nil{return err}
  state,err:=sql.Open("sqlite",c.StateDB);if err!=nil{return err};state.SetMaxOpenConns(4);_,_=state.Exec("PRAGMA busy_timeout=30000");defer state.Close()
- configFile,_:=filepath.Abs(*configPath);api:=&WebAPI{cfg:c,db:state,configFile:configFile,mode:c.Mode}
+ configFile,_:=filepath.Abs(*configPath);api:=&WebAPI{cfg:c,db:state,configFile:configFile,mode:*mode}
  if c.ConfigDB!=""{db,e:=sql.Open("sqlite",c.ConfigDB);if e!=nil{return e};defer db.Close();_ = db.QueryRow("SELECT json_extract(value,'
  if strings.TrimSpace(c.ConfigDB)==""{return nil}
  if runMode!="count"{return errors.New("config_db 当前只支持 count 模式；duration 模式请使用独立 JSON 任务目标")}
@@ -874,7 +874,7 @@ func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
  args:=[]string{"--config",a.configFile,"--mode",a.mode,"--max-rounds",strconv.Itoa(body.MaxRounds)};if body.RecheckMissing{args=append(args,"--recheck-missing")}
  cmd:=exec.Command(executable,args...);configureDetached(cmd);cmd.Stdout=logFile;cmd.Stderr=logFile;cmd.Stdin=nil
  if err=cmd.Start();err!=nil{logFile.Close();writeJSONStatus(w,500,map[string]any{"error":"启动下载器失败: "+err.Error()});return}
- _=logFile.Close();a.childPID=int32(cmd.Process.Pid);if proc,e:=process.NewProcess(a.childPID);e==nil{if ms,e:=proc.CreateTime();e==nil{a.childCreated=float64(ms)/1000}}
+ _=logFile.Close();go func(){_=cmd.Wait()}();a.childPID=int32(cmd.Process.Pid);if proc,e:=process.NewProcess(a.childPID);e==nil{if ms,e:=proc.CreateTime();e==nil{a.childCreated=float64(ms)/1000}}
  writeJSON(w,map[string]any{"ok":true,"pid":cmd.Process.Pid})
 }
 func(a *WebAPI)stop(w http.ResponseWriter,r *http.Request){
