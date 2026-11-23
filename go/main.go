@@ -37,7 +37,7 @@ type Config struct {
  Endpoint string `json:"minio_endpoint"`; AccessKey string `json:"minio_access_key"`; SecretKey string `json:"minio_secret_key"`; Bucket string `json:"minio_bucket"`; Region string `json:"minio_region"`; SSL bool `json:"minio_use_ssl"`
  PGHost string `json:"pg_host"`; PGPort int `json:"pg_port"`; PGDB string `json:"pg_database"`; PGUser string `json:"pg_user"`; PGPassword string `json:"pg_password"`
  DataVersion string `json:"data_version"`; LockFile string `json:"lock_file"`; StateDB string `json:"state_db"`; LogDir string `json:"log_dir"`; MinFreeGB float64 `json:"min_free_gb"`; SafetyFactor float64 `json:"space_safety_factor"`
- Workers int `json:"max_writes_per_disk"`; FileWorkers int `json:"file_workers"`; FileRetries int `json:"file_retries"`; RetryDelaySeconds float64 `json:"retry_delay_seconds"`; RequireMCAP bool `json:"require_mcap"`; MCAPPattern string `json:"mcap_pattern"`; IncludeNull bool `json:"include_null_quality"`; VerifyMD5 *bool `json:"verify_md5"`; TrustCompletedRecords bool `json:"trust_completed_records"`
+ Workers int `json:"max_writes_per_disk"`; FileWorkers int `json:"file_workers"`; FileRetries int `json:"file_retries"`; RetryDelaySeconds float64 `json:"retry_delay_seconds"`; ValidateWorkers int `json:"validate_workers"`; RequireMCAP bool `json:"require_mcap"`; MCAPPattern string `json:"mcap_pattern"`; IncludeNull bool `json:"include_null_quality"`; VerifyMD5 *bool `json:"verify_md5"`; TrustCompletedRecords bool `json:"trust_completed_records"`
  Disks []DiskConfig `json:"disks"`; Tasks []Task `json:"tasks"`
 }
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
@@ -73,7 +73,7 @@ func(c *Config)normalize(m string)error{
  if c.Endpoint==""||c.AccessKey==""||c.SecretKey==""||c.Bucket==""{return errors.New("MinIO endpoint/access_key/secret_key/bucket 必须填写")}
  if c.PGHost==""||c.PGDB==""||c.PGUser==""||c.PGPassword==""{return errors.New("PostgreSQL 连接参数必须填写")}
  if c.PGPort==0{c.PGPort=5432};if c.DataVersion==""{c.DataVersion="银河2.2数据"};if c.LockFile==""{c.LockFile="minio_download.lock"};if c.StateDB==""{c.StateDB="minio_download_state.sqlite3"};if c.LogDir==""{c.LogDir="logs"}
- if c.MinFreeGB==0{c.MinFreeGB=3};if c.SafetyFactor==0{c.SafetyFactor=1.15};if c.Workers<=0{c.Workers=2};if c.FileWorkers<=0{c.FileWorkers=4};if c.FileRetries<=0{c.FileRetries=5};if c.RetryDelaySeconds<=0{c.RetryDelaySeconds=1};if c.Workers>16||c.FileWorkers>16||c.FileRetries>20{return errors.New("并发数不能超过 16，文件重试次数不能超过 20")};if c.MCAPPattern==""{c.MCAPPattern="*.SYNC.mcap"};if c.VerifyMD5==nil{v:=true;c.VerifyMD5=&v}
+ if c.MinFreeGB==0{c.MinFreeGB=3};if c.SafetyFactor==0{c.SafetyFactor=1.15};if c.Workers<=0{c.Workers=2};if c.FileWorkers<=0{c.FileWorkers=4};if c.FileRetries<=0{c.FileRetries=5};if c.RetryDelaySeconds<=0{c.RetryDelaySeconds=1};if c.ValidateWorkers<=0{c.ValidateWorkers=8};if c.Workers>16||c.FileWorkers>16||c.ValidateWorkers>32||c.FileRetries>20{return errors.New("并发数不能超过 16，文件重试次数不能超过 20")};if c.MCAPPattern==""{c.MCAPPattern="*.SYNC.mcap"};if c.VerifyMD5==nil{v:=true;c.VerifyMD5=&v}
  if len(c.Disks)==0||len(c.Tasks)==0{return errors.New("disks/tasks 不能为空")}
  seen:=map[string]bool{};aliases:=map[string]string{};dirs:=map[string]string{}
  for _,t:=range c.Tasks{
@@ -193,32 +193,55 @@ func(a *App)hasLocalCopy(t Task,e Episode)bool{
  for _,d:=range a.cfg.Disks{p,_:=episodePaths(a.cfg.DataVersion,t,d,e.ParentKey);if dirHasFiles(p){return true}}
  return false
 }
-func(a *App)prevalidateCount(groups map[string][]Episode)map[string][]Episode{
+func(a *App)prevalidateCount(groups map[string][]Episode)(map[string][]Episode,error){
  validGroups:=map[string][]Episode{}
  for _,task:=range a.cfg.Tasks{
   candidates:=groups[task.Name];if len(candidates)==0{continue}
-  _,downloaded:=a.stats(task.Name);gap:=task.TargetCount-downloaded
-  if gap<=0{continue}
-  valid:=make([]Episode,0,gap);validNew:=0;skipped:=0
+  selected:=make([]Episode,0)
+  todo:=make([]Episode,0,len(candidates))
   for _,ep:=range candidates{
-   if validNew>=gap{break}
-   if a.completed(ep.ID){valid=append(valid,ep);continue}
-   if a.hasLocalCopy(task,ep){valid=append(valid,ep);validNew++;continue}
+   if a.completed(ep.ID){selected=append(selected,ep);continue}
+   if a.hasLocalCopy(task,ep){
+    diskName,err:=findExistingTaskDisk(a.cfg.DataVersion,task,a.cfg.Disks,[]Episode{ep})
+    if err!=nil{return nil,err}
+    var chosen *DiskConfig
+    for i:=range a.cfg.Disks{if a.cfg.Disks[i].Name==diskName{chosen=&a.cfg.Disks[i];break}}
+    if chosen==nil{return nil,fmt.Errorf("找不到 episode %s 的本地磁盘 %s",ep.ID,diskName)}
+    pinned:=a.assigned(task.Name)
+    if pinned!=""&&pinned!=diskName{return nil,fmt.Errorf("任务 %s 固定在磁盘 %s，但 episode %s 已存在于 %s",task.Name,pinned,ep.ID,diskName)}
+    if pinned==""{if err:=a.assign(task.Name,diskName);err!=nil{return nil,err}}
+    final,_:=episodePaths(a.cfg.DataVersion,task,*chosen,ep.ParentKey)
+    if err:=a.record(ep,*chosen,final);err!=nil{return nil,err}
+    if err:=a.set(ep,*chosen,final,"","completed","");err!=nil{return nil,err}
+    selected=append(selected,ep);continue
+   }
    var state string
    _=a.db.QueryRow("SELECT status FROM downloads WHERE episode_id=?",ep.ID).Scan(&state)
-   if !a.recheck&&(state=="missing_task_info"||state=="missing_mcap"){skipped++;continue}
-   status,detail,err:=a.checkRequiredFiles(ep.ParentKey)
-   if err!=nil{log.Printf("条数预检查失败，跳过并留待下次重试 %s: %v",ep.ID,err);continue}
-   if status!="ok"{
-    _=a.set(ep,a.cfg.Disks[0],"","",""+status,detail);skipped++
-    continue
-   }
-   a.validated[ep.ID]=true;valid=append(valid,ep);validNew++
+   if !a.recheck&&(state=="missing_task_info"||state=="missing_mcap"){continue}
+   todo=append(todo,ep)
   }
-  validGroups[task.Name]=valid
-  if validNew<gap{log.Printf("任务 %s 条数预检查后仍缺 %d 条：需要 %d，找到 %d 个有效候选，跳过/失败 %d 条",task.Name,gap-validNew,gap,validNew,skipped)}
+  _,downloaded:=a.stats(task.Name);gap:=task.TargetCount-downloaded
+  if gap<=0{validGroups[task.Name]=selected;continue}
+  chosenCount:=0;skipped:=0
+  for pos:=0;pos<len(todo)&&chosenCount<gap;{
+   batchSize:=gap-chosenCount;if batchSize>len(todo)-pos{batchSize=len(todo)-pos}
+   batch:=todo[pos:pos+batchSize];pos+=batchSize
+   type checkResult struct{episode Episode;status,detail string;err error}
+   results:=make([]checkResult,len(batch));sem:=make(chan struct{},a.cfg.ValidateWorkers);var wg sync.WaitGroup
+   for i,ep:=range batch{i,ep:=i,ep;sem<-struct{}{};wg.Add(1);go func(){defer wg.Done();defer func(){<-sem}();status,detail,err:=a.checkRequiredFiles(ep.ParentKey);results[i]=checkResult{ep,status,detail,err}}()}
+   wg.Wait()
+   for _,result:=range results{
+    if result.err!=nil{log.Printf("条数预检查失败，跳过并留待下次重试 %s: %v",result.episode.ID,result.err);continue}
+    if result.status=="ok"{a.validated[result.episode.ID]=true;selected=append(selected,result.episode);chosenCount++;continue}
+    d:=a.cfg.Disks[0];if name:=a.assigned(task.Name);name!=""{for _,candidate:=range a.cfg.Disks{if candidate.Name==name{d=candidate;break}}}
+    if err:=a.set(result.episode,d,"","",result.status,result.detail);err!=nil{return nil,err}
+    skipped++
+   }
+  }
+  validGroups[task.Name]=selected
+  if chosenCount<gap{log.Printf("任务 %s 条数预检查后仍缺 %d 条：需要 %d，找到 %d 个有效候选，跳过 %d 条",task.Name,gap-chosenCount,gap,chosenCount,skipped)}
  }
- return validGroups
+ return validGroups,nil
 }
 func(a *App)run(all []Episode,nround int)error{
  groups:=map[string][]Episode{};for _,e:=range all{groups[e.Task]=append(groups[e.Task],e)}
