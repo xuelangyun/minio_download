@@ -387,7 +387,7 @@ func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
 	put("pg.user", "postgres")
 	put("pg.password", "p@ss")
 	put("tasks.data_version", "银河2.2数据")
-	put("run.min_free_gb", 3.0)
+	put("run.min_free_gb", 0.0)
 	put("run.space_safety_factor", 1.15)
 	put("run.max_writes_per_disk", 2)
 	put("run.require_mcap", true)
@@ -396,7 +396,7 @@ func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
 	put("run.mcap_pattern", "*.SYNC.mcap")
 	put("transfer.file_workers", 4)
 	put("transfer.file_retries", 5)
-	put("transfer.retry_delay", 1.0)
+	put("transfer.retry_delay", 0.0)
 	put("transfer.verify_md5", true)
 	if _, err := db.Exec("INSERT INTO scenes(id,position,name) VALUES(1,0,'Household')"); err != nil {
 		t.Fatal(err)
@@ -425,6 +425,12 @@ func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
 	}
 	if len(cfg.Disks) != 1 || cfg.Disks[0].Name != "disk1" || cfg.Workers != 2 || cfg.FileWorkers != 4 {
 		t.Fatalf("disk/runtime settings import failed: disks=%+v workers=%d fileWorkers=%d", cfg.Disks, cfg.Workers, cfg.FileWorkers)
+	}
+	if err := cfg.normalize("count"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MinFreeGB != 0 || cfg.RetryDelaySeconds != 0 {
+		t.Fatalf("valid zero-valued settings were overwritten by defaults: minFree=%v retryDelay=%v", cfg.MinFreeGB, cfg.RetryDelaySeconds)
 	}
 }
 
