@@ -1835,3 +1835,19 @@ func TestFirstRunUsesSingleSQLiteDatabase(t *testing.T) {
 		t.Fatalf("expected a single persistent SQLite file, found %v", entries)
 	}
 }
+
+func TestSaveLastRunPersistsPerRunStatistics(t *testing.T) {
+ dbPath:=filepath.Join(t.TempDir(),"run-history.sqlite3")
+ if err:=initializeSQLiteDatabase(dbPath);err!=nil{t.Fatal(err)}
+ db,err:=sql.Open("sqlite",dbPath);if err!=nil{t.Fatal(err)};defer db.Close();db.SetMaxOpenConns(1)
+ started:=time.Now().UTC().Add(-2*time.Minute)
+ startedAt:=started.Format(time.RFC3339Nano)
+ completedAt:=time.Now().UTC().Format(time.RFC3339Nano)
+ if _,err=db.Exec("INSERT INTO downloads(episode_id,task_name,expected_bytes,status,completed_at,updated_at) VALUES('ep-1','task',4096,'completed',?,?)",completedAt,completedAt);err!=nil{t.Fatal(err)}
+ if _,err=db.Exec("INSERT INTO downloaded_episodes(episode_id,task_name,file_size,content_time,downloaded_at) VALUES('ep-1','task',4096,120,?)",completedAt);err!=nil{t.Fatal(err)}
+ app:=&App{db:db,mode:"duration",runID:"test-run-1",runStartedAt:started}
+ app.saveLastRun("finished",nil)
+ var result string;var count,bytes int64;var seconds,elapsed float64
+ if err=db.QueryRow("SELECT result,completed_count,completed_bytes,content_seconds,duration_seconds FROM run_history WHERE run_id='test-run-1'").Scan(&result,&count,&bytes,&seconds,&elapsed);err!=nil{t.Fatal(err)}
+ if result!="finished"||count!=1||bytes!=4096||seconds!=120||elapsed<=0{t.Fatalf("unexpected run history: result=%s count=%d bytes=%d seconds=%v elapsed=%v",result,count,bytes,seconds,elapsed)}
+}
