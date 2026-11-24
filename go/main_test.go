@@ -2066,3 +2066,19 @@ func TestWebAPIPublishLiveStatusBroadcastsLatestSnapshot(t *testing.T) {
  }
  if _,updated,ok:=app.currentLiveStatus();!ok||updated.IsZero(){t.Fatal("published live snapshot was not cached in memory")}
 }
+
+
+func TestDashboardLedgerTotalsAggregatesTasksAndDisks(t *testing.T) {
+ totals:=newDashboardLedgerTotals()
+ known:=map[string]bool{"task-a":true}
+ totals.add("task-a","disk-1",sql.NullInt64{Int64:100,Valid:true},sql.NullFloat64{Float64:12.5,Valid:true},sql.NullString{String:"/valid/a",Valid:true},true,known["task-a"])
+ totals.add("task-a","disk-1",sql.NullInt64{Int64:50,Valid:true},sql.NullFloat64{Float64:7.5,Valid:true},sql.NullString{String:"/valid/b",Valid:true},true,known["task-a"])
+ totals.add("task-a","disk-2",sql.NullInt64{Int64:9,Valid:true},sql.NullFloat64{Float64:1,Valid:true},sql.NullString{String:"/stale",Valid:true},false,known["task-a"])
+ totals.add("retired-task","disk-3",sql.NullInt64{Int64:1,Valid:true},sql.NullFloat64{Float64:1,Valid:true},sql.NullString{String:"/retired",Valid:true},false,false)
+ task:=totals.Tasks["task-a"]
+ if task.Count!=2||task.Bytes!=150||task.Seconds!=20{t.Fatalf("unexpected task totals: %+v",task)}
+ disk:=totals.Disks["disk-1"]
+ if disk.Count!=2||disk.Bytes!=150||disk.Seconds!=20{t.Fatalf("unexpected disk totals: %+v",disk)}
+ if totals.Completed!=2||totals.CompletedBytes!=150||totals.ContentSeconds!=20{t.Fatalf("unexpected overall totals: %+v",totals)}
+ if totals.StaleRecords!=1{t.Fatalf("stale record count = %d, want 1",totals.StaleRecords)}
+}
