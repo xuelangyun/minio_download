@@ -160,7 +160,7 @@ func initializeSQLiteDatabase(name string)error{
  if _,err=db.Exec("PRAGMA busy_timeout=30000; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;"+
   "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);"+
   "CREATE TABLE IF NOT EXISTS scenes(id INTEGER PRIMARY KEY AUTOINCREMENT,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE);"+
-  "CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL,target_count INTEGER NOT NULL DEFAULT 0,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]');"+
+  "CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL,target_count INTEGER NOT NULL DEFAULT 0,target_hours REAL NOT NULL DEFAULT 0,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]');"+
   "CREATE TABLE IF NOT EXISTS task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL,PRIMARY KEY(task_id,position));"+
   "CREATE TABLE IF NOT EXISTS disks(name TEXT PRIMARY KEY,position INTEGER NOT NULL,path TEXT NOT NULL,mountpoint TEXT NOT NULL);"+
   "CREATE TABLE IF NOT EXISTS plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,note TEXT NOT NULL DEFAULT '',payload TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);"+
@@ -173,6 +173,7 @@ func initializeSQLiteDatabase(name string)error{
   "CREATE INDEX IF NOT EXISTS idx_download_task_status ON downloads(task_name,status);"+
   "CREATE INDEX IF NOT EXISTS idx_downloaded_task ON downloaded_episodes(task_name);"+
   "CREATE INDEX IF NOT EXISTS idx_runtime_logs_created ON runtime_logs(created_at);");err!=nil{return err}
+ if err=ensureColumn(db,"tasks","target_hours","REAL NOT NULL DEFAULT 0");err!=nil{return err}
  for _,item:=range webConfigSchema(){
   key,ok:=item["key"].(string);if !ok{continue};value:=item["default"];if value==nil{continue}
   encoded,e:=json.Marshal(value);if e!=nil{return e}
@@ -200,7 +201,7 @@ func processIdentity(pid int,created float64)bool{
 const webUIHTML = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MinIO 下载器</title>
 <style>
-:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#172033;background:#f4f6fa;font-size:14px}*{box-sizing:border-box}body{margin:0}.top{background:#182235;color:#fff;padding:18px 24px;display:flex;justify-content:space-between;align-items:center}.top h1{font-size:19px;margin:0}.top small{color:#bdc7d8}.wrap{max-width:1180px;margin:22px auto;padding:0 18px}.nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}.nav button,.btn{border:1px solid #cbd3df;border-radius:7px;padding:9px 13px;background:#fff;color:#253047;cursor:pointer}.nav button.active,.btn.primary{background:#263b5c;color:#fff;border-color:#263b5c}.btn.danger{color:#b42318}.panel{display:none}.panel.active{display:block}.card{background:#fff;border:1px solid #e0e5ed;border-radius:10px;padding:18px;margin-bottom:16px}.card h2{font-size:16px;margin:0 0 14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.field label{display:block;font-weight:600;margin-bottom:5px}.field input,.field select,.field textarea,textarea{width:100%;border:1px solid #cbd3df;border-radius:6px;padding:9px;font:inherit}.field small,.hint{color:#64748b;font-size:12px}.field input[type=checkbox]{width:auto}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.notice{padding:11px 13px;background:#f1f5f9;border-radius:7px;margin:10px 0;color:#34445d}.ok{color:#16703c}.bad{color:#b42318}.status{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.metric{background:#f6f8fb;border-radius:8px;padding:14px}.metric b{display:block;font-size:22px;margin-top:5px}.editor{min-height:260px;font:12px ui-monospace,monospace;white-space:pre;tab-size:2}.logs{height:440px;overflow:auto;background:#101827;color:#d4e0f0;padding:12px;border-radius:8px;white-space:pre-wrap;font:12px ui-monospace,monospace}.tag{display:inline-block;padding:3px 8px;border-radius:20px;background:#e9eef6;color:#35445d;margin-left:8px}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid #e4e9f0}code{background:#f1f5f9;padding:2px 4px;border-radius:4px}@media(max-width:600px){.top{padding:15px}.wrap{padding:0 10px}.card{padding:13px}}
+:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#172033;background:#f4f6fa;font-size:14px}*{box-sizing:border-box}body{margin:0}.top{background:#182235;color:#fff;padding:18px 24px;display:flex;justify-content:space-between;align-items:center}.top h1{font-size:19px;margin:0}.top small{color:#bdc7d8}.wrap{max-width:1180px;margin:22px auto;padding:0 18px}.nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}.nav button,.btn{border:1px solid #cbd3df;border-radius:7px;padding:9px 13px;background:#fff;color:#253047;cursor:pointer}.nav button.active,.btn.primary{background:#263b5c;color:#fff;border-color:#263b5c}.btn.danger{color:#b42318}.panel{display:none}.panel.active{display:block}.card{background:#fff;border:1px solid #e0e5ed;border-radius:10px;padding:18px;margin-bottom:16px}.card h2{font-size:16px;margin:0 0 14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.field label{display:block;font-weight:600;margin-bottom:5px}.field input,.field select,.field textarea,textarea{width:100%;border:1px solid #cbd3df;border-radius:6px;padding:9px;font:inherit}.field small,.hint{color:#64748b;font-size:12px}.field input[type=checkbox]{width:auto}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.notice{padding:11px 13px;background:#f1f5f9;border-radius:7px;margin:10px 0;color:#34445d}.ok{color:#16703c}.bad{color:#b42318}.status{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.metric{background:#f6f8fb;border-radius:8px;padding:14px}.metric b{display:block;font-size:22px;margin-top:5px}.editor{min-height:260px;font:12px ui-monospace,monospace;white-space:pre;tab-size:2}.disk-row{border:1px solid #dbe3ed;border-radius:8px;padding:13px;margin:10px 0;background:#fbfcfe}.disk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.disk-actions{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:10px}.logs{height:440px;overflow:auto;background:#101827;color:#d4e0f0;padding:12px;border-radius:8px;white-space:pre-wrap;font:12px ui-monospace,monospace}.tag{display:inline-block;padding:3px 8px;border-radius:20px;background:#e9eef6;color:#35445d;margin-left:8px}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid #e4e9f0}code{background:#f1f5f9;padding:2px 4px;border-radius:4px}@media(max-width:600px){.top{padding:15px}.wrap{padding:0 10px}.card{padding:13px}}
 </style></head><body>
 <header class="top"><div><h1>MinIO 下载器 <span class="tag">Go</span></h1><small>首次启动：网页配置 · SQLite 单文件存储</small></div><div id="connection-state">正在连接…</div></header>
 <main class="wrap">
@@ -208,14 +209,14 @@ const webUIHTML = `<!doctype html>
 <button class="active" data-tab="dashboard">运行状态</button><button data-tab="connection">连接配置</button><button data-tab="disks">磁盘配置</button><button data-tab="tasks">任务配置</button><button data-tab="advanced">运行参数</button><button data-tab="records">日志记录</button>
 </div>
 <section id="dashboard" class="panel active">
-<div class="card"><h2>下载任务</h2><div class="status" id="metrics"></div><div id="setup-issues" class="notice">正在检查配置…</div><div class="actions"><button class="btn primary" id="start-run">开始下载</button><button class="btn" id="pause-run">安全暂停</button><button class="btn danger" id="force-run">强制停止</button><button class="btn" id="refresh">刷新状态</button></div></div>
+<div class="card"><h2>下载任务</h2><div class="field" style="max-width:320px"><label for="download-mode">下载目标模式</label><select id="download-mode"><option value="count">按条数下载</option><option value="duration">按时长下载</option></select><small>按时长模式根据已完成数据的 content_time 累计，达到任务目标后停止补充。</small></div><div class="status" id="metrics"></div><div id="setup-issues" class="notice">正在检查配置…</div><div class="actions"><button class="btn primary" id="start-run">开始下载</button><button class="btn" id="pause-run">安全暂停</button><button class="btn danger" id="force-run">强制停止</button><button class="btn" id="refresh">刷新状态</button></div></div>
 <div class="card"><h2>磁盘状态</h2><div id="disk-status"></div></div><div class="card"><h2>任务进度</h2><div id="task-status"></div></div>
 </section>
 <section id="connection" class="panel">
 <div class="card"><h2>MinIO 和 PostgreSQL</h2><div class="hint">连接信息保存到 SQLite。Secret Key 和数据库密码不会回显；留空表示保留已保存的密码。</div><div id="connection-fields" class="grid"></div><div class="actions"><button class="btn primary" id="save-connection">保存连接配置</button><button class="btn" id="test-minio">测试 MinIO</button><button class="btn" id="test-pg">测试 PostgreSQL</button></div><div id="connection-result" class="notice">尚未测试连接</div></div>
 </section>
-<section id="disks" class="panel"><div class="card"><h2>下载磁盘</h2><p class="hint">配置下载目录及其实际挂载点。可配置多块磁盘；同一块磁盘上的任务按队列调度。</p><textarea id="disk-json" class="editor" spellcheck="false"></textarea><div class="actions"><button class="btn" id="check-disks">检查磁盘</button><button class="btn primary" id="save-disks">保存磁盘配置</button></div><div id="disk-result" class="notice">建议先检查，再保存。</div></div></section>
-<section id="tasks" class="panel"><div class="card"><h2>任务与目标条数</h2><p class="hint">首次启动自动载入内置任务清单。可以调整任务、别名、目录、标签和每个任务的目标条数。</p><div class="field"><label for="data-version">数据版本目录</label><input id="data-version" placeholder="例如：银河2.2数据"></div><p><textarea id="task-json" class="editor" spellcheck="false"></textarea></p><div class="actions"><button class="btn primary" id="save-tasks">保存任务配置</button><button class="btn" id="reset-tasks">恢复内置默认任务</button></div><div id="task-result" class="notice"></div></div></section>
+<section id="disks" class="panel"><div class="card"><h2>下载磁盘</h2><p class="hint">通过图形界面添加磁盘、选择真实挂载点并设置下载目录。保存前会检查挂载状态、目录权限和剩余空间。</p><div id="disk-list" class="disk-list"></div><div class="actions"><button class="btn" id="detect-disks">重新检测磁盘</button><button class="btn" id="add-disk">添加磁盘</button><button class="btn" id="check-disks">检查磁盘</button><button class="btn primary" id="save-disks">保存磁盘配置</button></div><div id="disk-result" class="notice">先添加磁盘并选择挂载点，再检查和保存。</div></div></section>
+<section id="tasks" class="panel"><div class="card"><h2>任务与下载目标</h2><p class="hint">任务清单保存在 SQLite。每个任务可配置目标条数和目标时长（小时）；启动时选择对应下载模式。</p><div class="card" style="background:#f8fafc"><h3>任务方案库</h3><div class="grid"><div class="field"><label for="plan-name">方案名称</label><input id="plan-name" placeholder="例如：日常采集任务"></div><div class="field"><label for="plan-note">方案备注</label><input id="plan-note" placeholder="可选"></div></div><div class="actions"><button class="btn primary" id="save-plan">保存当前任务为方案</button><button class="btn" id="refresh-plans">刷新方案</button></div><div id="plan-list"></div><div id="plan-result" class="notice">方案可重复载入，支持替换当前任务清单。</div></div><div class="field"><label for="data-version">数据版本目录</label><input id="data-version" placeholder="例如：银河2.2数据"></div><p><textarea id="task-json" class="editor" spellcheck="false"></textarea></p><div class="actions"><button class="btn primary" id="save-tasks">保存任务配置</button><button class="btn" id="reset-tasks">恢复内置默认任务</button></div><div id="task-result" class="notice"></div></div></section>
 <section id="advanced" class="panel">
 <div class="card"><h2>运行与传输参数</h2><div id="advanced-fields" class="grid"></div><div class="actions"><button class="btn primary" id="save-advanced">保存运行参数</button></div></div>
 <div class="card"><h2>Web 访问安全</h2><p class="hint">默认仅监听本机 127.0.0.1。需要局域网访问时，先在本机设置访问口令，再将监听地址改为 0.0.0.0 并重启程序。</p><div class="field"><label for="access-token">访问口令（至少 12 个字符）</label><input id="access-token" type="password" autocomplete="new-password" placeholder="仅用于设置或轮换口令"></div><div class="actions"><button class="btn primary" id="set-token">设置 / 更新口令</button></div><div id="token-result" class="notice"></div></div>
@@ -224,14 +225,20 @@ const webUIHTML = `<!doctype html>
 <section id="records" class="panel"><div class="card"><h2>运行日志（SQLite）</h2><div class="actions"><button class="btn" id="refresh-logs">刷新日志</button></div><pre id="logs" class="logs"></pre></div></section>
 </main>
 <script>
-let configData=null,statusData=null,logOffset=0,refreshTimer=null;
+let configData=null,statusData=null,logOffset=0,refreshTimer=null,diskMounts=[];
 const $=id=>document.getElementById(id);
 async function api(path,method,body){const headers={"Content-Type":"application/json"};const token=sessionStorage.getItem("minio_download_token");if(token)headers.Authorization="Bearer "+token;const response=await fetch(path,{method:method||"GET",headers,body:body===undefined?undefined:JSON.stringify(body)});const data=await response.json().catch(()=>({error:"服务器返回内容不是 JSON"}));if(!response.ok)throw new Error(data.error||("HTTP "+response.status));return data}
 function message(id,text,ok){$(id).textContent=text;$(id).className="notice "+(ok===true?"ok":ok===false?"bad":"")}
 function esc(v){return String(v===undefined||v===null?"":v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]))}
 function fieldsFor(groups){const schema=configData.schema.filter(x=>groups.includes(x.group));return schema.map(item=>{const value=configData.values[item.key];let control="";if(item.kind==="bool"){control='<input type="checkbox" data-key="'+esc(item.key)+'" '+(value?"checked":"")+'>'}else{const type=item.secret?"password":item.kind==="str"?"text":"number";const extra=item.kind==="int"?' step="1"':item.kind==="float"?' step="any"':"";control='<input data-key="'+esc(item.key)+'" type="'+type+'" value="'+(item.secret?"":esc(value))+'"'+extra+(item.min!==null&&item.min!==undefined?' min="'+item.min+'"':"")+(item.max!==null&&item.max!==undefined?' max="'+item.max+'"':"")+' placeholder="'+esc(item.placeholder|| (item.secret?"留空表示不修改":""))+'">'}return '<div class="field"><label>'+esc(item.label)+(item.secret&&configData.secrets_set.includes(item.key)?'（已保存）':"")+'</label>'+control+'<small>'+esc(item.help||"")+'</small></div>'}).join("")}
 function readFields(root){const values={};root.querySelectorAll("[data-key]").forEach(el=>{const key=el.dataset.key;const schema=configData.schema.find(x=>x.key===key);if(schema.secret&&!el.value)return;if(schema.kind==="bool")values[key]=el.checked;else if(schema.kind==="int")values[key]=Number.parseInt(el.value,10)||0;else if(schema.kind==="float")values[key]=Number(el.value)||0;else values[key]=el.value});return values}
-async function loadConfig(){configData=await api("/api/config");$("connection-fields").innerHTML=fieldsFor(["minio","pg"]);$("advanced-fields").innerHTML=fieldsFor(["run","transfer","web"]);$("disk-json").value=JSON.stringify({disks:configData.disks||[]},null,2);$("data-version").value=configData.tasks.data_version||"";$("task-json").value=JSON.stringify({data_version:configData.tasks.data_version,scenes:configData.tasks.scenes},null,2);$("db-path").textContent="SQLite 文件："+configData.paths.sqlite_db;$("connection-state").textContent="控制台已连接";$("connection-state").className="ok"}
+async function loadDiskMounts(){try{const d=await api("/api/config/disks/detect");diskMounts=d.mounts||[]}catch(e){diskMounts=[]}}
+function renderDisks(disks){const root=$("disk-list");root.innerHTML="";(disks||[]).forEach((d,i)=>{const card=document.createElement("div");card.className="disk-row";card.innerHTML='<div class="disk-actions"><b>磁盘 '+(i+1)+'</b><button type="button" class="btn danger" data-remove-disk="'+i+'">删除</button></div><div class="disk-grid"><div class="field"><label>磁盘名称</label><input data-disk-field="name" value="'+esc(d.name)+'" placeholder="例如 disk1"></div><div class="field"><label>实际挂载点</label><input data-disk-field="mountpoint" list="disk-mount-options" value="'+esc(d.mountpoint||"")+'" placeholder="选择或输入挂载点"></div><div class="field"><label>下载目录</label><input data-disk-field="path" value="'+esc(d.path)+'" placeholder="挂载点下的下载目录"></div></div>';root.appendChild(card)});let dl=document.getElementById("disk-mount-options");if(!dl){dl=document.createElement("datalist");dl.id="disk-mount-options";document.body.appendChild(dl)}dl.innerHTML=diskMounts.map(m=>'<option value="'+esc(m.mountpoint)+'">'+esc(m.device||"")+' · '+(m.free/1073741824).toFixed(1)+' GiB 可用</option>').join("");root.querySelectorAll("[data-remove-disk]").forEach(btn=>btn.onclick=()=>{const rows=readDisks();rows.splice(Number(btn.dataset.removeDisk),1);renderDisks(rows)})}
+function readDisks(){return Array.from($("disk-list").querySelectorAll(".disk-row")).map(row=>{const v={};row.querySelectorAll("[data-disk-field]").forEach(el=>v[el.dataset.diskField]=el.value.trim());return v})}
+function addDisk(){const rows=readDisks();rows.push({name:"disk"+(rows.length+1),mountpoint:"",path:""});renderDisks(rows)}
+async function refreshPlans(){try{const d=await api("/api/plans");const root=$("plan-list");root.innerHTML=(d.plans||[]).map(p=>'<div class="notice"><b>'+esc(p.name)+'</b> · '+p.task_count+' 个任务 · '+p.scene_count+' 个场景 · 更新 '+esc(p.updated_at)+'<div class="actions"><button class="btn primary" data-plan-apply="'+p.id+'">替换载入</button><button class="btn" data-plan-export="'+p.id+'">导出</button><button class="btn danger" data-plan-delete="'+p.id+'">删除</button></div></div>').join("")||'<p class="hint">暂无已保存方案。</p>';root.querySelectorAll("[data-plan-apply]").forEach(b=>b.onclick=async()=>{if(!confirm("用此方案替换当前任务清单？"))return;try{await api("/api/plans/"+b.dataset.planApply+"/apply","POST",{mode:"replace"});message("plan-result","方案已载入；当前任务配置已保存到 SQLite",true);await loadConfig();await refreshPlans()}catch(e){message("plan-result",e.message,false)}});root.querySelectorAll("[data-plan-delete]").forEach(b=>b.onclick=async()=>{if(!confirm("删除这个任务方案？不会删除当前任务清单或已下载文件。"))return;try{await api("/api/plans/"+b.dataset.planDelete,"DELETE");await refreshPlans();message("plan-result","方案已删除",true)}catch(e){message("plan-result",e.message,false)}});root.querySelectorAll("[data-plan-export]").forEach(b=>b.onclick=()=>{location.href="/api/plans/"+b.dataset.planExport+"/export"})}catch(e){message("plan-result",e.message,false)}}
+async function savePlan(){const name=$("plan-name").value.trim();if(!name){message("plan-result","请填写方案名称",false);return}try{await api("/api/plans","POST",{name:name,note:$("plan-note").value});await refreshPlans();message("plan-result","当前任务清单已保存为方案",true)}catch(e){message("plan-result",e.message,false)}}
+async function loadConfig(){configData=await api("/api/config");$("connection-fields").innerHTML=fieldsFor(["minio","pg"]);$("advanced-fields").innerHTML=fieldsFor(["run","transfer","web"]);await loadDiskMounts();renderDisks(configData.disks||[]);$("data-version").value=configData.tasks.data_version||"";$("task-json").value=JSON.stringify({data_version:configData.tasks.data_version,scenes:configData.tasks.scenes},null,2);$("db-path").textContent="SQLite 文件："+configData.paths.sqlite_db;$("connection-state").textContent="控制台已连接";$("connection-state").className="ok"}
 function renderStatus(d){statusData=d;const t=d.transfer_progress||{};const metrics=[["运行状态",d.downloader&&d.downloader.running?"下载中":"空闲"],["下载速度",((t.speed_bytes_per_second||0)/1048576).toFixed(2)+" MiB/s"],["已下载",((t.downloaded_bytes||0)/1073741824).toFixed(2)+" GiB"],["进度",(t.progress_percent||0).toFixed(1)+"%"],["预计剩余",t.eta_seconds===null||t.eta_seconds===undefined?"—":Math.round(t.eta_seconds/60)+" 分钟"]];$("metrics").innerHTML=metrics.map(x=>'<div class="metric">'+esc(x[0])+'<b>'+esc(x[1])+'</b></div>').join("");$("setup-issues").innerHTML=(d.setup_issues||[]).length?(d.setup_issues.map(x=>'<div class="bad">· '+esc(x.text)+'</div>').join("")):'<span class="ok">配置检查通过，可启动下载。</span>';$("disk-status").innerHTML=(d.disks||[]).map(x=>'<div class="notice">'+esc(x.name)+' · '+esc(x.path)+' · '+(x.mounted?"挂载正常":"未挂载")+' · 可用 '+(x.free/1073741824||0).toFixed(1)+' GiB</div>').join("")||"尚未配置磁盘";let rows=[];(d.scenes||[]).forEach(scene=>(scene.tasks||[]).forEach(task=>rows.push('<tr><td>'+esc(scene.scene)+'</td><td>'+esc(task.name)+'</td><td>'+task.downloaded+' / '+task.target+'</td><td>'+task.hours+' 小时</td></tr>')));$("task-status").innerHTML=rows.length?'<table><thead><tr><th>场景</th><th>任务</th><th>完成条数 / 目标</th><th>累计时长</th></tr></thead><tbody>'+rows.join("")+'</tbody></table>':"尚未配置任务"}
 async function refreshStatus(){try{renderStatus(await api("/api/status"))}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad"}}
 async function refreshLogs(){try{const d=await api("/api/logs?offset="+logOffset);if(d.reset){$("logs").textContent=d.text||""}else if(d.text){$("logs").textContent+=($("logs").textContent?"\n":"")+d.text}$("logs").scrollTop=$("logs").scrollHeight;logOffset=d.offset||logOffset}catch(e){$("logs").textContent=e.message}}
@@ -240,16 +247,16 @@ document.querySelectorAll(".nav button").forEach(btn=>btn.addEventListener("clic
 $("save-connection").onclick=async()=>{try{await api("/api/config/settings","PUT",{values:readFields($("connection-fields"))});message("connection-result","连接配置已保存到 SQLite",true);await loadConfig()}catch(e){message("connection-result",e.message,false)}};
 $("test-minio").onclick=()=>testConnection("minio");$("test-pg").onclick=()=>testConnection("pg");
 $("save-advanced").onclick=async()=>{try{await api("/api/config/settings","PUT",{values:readFields($("advanced-fields"))});alert("运行参数已保存到 SQLite");await loadConfig()}catch(e){alert(e.message)}};
-$("check-disks").onclick=async()=>{try{const value=JSON.parse($("disk-json").value);const d=await api("/api/config/disks/check","POST",value);message("disk-result",JSON.stringify(d.results,null,2),d.results.every(x=>x.ok))}catch(e){message("disk-result",e.message,false)}};
-$("save-disks").onclick=async()=>{try{const value=JSON.parse($("disk-json").value);await api("/api/config/disks","PUT",value);message("disk-result","磁盘配置已保存到 SQLite",true);await loadConfig();await refreshStatus()}catch(e){message("disk-result",e.message,false)}};
+$("detect-disks").onclick=async()=>{await loadDiskMounts();renderDisks(readDisks());message("disk-result","已重新检测到 "+diskMounts.length+" 个挂载点",true)};$("add-disk").onclick=addDisk;\n$("check-disks").onclick=async()=>{try{const d=await api("/api/config/disks/check","POST",{disks:readDisks()});message("disk-result",d.results.map(x=>x.name+": "+(x.ok?"正常":"异常")+"；"+(x.notes||[]).map(n=>n.text).join("；")+(x.ok?"；可用空间 "+(x.free/1073741824).toFixed(1)+" GiB":"")).join("\\n"),d.results.every(x=>x.ok))}catch(e){message("disk-result",e.message,false)}};
+$("save-disks").onclick=async()=>{try{await api("/api/config/disks","PUT",{disks:readDisks()});message("disk-result","磁盘配置已保存到 SQLite",true);await loadConfig();await refreshStatus()}catch(e){message("disk-result",e.message,false)}};
 $("save-tasks").onclick=async()=>{try{const value=JSON.parse($("task-json").value);value.data_version=$("data-version").value;await api("/api/config/tasks","PUT",value);message("task-result","任务配置已保存到 SQLite",true);await loadConfig()}catch(e){message("task-result",e.message,false)}};
-$("reset-tasks").onclick=async()=>{if(!confirm("恢复内置默认任务清单？当前任务清单将被替换。"))return;try{await api("/api/config/tasks/reset","POST",{});message("task-result","已恢复默认任务",true);await loadConfig()}catch(e){message("task-result",e.message,false)}};
-$("start-run").onclick=async()=>{try{const d=await api("/api/run","POST",{mode:"download"});message("setup-issues","下载进程已启动，PID "+d.pid,true);await refreshStatus()}catch(e){message("setup-issues",e.message,false)}};
+$("refresh-plans").onclick=refreshPlans;$("save-plan").onclick=savePlan;\n$("reset-tasks").onclick=async()=>{if(!confirm("恢复内置默认任务清单？当前任务清单将被替换。"))return;try{await api("/api/config/tasks/reset","POST",{});message("task-result","已恢复默认任务",true);await loadConfig()}catch(e){message("task-result",e.message,false)}};
+$("start-run").onclick=async()=>{try{const d=await api("/api/run","POST",{mode:$("download-mode").value});message("setup-issues","下载进程已启动，PID "+d.pid,true);await refreshStatus()}catch(e){message("setup-issues",e.message,false)}};
 $("pause-run").onclick=async()=>{try{await api("/api/stop","POST",{});message("setup-issues","已发送安全暂停请求",true)}catch(e){message("setup-issues",e.message,false)}};
 $("force-run").onclick=async()=>{if(!confirm("强制结束下载进程？临时文件保留，下次可续传。"))return;try{await api("/api/stop","POST",{force:true});message("setup-issues","已发送强制停止",true)}catch(e){message("setup-issues",e.message,false)}};
 $("refresh").onclick=refreshStatus;$("refresh-logs").onclick=refreshLogs;
 $("set-token").onclick=async()=>{const token=$("access-token").value;if(token.length<12){message("token-result","口令至少 12 个字符",false);return}try{const d=await api("/api/auth/token","PUT",{action:"set",token:token});sessionStorage.setItem("minio_download_token",token);$("access-token").value="";message("token-result","访问口令已保存。启用非本机监听前需重启程序。",true)}catch(e){message("token-result",e.message,false)}};
-(async()=>{try{await loadConfig();await refreshStatus();await refreshLogs();refreshTimer=setInterval(()=>{refreshStatus();refreshLogs()},5000)}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad";$("setup-issues").textContent="初始化失败："+e.message}})();
+(async()=>{try{await loadConfig();await refreshPlans();await refreshStatus();await refreshLogs();refreshTimer=setInterval(()=>{refreshStatus();refreshLogs()},5000)}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad";$("setup-issues").textContent="初始化失败："+e.message}})();
 </script></body></html>`;
 
 type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time}
@@ -279,7 +286,7 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("POST /api/config/test",api.configTest)
  mux.HandleFunc("PUT /api/config/tasks",api.configTasks)
  mux.HandleFunc("POST /api/config/tasks/reset",api.configTasksReset)
- mux.HandleFunc("PUT /api/config/disks",api.configDisks)
+ mux.HandleFunc("GET /api/config/disks/detect",api.configDisksDetect)\n mux.HandleFunc("PUT /api/config/disks",api.configDisks)
  mux.HandleFunc("POST /api/config/disks/check",api.configDisksCheck)
  mux.HandleFunc("GET /api/config",api.config)
  mux.HandleFunc("GET /api/status",api.status)
@@ -453,6 +460,7 @@ func webConfigSchema() []map[string]any {
 type planTask struct {
  Name string `json:"name"`
  Count int `json:"count"`
+ Hours float64 `json:"target_hours"`
  Aliases []string `json:"aliases"`
  Dir string `json:"dir"`
  Tags []string `json:"tags"`
@@ -471,7 +479,7 @@ func currentPlanPayload(c Config) planPayload {
  for _,t:=range c.Tasks {
   i,ok:=index[t.Scene];if !ok{i=len(out.Scenes);index[t.Scene]=i;out.Scenes=append(out.Scenes,planScene{Scene:t.Scene,Tasks:[]planTask{}})}
   aliases:=append([]string{},t.Aliases...);tags:=append([]string{},t.Tags...)
-  out.Scenes[i].Tasks=append(out.Scenes[i].Tasks,planTask{Name:t.Name,Count:t.TargetCount,Aliases:aliases,Dir:t.Dir,Tags:tags})
+  out.Scenes[i].Tasks=append(out.Scenes[i].Tasks,planTask{Name:t.Name,Count:t.TargetCount,Hours:t.TargetHours,Aliases:aliases,Dir:t.Dir,Tags:tags})
  }
  return out
 }
@@ -493,6 +501,7 @@ func validatePlanPayload(raw json.RawMessage)(planPayload,error){
    if seenTasks[t.Name]{return p,fmt.Errorf("任务名重复：%q（任务名必须全局唯一）",t.Name)}
    seenTasks[t.Name]=true
    if t.Count<0{return p,fmt.Errorf("任务 %q 的目标条数必须是非负整数，当前为 %d",t.Name,t.Count)}
+   if t.Hours<0||math.IsNaN(t.Hours)||math.IsInf(t.Hours,0){return p,fmt.Errorf("任务 %q 的目标时长必须是有效的非负数字",t.Name)}
    t.Dir=strings.TrimSpace(t.Dir);dirName:=t.Dir;if dirName==""{dirName=t.Name}
    dirKey:=scene.Scene+"\x00"+dirName;if owner,ok:=dirOwners[dirKey];ok{return p,fmt.Errorf("场景 %q 下目录名 %q 被任务 %q 和 %q 同时使用",scene.Scene,t.Dir,owner,t.Name)};dirOwners[dirKey]=t.Name
    if t.Aliases==nil{t.Aliases=[]string{}};if t.Tags==nil{t.Tags=[]string{}}
@@ -603,7 +612,7 @@ func persistPlanPayload(db *sql.DB,p planPayload)error{
   res,e:=tx.Exec("INSERT INTO scenes(position,name) VALUES(?,?)",si,scene.Scene);if e!=nil{return e};sceneID,e:=res.LastInsertId();if e!=nil{return e}
   for ti,t:=range scene.Tasks{
    tags,_:=json.Marshal(t.Tags)
-   res,e=tx.Exec("INSERT INTO tasks(scene_id,position,name,target_count,directory,tags) VALUES(?,?,?,?,?,?)",sceneID,ti,t.Name,t.Count,t.Dir,string(tags));if e!=nil{return e};taskID,e:=res.LastInsertId();if e!=nil{return e}
+   res,e=tx.Exec("INSERT INTO tasks(scene_id,position,name,target_count,target_hours,directory,tags) VALUES(?,?,?,?,?,?,?)",sceneID,ti,t.Name,t.Count,t.Hours,t.Dir,string(tags));if e!=nil{return e};taskID,e:=res.LastInsertId();if e!=nil{return e}
    for ai,alias:=range t.Aliases{if _,e=tx.Exec("INSERT INTO task_aliases(task_id,position,alias) VALUES(?,?,?)",taskID,ai,alias);e!=nil{return e}}
   }
  }
@@ -644,7 +653,7 @@ func(a *WebAPI)planApply(w http.ResponseWriter,r *http.Request){
  if _,err=validatePlanPayload(json.RawMessage(mustJSON(result)));err!=nil{writeJSONStatus(w,400,map[string]any{"error":err.Error()});return}
  if body.Mode=="replace"||len(added)>0{
   if err=persistPlanPayload(db,result);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"应用方案失败："+err.Error()});return}
-  tasks:=[]Task{};for _,scene:=range result.Scenes{for _,t:=range scene.Tasks{tasks=append(tasks,Task{Scene:scene.Scene,Name:t.Name,TargetCount:t.Count,Aliases:append([]string{},t.Aliases...),Dir:t.Dir,Tags:append([]string{},t.Tags...)})}};a.cfg.Tasks=tasks;a.cfg.DataVersion=result.DataVersion
+  tasks:=[]Task{};for _,scene:=range result.Scenes{for _,t:=range scene.Tasks{tasks=append(tasks,Task{Scene:scene.Scene,Name:t.Name,TargetCount:t.Count,TargetHours:t.Hours,Aliases:append([]string{},t.Aliases...),Dir:t.Dir,Tags:append([]string{},t.Tags...)})}};a.cfg.Tasks=tasks;a.cfg.DataVersion=result.DataVersion
  }
  total:=0;for _,scene:=range result.Scenes{total+=len(scene.Tasks)}
  writeJSON(w,map[string]any{"ok":true,"mode":body.Mode,"added":len(added),"skipped":skipped,"total_tasks":total,"running":func()bool{_,running,_:=a.activeDownloader();return running}()})
@@ -780,7 +789,7 @@ func(a *WebAPI)configTasksReset(w http.ResponseWriter,r *http.Request){
  db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
  if err=persistPlanPayload(db,payload);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"恢复默认任务失败："+err.Error()});return}
  a.cfg.Tasks=[]Task{}
- for _,scene:=range payload.Scenes{for _,task:=range scene.Tasks{a.cfg.Tasks=append(a.cfg.Tasks,Task{Scene:scene.Scene,Name:task.Name,TargetCount:task.Count,Aliases:append([]string{},task.Aliases...),Dir:task.Dir,Tags:append([]string{},task.Tags...)})}}
+ for _,scene:=range payload.Scenes{for _,task:=range scene.Tasks{a.cfg.Tasks=append(a.cfg.Tasks,Task{Scene:scene.Scene,Name:task.Name,TargetCount:task.Count,TargetHours:task.Hours,Aliases:append([]string{},task.Aliases...),Dir:task.Dir,Tags:append([]string{},task.Tags...)})}}
  a.cfg.DataVersion=payload.DataVersion
  writeJSON(w,map[string]any{"ok":true})
 }
@@ -792,7 +801,7 @@ func(a *WebAPI)configTasks(w http.ResponseWriter,r *http.Request){
  db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
  if err=persistPlanPayload(db,p);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"保存任务配置失败："+err.Error()});return}
  tasks:=[]Task{}
- for _,scene:=range p.Scenes{for _,t:=range scene.Tasks{tasks=append(tasks,Task{Scene:scene.Scene,Name:t.Name,TargetCount:t.Count,Aliases:append([]string{},t.Aliases...),Dir:t.Dir,Tags:append([]string{},t.Tags...)})}}
+ for _,scene:=range p.Scenes{for _,t:=range scene.Tasks{tasks=append(tasks,Task{Scene:scene.Scene,Name:t.Name,TargetCount:t.Count,TargetHours:t.Hours,Aliases:append([]string{},t.Aliases...),Dir:t.Dir,Tags:append([]string{},t.Tags...)})}}
  a.cfg.Tasks=tasks;a.cfg.DataVersion=p.DataVersion
  _,running,_:=a.activeDownloader()
  writeJSON(w,map[string]any{"ok":true,"running":running})
@@ -816,6 +825,13 @@ func probeWritable(path string)error{
  f,err:=os.CreateTemp(path,".minio-downloader-check-*");if err!=nil{return err}
  name:=f.Name();if _,err=f.Write([]byte("ok"));err!=nil{f.Close();os.Remove(name);return err}
  if err=f.Close();err!=nil{os.Remove(name);return err};return os.Remove(name)
+}
+func(a *WebAPI)configDisksDetect(w http.ResponseWriter,r *http.Request){
+ parts,err:=disk.Partitions(false);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取磁盘挂载信息失败："+err.Error()});return}
+ mounts:=[]map[string]any{};seen:=map[string]bool{}
+ for _,p:=range parts{mount:=strings.TrimSpace(p.Mountpoint);if mount==""||seen[mount]{continue};seen[mount]=true;item:=map[string]any{"mountpoint":mount,"device":p.Device,"fstype":p.Fstype,"free":uint64(0),"total":uint64(0)};if u,e:=disk.Usage(mount);e==nil{item["free"]=u.Free;item["total"]=u.Total};mounts=append(mounts,item)}
+ sort.Slice(mounts,func(i,j int)bool{return fmt.Sprint(mounts[i]["mountpoint"])<fmt.Sprint(mounts[j]["mountpoint"])})
+ writeJSON(w,map[string]any{"mounts":mounts})
 }
 func(a *WebAPI)configDisksCheck(w http.ResponseWriter,r *http.Request){
  var body struct{Disks []DiskConfig `json:"disks"`}
@@ -890,7 +906,7 @@ func(a *WebAPI)config(w http.ResponseWriter,r *http.Request) {
   aliases:=task.Aliases;if aliases==nil{aliases=[]string{}}
   tags:=task.Tags;if tags==nil{tags=[]string{}}
   items:=scenes[i]["tasks"].([]map[string]any)
-  items=append(items,map[string]any{"name":task.Name,"count":task.TargetCount,"aliases":aliases,"dir":task.Dir,"tags":tags})
+  items=append(items,map[string]any{"name":task.Name,"count":task.TargetCount,"target_hours":task.TargetHours,"aliases":aliases,"dir":task.Dir,"tags":tags})
   scenes[i]["tasks"]=items
  }
  _,running,_:=a.activeDownloader()
@@ -950,16 +966,16 @@ func(a *App)unregisterProcess(){if a.db!=nil&&a.processCreated>0{_,_=a.db.Exec("
 func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
  var body struct{Mode string `json:"mode"`;MaxRounds int `json:"max_rounds"`;RecheckMissing bool `json:"recheck_missing"`}
  if err:=json.NewDecoder(io.LimitReader(r.Body,4096)).Decode(&body);err!=nil&&err!=io.EOF{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
- if body.Mode==""{body.Mode="download"};if body.Mode!="download"{writeJSONStatus(w,400,map[string]any{"error":"当前 Go Web API 只支持 download 模式"});return}
+ if body.Mode==""{body.Mode=a.mode};if body.Mode!="count"&&body.Mode!="duration"{writeJSONStatus(w,400,map[string]any{"error":"mode 只能是 count 或 duration"});return}
  if body.MaxRounds==0{body.MaxRounds=a.cfg.DefaultRounds;if body.MaxRounds<=0{body.MaxRounds=1}};if body.MaxRounds<1||body.MaxRounds>50{writeJSONStatus(w,400,map[string]any{"error":"补齐轮数范围 1–50"});return}
  validatedConfig:=a.cfg
- if err:=validatedConfig.normalize(a.mode);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"配置未完成："+err.Error()});return}
+ if err:=validatedConfig.normalize(body.Mode);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"配置未完成："+err.Error()});return}
  a.runMu.Lock();defer a.runMu.Unlock()
  if pid,running,_:=a.activeDownloader();running{writeJSONStatus(w,409,map[string]any{"error":fmt.Sprintf("下载器已在运行（PID %d）",pid)});return}
  executable,err:=os.Executable();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"定位下载器程序失败: "+err.Error()});return}
  if err:=clearStopRequestDB(a.cfg.StateDB);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"清理旧暂停请求失败: "+err.Error()});return}
  dbName,err:=filepath.Abs(a.cfg.StateDB);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"解析 SQLite 路径失败: "+err.Error()});return}
- args:=[]string{"--worker","--db",dbName,"--mode",a.mode,"--max-rounds",strconv.Itoa(body.MaxRounds),"--preserve-stop-request"};if body.RecheckMissing{args=append(args,"--recheck-missing")}
+ args:=[]string{"--worker","--db",dbName,"--mode",body.Mode,"--max-rounds",strconv.Itoa(body.MaxRounds),"--preserve-stop-request"};if body.RecheckMissing{args=append(args,"--recheck-missing")}
  cmd:=exec.Command(executable,args...);configureDetached(cmd);cmd.Stdout=io.Discard;cmd.Stderr=io.Discard;cmd.Stdin=nil
  if err=cmd.Start();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"启动下载器失败: "+err.Error()});return}
  go func(){_=cmd.Wait()}();created:=float64(0);if proc,e:=process.NewProcess(int32(cmd.Process.Pid));e==nil{if ms,e:=proc.CreateTime();e==nil{created=float64(ms)/1000}};a.setChildProcess(int32(cmd.Process.Pid),created)
@@ -995,8 +1011,7 @@ func(a *WebAPI)logs(w http.ResponseWriter,r *http.Request){
 
 func loadConfigDB(c *Config,runMode string)error{
  if strings.TrimSpace(c.ConfigDB)==""{return nil}
- if runMode!="count"{return errors.New("config_db 当前只支持 count 模式；duration 模式请使用独立 JSON 任务目标")}
- db,err:=sql.Open("sqlite",c.ConfigDB);if err!=nil{return err};defer db.Close();db.SetMaxOpenConns(1)
+  db,err:=sql.Open("sqlite",c.ConfigDB);if err!=nil{return err};defer db.Close();db.SetMaxOpenConns(1)
  settings:=map[string]string{}
  rows,err:=db.Query("SELECT key,value FROM settings");if err!=nil{return err}
  for rows.Next(){var key,value string;if err=rows.Scan(&key,&value);err!=nil{rows.Close();return err};settings[key]=value};if err=rows.Err();err!=nil{rows.Close();return err};if err=rows.Close();err!=nil{return err}
@@ -1014,10 +1029,10 @@ func loadConfigDB(c *Config,runMode string)error{
  // Read and close aliases before opening taskRows. The database is intentionally
  // limited to one connection; keeping taskRows open here would block Query below.
  aliases:=map[int64][]string{};aliasRows,err:=db.Query("SELECT task_id,alias FROM task_aliases ORDER BY task_id,position");if err!=nil{return err};for aliasRows.Next(){var id int64;var alias string;if err=aliasRows.Scan(&id,&alias);err!=nil{aliasRows.Close();return err};aliases[id]=append(aliases[id],alias)};if err=aliasRows.Err();err!=nil{aliasRows.Close();return err};if err=aliasRows.Close();err!=nil{return err}
- taskRows,err:=db.Query("SELECT s.name,t.name,t.target_count,t.directory,t.id,t.tags FROM tasks t JOIN scenes s ON s.id=t.scene_id ORDER BY s.position,t.position");if err!=nil{return err}
- tasks:=[]Task{};for taskRows.Next(){var t Task;var id int64;var tags string;if err=taskRows.Scan(&t.Scene,&t.Name,&t.TargetCount,&t.Dir,&id,&tags);err!=nil{taskRows.Close();return err};t.Aliases=aliases[id];if tags!=""{_ = json.Unmarshal([]byte(tags),&t.Tags)};tasks=append(tasks,t)};if err=taskRows.Err();err!=nil{taskRows.Close();return err};if err=taskRows.Close();err!=nil{return err};c.Tasks=tasks
+ taskRows,err:=db.Query("SELECT s.name,t.name,t.target_count,t.target_hours,t.directory,t.id,t.tags FROM tasks t JOIN scenes s ON s.id=t.scene_id ORDER BY s.position,t.position");if err!=nil{return err}
+ tasks:=[]Task{};for taskRows.Next(){var t Task;var id int64;var tags string;if err=taskRows.Scan(&t.Scene,&t.Name,&t.TargetCount,&t.TargetHours,&t.Dir,&id,&tags);err!=nil{taskRows.Close();return err};t.Aliases=aliases[id];if tags!=""{_ = json.Unmarshal([]byte(tags),&t.Tags)};tasks=append(tasks,t)};if err=taskRows.Err();err!=nil{taskRows.Close();return err};if err=taskRows.Close();err!=nil{return err};c.Tasks=tasks
  diskRows,err:=db.Query("SELECT name,path,mountpoint FROM disks ORDER BY position");if err!=nil{return err};disks:=[]DiskConfig{};for diskRows.Next(){var d DiskConfig;if err=diskRows.Scan(&d.Name,&d.Path,&d.Mountpoint);err!=nil{diskRows.Close();return err};disks=append(disks,d)};if err=diskRows.Err();err!=nil{diskRows.Close();return err};if err=diskRows.Close();err!=nil{return err};c.Disks=disks
- c.Mode="count";c.fromConfigDB=true;log.Printf("已从 SQLite 配置库加载配置: %s（任务 %d 个，磁盘 %d 块）",c.ConfigDB,len(c.Tasks),len(c.Disks));return nil
+ c.fromConfigDB=true;log.Printf("已从 SQLite 配置库加载配置: %s（任务 %d 个，磁盘 %d 块）",c.ConfigDB,len(c.Tasks),len(c.Disks));return nil
 }
 func(c *Config)normalize(m string)error{
  if c.Mode!=""&&c.Mode!=m{return fmt.Errorf("配置文件 mode=%s 与命令行 --mode=%s 不一致",c.Mode,m)}
