@@ -1881,4 +1881,10 @@ func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
  var payload struct{Total int `json:"total"`;Episodes []struct{ID string `json:"episode_id"`;Status string `json:"status"`} `json:"episodes"`}
  if err=json.Unmarshal(response.Body.Bytes(),&payload);err!=nil{t.Fatal(err)}
  if payload.Total!=3||len(payload.Episodes)!=3{t.Fatalf("unexpected episode page: total=%d episodes=%d",payload.Total,len(payload.Episodes))}
+ pageReq:=httptest.NewRequest("GET","/api/runs/run-1/episodes?task=scene-task&limit=1&offset=1",nil);pageReq.SetPathValue("id","run-1")
+ pageResponse:=httptest.NewRecorder();api.runEpisodes(pageResponse,pageReq)
+ var pagePayload struct{Total int `json:"total"`;Offset int `json:"offset"`;Episodes []map[string]any `json:"episodes"`}
+ if pageResponse.Code!=http.StatusOK{t.Fatalf("paginated API status=%d body=%s",pageResponse.Code,pageResponse.Body.String())}
+ if err=json.Unmarshal(pageResponse.Body.Bytes(),&pagePayload);err!=nil{t.Fatal(err)}
+ if pagePayload.Total!=3||pagePayload.Offset!=1||len(pagePayload.Episodes)!=1{t.Fatalf("unexpected paginated response: total=%d offset=%d items=%d",pagePayload.Total,pagePayload.Offset,len(pagePayload.Episodes))}
 }
