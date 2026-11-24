@@ -2,8 +2,10 @@ name: Go cross-platform release
 
 on:
   push:
-    branches: ["main", "feature/go-downloader", "feature/sqlite-web-first-run"]
+    branches: ["main", "feature/go-downloader", "feature/sqlite-web-first-run", "feature/plan-diff-resolution"]
     tags: ["go-v*", "v*"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -25,7 +27,7 @@ jobs:
       - name: Run focused unit tests
         working-directory: go
         run: |
-          go test ./... -run "^(TestSafeJoinRejectsTraversal|TestLoadConfigDBImportsPythonCountConfiguration|TestResumeReservationTracksOnlyRemainingBytes|TestCompletedEpisodeDirRequiresTaskInfo|TestWebAPIRequiresBearerTokenWhenConfigured|TestMissingMCAPCleanupCanRecoverAfterInterruption|TestFirstRunUsesSingleSQLiteDatabase|TestDurationTargetsPersistInSQLite|TestValidatePlanRejectsNegativeDurationTarget|TestLoadConfigDBRejectsDatabaseWithoutSchema|TestWebStatusReturnsConfiguredTasksAndProgress|TestSaveLastRunPersistsPerRunStatistics|TestClassifyFailure|TestRecordAndSetForRunAccumulatesTaskStats|TestRunTimingMetricsPersist)$"
+          go test ./... -run "^(TestSafeJoinRejectsTraversal|TestLoadConfigDBImportsPythonCountConfiguration|TestResumeReservationTracksOnlyRemainingBytes|TestCompletedEpisodeDirRequiresTaskInfo|TestWebAPIRequiresBearerTokenWhenConfigured|TestMissingMCAPCleanupCanRecoverAfterInterruption|TestFirstRunUsesSingleSQLiteDatabase|TestDurationTargetsPersistInSQLite|TestValidatePlanRejectsNegativeDurationTarget|TestLoadConfigDBRejectsDatabaseWithoutSchema|TestWebStatusReturnsConfiguredTasksAndProgress|TestSaveLastRunPersistsPerRunStatistics|TestClassifyFailure|TestRecordAndSetForRunAccumulatesTaskStats|TestRunTimingMetricsPersist|TestWebPlanApplyReplaceAndMerge)$"
       - name: Build Windows amd64
         working-directory: go
         run: |

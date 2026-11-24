@@ -823,7 +823,7 @@ func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
 		"CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)",
 		"CREATE TABLE scenes(id INTEGER PRIMARY KEY,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE)",
 		"CREATE TABLE tasks(id INTEGER PRIMARY KEY,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE,target_count INTEGER NOT NULL,target_hours REAL NOT NULL DEFAULT 0,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]')",
-		"CREATE TABLE task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL,PRIMARY KEY(task_id,alias))",
+		"CREATE TABLE task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL,PRIMARY KEY(task_id,position))",
 		"CREATE TABLE disks(name TEXT PRIMARY KEY,position INTEGER NOT NULL,path TEXT NOT NULL,mountpoint TEXT NOT NULL)",
 	}
 	for _, statement := range statements {
@@ -1310,11 +1310,12 @@ func TestWebPlanApplyReplaceAndMerge(t *testing.T) {
 	schema := []string{
 		"CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)",
 		"CREATE TABLE scenes(id INTEGER PRIMARY KEY AUTOINCREMENT,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE)",
-		"CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE,target_count INTEGER NOT NULL,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]')",
+		"CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE,target_count INTEGER NOT NULL DEFAULT 0,target_hours REAL NOT NULL DEFAULT 0,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]')",
 		"CREATE TABLE task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL,PRIMARY KEY(task_id,alias))",
 	}
 	for _, stmt := range schema { if _, err := db.Exec(stmt); err != nil { t.Fatal(err) } }
-	if err := db.Close(); err != nil { t.Fatal(err) }
+	api.db = db // planApply checks process_state through the runtime DB handle.
+	defer db.Close()
 	payload := `{"data_version":"v2","scenes":[{"scene":"Office","tasks":[{"name":"文件整理","count":12,"aliases":["整理文件"],"dir":"文件整理","tags":["办公"]}]}]}`
 	created := httptest.NewRecorder()
 	api.planCreate(created, httptest.NewRequest(http.MethodPost, "/api/plans", strings.NewReader(`{"name":"办公方案","payload":`+payload+`}`)))
@@ -1342,6 +1343,29 @@ func TestWebPlanApplyReplaceAndMerge(t *testing.T) {
 	api.planApply(merged, mergeReq)
 	if merged.Code != http.StatusOK { t.Fatalf("merge apply failed: %d %s", merged.Code, merged.Body.String()) }
 	if len(api.cfg.Tasks) != 2 || api.cfg.Tasks[1].Name != "邮件归档" { t.Fatalf("merge did not append only new task: %#v", api.cfg.Tasks) }
+
+	// Explicit per-task resolution replaces a conflicting same-name task.
+	resolveReq := httptest.NewRequest(http.MethodPost, "/api/plans/"+mergeID+"/apply", strings.NewReader(`{"mode":"merge","resolutions":{"文件整理":"replace"}}`))
+	resolveReq.SetPathValue("id", mergeID)
+	resolved := httptest.NewRecorder()
+	api.planApply(resolved, resolveReq)
+	if resolved.Code != http.StatusOK { t.Fatalf("resolved merge failed: %d %s", resolved.Code, resolved.Body.String()) }
+	if len(api.cfg.Tasks) != 2 {
+		t.Fatalf("explicit replace changed task count: %#v", api.cfg.Tasks)
+	}
+	replaced := false
+	for _, task := range api.cfg.Tasks { if task.Name == "文件整理" && task.TargetCount == 99 { replaced = true } }
+	if !replaced { t.Fatalf("explicit replace resolution was not applied: %#v", api.cfg.Tasks) }
+
+	// Explicit skip must preserve the current task without overwriting it.
+	skipReq := httptest.NewRequest(http.MethodPost, "/api/plans/"+mergeID+"/apply", strings.NewReader(`{"mode":"merge","resolutions":{"文件整理":"skip"}}`))
+	skipReq.SetPathValue("id", mergeID)
+	skipped := httptest.NewRecorder()
+	api.planApply(skipped, skipReq)
+	if skipped.Code != http.StatusOK { t.Fatalf("skip resolution failed: %d %s", skipped.Code, skipped.Body.String()) }
+	preserved := false
+	for _, task := range api.cfg.Tasks { if task.Name == "文件整理" && task.TargetCount == 99 { preserved = true } }
+	if len(api.cfg.Tasks) != 2 || !preserved { t.Fatalf("skip resolution changed current task: %#v", api.cfg.Tasks) }
 }
 
 func TestValidatePlanPayloadAllowsEmptyDataVersion(t *testing.T) {
