@@ -2027,3 +2027,42 @@ func TestDashboardPartialDirectorySizeCache(t *testing.T) {
 		t.Fatalf("refreshed partial size = %d, want 12", got)
 	}
 }
+
+
+func TestAppLiveStatusSnapshotTracksProgress(t *testing.T) {
+ root:=t.TempDir()
+ if err:=os.WriteFile(filepath.Join(root,"existing.bin"),[]byte("1234"),0600);err!=nil{t.Fatal(err)}
+ app:=&App{liveEpisodes:map[string]liveEpisode{}}
+ episode:=Episode{ID:"episode-1",Task:"task-a",Size:100}
+ app.beginLiveEpisode(episode,DiskConfig{Name:"disk-a"},root)
+ initial:=app.liveStatusSnapshot(true,10)
+ if !initial.Running||len(initial.RunningEpisodes)!=1{t.Fatalf("unexpected initial live state: %+v",initial)}
+ if initial.TransferProgress.DownloadedBytes!=4||initial.TransferProgress.ExpectedBytes!=100{t.Fatalf("unexpected initial byte counts: %+v",initial.TransferProgress)}
+ app.adjustLiveEpisodeBytes(episode.ID,20)
+ updated:=app.liveStatusSnapshot(true,12)
+ if updated.TransferProgress.DownloadedBytes!=24||updated.TransferProgress.RemainingBytes!=76{t.Fatalf("live byte updates were not applied: %+v",updated.TransferProgress)}
+ if updated.TransferProgress.ProgressPercent!=24||updated.TransferProgress.ETASeconds==nil||*updated.TransferProgress.ETASeconds!=7{t.Fatalf("live percentage/ETA mismatch: %+v",updated.TransferProgress)}
+ app.adjustLiveEpisodeBytes(episode.ID,-9)
+ corrected:=app.liveStatusSnapshot(true,0)
+ if corrected.TransferProgress.DownloadedBytes!=15{t.Fatalf("negative progress correction was not applied: %+v",corrected.TransferProgress)}
+ app.endLiveEpisode(episode.ID)
+ ended:=app.liveStatusSnapshot(false,0)
+ if len(ended.RunningEpisodes)!=0||ended.TransferProgress.DownloadedBytes!=0{t.Fatalf("episode remained active after removal: %+v",ended)}
+}
+
+func TestWebAPIPublishLiveStatusBroadcastsLatestSnapshot(t *testing.T) {
+ app:=&WebAPI{eventSubscribers:map[chan []byte]struct{}{}}
+ subscriber:=make(chan []byte,1)
+ app.eventMu.Lock();app.eventSubscribers[subscriber]=struct{}{};app.eventMu.Unlock()
+ snapshot:=liveStatusSnapshot{Running:true,RunningEpisodes:[]liveEpisode{{EpisodeID:"episode-1",TaskName:"task-a"}},TransferProgress:liveTransferProgress{DownloadedBytes:42,ExpectedBytes:100,RemainingBytes:58,SpeedBytesPerSecond:12}}
+ app.publishLiveStatus(snapshot)
+ select{
+ case payload:=<-subscriber:
+  var got liveStatusSnapshot
+  if err:=json.Unmarshal(payload,&got);err!=nil{t.Fatal(err)}
+  if !got.Running||got.TransferProgress.DownloadedBytes!=42||len(got.RunningEpisodes)!=1{t.Fatalf("unexpected broadcast snapshot: %+v",got)}
+ case <-time.After(time.Second):
+  t.Fatal("expected live status event")
+ }
+ if _,updated,ok:=app.currentLiveStatus();!ok||updated.IsZero(){t.Fatal("published live snapshot was not cached in memory")}
+}
