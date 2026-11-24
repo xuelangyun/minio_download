@@ -1855,10 +1855,11 @@ func TestFirstRunUsesSingleSQLiteDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	writer := &sqliteLogWriter{db: db}
+	writer := newSQLiteLogWriter(db, nil)
 	if _, err = writer.Write([]byte("first-run log entry\n")); err != nil {
 		t.Fatal(err)
 	}
+	writer.Close()
 	var savedLog string
 	if err = db.QueryRow("SELECT message FROM runtime_logs ORDER BY id DESC LIMIT 1").Scan(&savedLog); err != nil || savedLog != "first-run log entry" {
 		t.Fatalf("expected log line in SQLite, got %q, err=%v", savedLog, err)
@@ -1968,4 +1969,61 @@ func TestRunTimingMetricsPersist(t *testing.T) {
  var diskDuration float64;var bytes int64
  if err=db.QueryRow("SELECT duration_seconds,completed_bytes FROM run_disk_history WHERE run_id=? AND disk_name=?","timing-run","disk-a").Scan(&diskDuration,&bytes);err!=nil{t.Fatal(err)}
  if diskDuration!=20||bytes!=10485760{t.Fatalf("unexpected disk timing: duration=%v bytes=%d",diskDuration,bytes)}
+}
+
+
+func TestSQLiteLogWriterFlushesBufferedEntriesOnClose(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "logs.sqlite3")
+	if err := initializeSQLiteDatabase(dbPath); err != nil {
+		t.Fatalf("initialize SQLite schema: %v", err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var output bytes.Buffer
+	writer := newSQLiteLogWriter(db, &output)
+	for i := 0; i < 64; i++ {
+		line := fmt.Sprintf("buffered-%d%s", i, string(rune(10)))
+		if n, writeErr := writer.Write([]byte(line)); writeErr != nil || n != len(line) {
+			t.Fatalf("write log entry: n=%d err=%v", n, writeErr)
+		}
+	}
+	var count int
+	if err = db.QueryRow("SELECT COUNT(*) FROM runtime_logs").Scan(&count); err != nil { t.Fatal(err) }
+	if count != 64 { t.Fatalf("expected 64 entries to flush as one batch, got %d", count) }
+	line := "buffered-tail" + string(rune(10))
+	if n, writeErr := writer.Write([]byte(line)); writeErr != nil || n != len(line) { t.Fatalf("write tail log entry: n=%d err=%v", n, writeErr) }
+	writer.Close()
+
+	var countFinal int
+	if err = db.QueryRow("SELECT COUNT(*) FROM runtime_logs").Scan(&countFinal); err != nil { t.Fatal(err) }
+	if countFinal != 65 { t.Fatalf("expected 65 persisted log rows after close, got %d", countFinal) }
+	if got := output.String(); !strings.Contains(got, "buffered-0") || !strings.Contains(got, "buffered-tail") {
+		t.Fatalf("stdout mirror lost log lines: %q", got)
+	}
+}
+
+func TestDashboardPartialDirectorySizeCache(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "first.bin")
+	if err := os.WriteFile(first, []byte("12345"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	api := &WebAPI{}
+	now := time.Now()
+	if got := api.cachedPartialDirectorySize(root, now); got != 5 {
+		t.Fatalf("initial partial size = %d, want 5", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, "second.bin"), []byte("1234567"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := api.cachedPartialDirectorySize(root, now.Add(10*time.Second)); got != 5 {
+		t.Fatalf("cached partial size = %d, want cached value 5", got)
+	}
+	if got := api.cachedPartialDirectorySize(root, now.Add(31*time.Second)); got != 12 {
+		t.Fatalf("refreshed partial size = %d, want 12", got)
+	}
 }

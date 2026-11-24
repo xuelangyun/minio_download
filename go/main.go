@@ -106,7 +106,9 @@ func main(){
  logDB,err:=sql.Open("sqlite",c.StateDB);if err!=nil{log.Fatal(err)}
  logDB.SetMaxOpenConns(1)
  defer logDB.Close()
- log.SetOutput(&sqliteLogWriter{db:logDB,out:os.Stdout})
+ logWriter:=newSQLiteLogWriter(logDB,os.Stdout)
+ log.SetOutput(logWriter)
+ defer logWriter.Close()
  log.SetFlags(log.Ldate|log.Ltime|log.Lmicroseconds)
  isWorker:=*workerFlag||(legacyJSON&&!*webFlag)
  if !isWorker{
@@ -147,16 +149,51 @@ func main(){
  if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil)}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH);a.saveLastRun("finished",nil)}
 }
 
-type sqliteLogWriter struct{db *sql.DB;out io.Writer;mu sync.Mutex}
+type sqliteLogEntry struct{createdAt,message string}
+type sqliteLogWriter struct{
+ db *sql.DB
+ out io.Writer
+ mu sync.Mutex
+ pending []sqliteLogEntry
+ stop chan struct{}
+ done chan struct{}
+ closeOnce sync.Once
+}
+func newSQLiteLogWriter(db *sql.DB,out io.Writer)*sqliteLogWriter{
+ w:=&sqliteLogWriter{db:db,out:out,pending:make([]sqliteLogEntry,0,64),stop:make(chan struct{}),done:make(chan struct{})}
+ go w.flushLoop()
+ return w
+}
+func(w *sqliteLogWriter)flushLoop(){
+ ticker:=time.NewTicker(time.Second);defer ticker.Stop();defer close(w.done)
+ for{select{case <-ticker.C:w.flush();case <-w.stop:w.flush();return}}
+}
+func(w *sqliteLogWriter)flush(){if w==nil{return};w.mu.Lock();defer w.mu.Unlock();w.flushLocked()}
+func(w *sqliteLogWriter)flushLocked(){
+ if w.db==nil||len(w.pending)==0{return}
+ tx,err:=w.db.Begin();if err!=nil{return}
+ stmt,err:=tx.Prepare("INSERT INTO runtime_logs(created_at,message) VALUES(?,?)");if err!=nil{_=tx.Rollback();return}
+ for _,entry:=range w.pending{if _,err=stmt.Exec(entry.createdAt,entry.message);err!=nil{break}}
+ _=stmt.Close()
+ if err!=nil{_=tx.Rollback();return}
+ if err=tx.Commit();err==nil{w.pending=w.pending[:0]}
+}
 func(w *sqliteLogWriter)Write(p []byte)(int,error){
  if w==nil{return len(p),nil}
- w.mu.Lock();defer w.mu.Unlock()
- if w.db!=nil{
-  lines:=strings.Split(strings.TrimRight(string(p),"\r\n"),"\n")
-  for _,line:=range lines{if line==""{continue};_,_=w.db.Exec("INSERT INTO runtime_logs(created_at,message) VALUES(?,?)",controlTimestamp(),line)}
- }
  if w.out!=nil{_,_=w.out.Write(p)}
+ w.mu.Lock()
+ if w.db!=nil{
+  for _,line:=range strings.Split(strings.TrimRight(string(p),"\r\n"),"\n"){
+   if line!=""{w.pending=append(w.pending,sqliteLogEntry{createdAt:controlTimestamp(),message:line})}
+  }
+  if len(w.pending)>=64{w.flushLocked()}
+ }
+ w.mu.Unlock()
  return len(p),nil
+}
+func(w *sqliteLogWriter)Close(){
+ if w==nil{return}
+ w.closeOnce.Do(func(){close(w.stop);<-w.done})
 }
 func initializeSQLiteDatabase(name string)error{
  if strings.TrimSpace(name)==""{return errors.New("SQLite 路径不能为空")}
@@ -380,6 +417,137 @@ input[type=file]{max-width:260px;color:var(--muted);font-size:12px}
 .task-save-actions{padding-top:14px;border-top:1px solid var(--line)}
 @media(max-width:600px){.task-toolbar{align-items:flex-start}.task-scene-head{flex-wrap:wrap}.task-scene-head input{max-width:none;flex-basis:100%}.task-scene-head .scene-count{margin-left:0}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+
+/* Compact responsive layout refresh */
+:root{
+ --bg:#f3f6fb;--surface:#fff;--surface-soft:#f8faff;--line:#e3e9f2;
+ --line-strong:#cbd5e1;--radius:12px
+}
+body{background:linear-gradient(180deg,#edf3fc 0,#f5f7fb 190px,var(--bg) 100%);line-height:1.48}
+.top{
+ min-height:62px;padding:9px max(18px,calc((100vw - 1400px)/2));
+ gap:14px;background:linear-gradient(110deg,#172943,#223b60);
+ box-shadow:0 3px 14px rgba(20,34,59,.12)
+}
+.top h1{font-size:18px}.top small{margin-top:1px;font-size:11px}
+#connection-state{padding:5px 10px;font-size:11px}
+.wrap{width:min(1440px,100%);margin:16px auto 34px;padding:0 18px}
+.nav{
+ top:62px;gap:4px;padding:6px;margin-bottom:12px;border-radius:11px;
+ box-shadow:0 3px 12px rgba(26,43,75,.045)
+}
+.nav button{padding:8px 12px;border-radius:8px;font-size:13px}
+.card{
+ padding:16px;margin-bottom:12px;border-radius:12px;
+ box-shadow:0 2px 10px rgba(26,43,75,.035)
+}
+.card h2{gap:8px;margin-bottom:11px;font-size:15px}
+.card h2:before{height:15px;width:3px}
+.card h3{margin-bottom:9px;font-size:13px}
+.card p{margin-bottom:10px}
+.card .card{padding:14px;margin:12px 0;border-radius:10px;box-shadow:none;background:#f8faff!important}
+.grid{gap:11px}
+.field{margin-bottom:10px}
+.field label{margin-bottom:5px;font-size:12px}
+.field input,.field select,.field textarea,textarea{
+ min-height:36px;padding:7px 10px;border-radius:8px;font-size:13px
+}
+.field small,.hint{margin-top:4px;font-size:11px;line-height:1.5}
+.actions{gap:7px;margin-top:11px}
+.btn{min-height:34px;padding:6px 11px;border-radius:8px;font-size:12px}
+.notice{padding:9px 11px;margin:9px 0;border-radius:9px;font-size:12px}
+.status{grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;margin:12px 0}
+.metric{padding:11px 13px;border-radius:10px}
+.metric b{margin-top:3px;font-size:21px;line-height:1.2}
+.transfer-panel{padding:12px 14px;margin:0 0 12px;border-radius:10px}
+.progress-track{height:8px;margin:9px 0 7px}
+.disk-monitor-grid{gap:9px}
+.disk-monitor{padding:12px;border-radius:10px}
+.disk-monitor-track{margin:9px 0 7px}
+.active-list{gap:7px}
+.active-item{padding:9px 11px;gap:10px}
+.active-item-progress{margin:7px 0 5px}
+.section-heading{gap:10px}
+.summary-chip{padding:4px 8px;font-size:10px}
+.history-grid{gap:8px;margin-top:9px}
+.history-card{padding:10px;border-radius:9px}
+.history-table{margin-top:9px;font-size:11px}
+.history-table th,.history-table td{padding:7px 9px}
+table{font-size:12px}
+td,th{padding:8px 10px}
+th{z-index:1}
+.disk-row{padding:12px;margin:9px 0;border-radius:10px}
+.disk-grid{gap:9px}
+.disk-actions{margin-top:7px}
+.logs{height:min(380px,52vh);padding:12px;border-radius:9px;font-size:11px}
+.task-toolbar{gap:10px;margin:13px 0 9px;padding-bottom:9px}
+.task-toolbar strong{font-size:14px}
+.task-editor{gap:10px}
+.task-scene{border-radius:10px}
+.task-scene-head{padding:9px 11px;gap:8px}
+.task-scene-head input{padding:7px 9px;font-size:12px}
+.task-table{min-width:820px}
+.task-table td{padding:6px 7px}
+.task-table input{padding:6px 7px;font-size:11px}
+.task-scene-foot{padding:8px 10px}
+.json-tools{margin-top:12px;padding:10px 12px}
+.task-save-actions{padding-top:11px}
+#dashboard.panel.active{
+ display:grid;grid-template-columns:repeat(12,minmax(0,1fr));
+ gap:12px;align-items:start
+}
+#dashboard>.card{min-width:0;margin:0}
+#dashboard>.card:nth-child(1),
+#dashboard>.card:nth-child(4),
+#dashboard>.card:nth-child(5){grid-column:1/-1}
+#dashboard>.card:nth-child(2),
+#dashboard>.card:nth-child(3){grid-column:span 6}
+#dashboard .status{margin:10px 0}
+#dashboard #run-history{max-width:100%;overflow-x:auto}
+#dashboard #task-status,#dashboard #disk-history{max-width:100%;overflow-x:auto}
+#run-history .history-table{min-width:980px}
+#task-status table{min-width:560px}
+#connection-fields,#advanced-fields{align-items:start}
+#connection-fields .field,#advanced-fields .field{padding:10px 11px;margin:0;border:1px solid #edf0f5;border-radius:9px;background:#fbfcff}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{
+ outline:2px solid rgba(36,87,214,.55);outline-offset:2px
+}
+@media(max-width:1050px){
+ .wrap{width:min(100%,100%);padding:0 14px}
+ .status{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+@media(max-width:820px){
+ #dashboard.panel.active{display:block}
+ #dashboard>.card{margin-bottom:11px}
+ .top{padding:9px 14px}
+ .nav{top:62px}
+ .status{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:600px){
+ .top{min-height:60px;padding:10px 12px}
+ .top h1{font-size:16px}.top small{font-size:10px}
+ #connection-state{padding:4px 7px;font-size:10px}
+ .wrap{margin:11px auto 24px;padding:0 10px}
+ .nav{top:0;margin-bottom:10px;padding:5px}
+ .nav button{padding:8px 10px;font-size:11px}
+ .card{padding:13px;margin-bottom:10px;border-radius:10px}
+ .card .card{padding:11px;margin:10px 0}
+ .grid,.disk-grid{grid-template-columns:minmax(0,1fr);gap:7px}
+ .status{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+ .metric{padding:10px}.metric b{font-size:18px}
+ .field{margin-bottom:8px}
+ .actions{gap:6px}
+ .btn{min-height:33px;padding:6px 9px;font-size:11px}
+ .section-heading{align-items:flex-start}
+ .transfer-head{align-items:flex-start;flex-direction:column;gap:3px}
+ .task-toolbar{align-items:flex-start}
+ .task-scene-head{flex-wrap:wrap}
+ .task-scene-head input{max-width:none;flex-basis:100%}
+ .task-scene-head .scene-count{margin-left:0}
+ .disk-monitor-stats{font-size:10px}
+ .logs{height:340px}
+}
+
 </style></head><body>
 <header class="top"><div><h1>MinIO 下载器 <span class="tag">Go</span></h1><small>首次启动：网页配置 · SQLite 单文件存储</small></div><div id="connection-state">正在连接…</div></header>
 <main class="wrap">
@@ -407,7 +575,7 @@ input[type=file]{max-width:260px;color:var(--muted);font-size:12px}
 <section id="records" class="panel"><div class="card"><h2>运行日志（SQLite）</h2><div class="actions"><button class="btn" id="refresh-logs">刷新日志</button></div><pre id="logs" class="logs"></pre></div></section>
 </main>
 <script>
-let configData=null,statusData=null,logOffset=0,refreshTimer=null,diskMounts=[];
+let configData=null,statusData=null,logOffset=0,refreshTimer=null,logRefreshTimer=null,diskMounts=[];let statusRequestInFlight=false,logsRequestInFlight=false;
 const $=id=>document.getElementById(id);
 async function downloadRunCSV(runID){
  try{
@@ -564,11 +732,11 @@ function renderStatus(d){
  }));
  $("task-status").innerHTML=rows.length?'<table><thead><tr><th>场景</th><th>任务</th><th>'+(durationMode?"累计时长 / 目标":"完成条数 / 目标")+'</th><th>累计时长</th></tr></thead><tbody>'+rows.join("")+'</tbody></table>':"尚未配置任务";
 }
-async function refreshStatus(){try{const range=$("run-history-range")?.value||"30";renderStatus(await api("/api/status?history_days="+encodeURIComponent(range)))}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad"}}
-async function refreshLogs(){try{const d=await api("/api/logs?offset="+logOffset);if(d.reset){$("logs").textContent=d.text||""}else if(d.text){$("logs").textContent+=($("logs").textContent?"\n":"")+d.text}$("logs").scrollTop=$("logs").scrollHeight;logOffset=d.offset||logOffset}catch(e){$("logs").textContent=e.message}}
+async function refreshStatus(){if(statusRequestInFlight)return;statusRequestInFlight=true;try{const range=$("run-history-range")?.value||"30";renderStatus(await api("/api/status?history_days="+encodeURIComponent(range)))}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad"}finally{statusRequestInFlight=false}}
+async function refreshLogs(){if(logsRequestInFlight)return;logsRequestInFlight=true;try{const d=await api("/api/logs?offset="+logOffset);if(d.reset){$("logs").textContent=d.text||""}else if(d.text){$("logs").textContent+=($("logs").textContent?"\n":"")+d.text}$("logs").scrollTop=$("logs").scrollHeight;logOffset=d.offset||logOffset}catch(e){$("logs").textContent=e.message}finally{logsRequestInFlight=false}}
 async function testConnection(target){try{const root=target==="minio"?$("connection-fields"):$("connection-fields");const d=await api("/api/config/test","POST",{target:target,values:readFields(root)});message("connection-result",d.message,d.ok)}catch(e){message("connection-result",e.message,false)}}
 $("run-history-range")?.addEventListener("change",refreshStatus);
-document.querySelectorAll(".nav button").forEach(btn=>btn.addEventListener("click",()=>{document.querySelectorAll(".nav button").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".panel").forEach(x=>x.classList.remove("active"));btn.classList.add("active");$(btn.dataset.tab).classList.add("active");if(btn.dataset.tab==="records")refreshLogs()}));
+document.querySelectorAll(".nav button").forEach(btn=>btn.addEventListener("click",()=>{document.querySelectorAll(".nav button").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".panel").forEach(x=>x.classList.remove("active"));btn.classList.add("active");$(btn.dataset.tab).classList.add("active");if(btn.dataset.tab==="records")refreshLogs();else if(btn.dataset.tab==="dashboard")refreshStatus()}));
 $("save-connection").onclick=async()=>{try{await api("/api/config/settings","PUT",{values:readFields($("connection-fields"))});message("connection-result","连接配置已保存到 SQLite",true);await loadConfig()}catch(e){message("connection-result",e.message,false)}};
 $("test-minio").onclick=()=>testConnection("minio");$("test-pg").onclick=()=>testConnection("pg");
 $("save-advanced").onclick=async()=>{try{await api("/api/config/settings","PUT",{values:readFields($("advanced-fields"))});alert("运行参数已保存到 SQLite");await loadConfig()}catch(e){alert(e.message)}};
@@ -584,10 +752,10 @@ $("pause-run").onclick=async()=>{try{await api("/api/stop","POST",{});message("s
 $("force-run").onclick=async()=>{if(!confirm("强制结束下载进程？临时文件保留，下次可续传。"))return;try{await api("/api/stop","POST",{force:true});message("setup-issues","已发送强制停止",true)}catch(e){message("setup-issues",e.message,false)}};
 $("refresh").onclick=refreshStatus;$("refresh-logs").onclick=refreshLogs;
 $("set-token").onclick=async()=>{const token=$("access-token").value;if(token.length<12){message("token-result","口令至少 12 个字符",false);return}try{const d=await api("/api/auth/token","PUT",{action:"set",token:token});sessionStorage.setItem("minio_download_token",token);$("access-token").value="";message("token-result","访问口令已保存。启用非本机监听前需重启程序。",true)}catch(e){message("token-result",e.message,false)}};
-(async()=>{try{await loadConfig();await refreshPlans();await refreshStatus();await refreshLogs();refreshTimer=setInterval(()=>{refreshStatus();refreshLogs()},5000)}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad";$("setup-issues").textContent="初始化失败："+e.message}})();
+(async()=>{try{await loadConfig();await refreshPlans();await refreshStatus();refreshTimer=setInterval(()=>{if(document.visibilityState==="visible"&&document.querySelector(".nav button.active")?.dataset.tab==="dashboard")refreshStatus()},15000);logRefreshTimer=setInterval(()=>{if(document.visibilityState==="visible"&&document.querySelector(".nav button.active")?.dataset.tab==="records")refreshLogs()},20000)}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad";$("setup-issues").textContent="初始化失败："+e.message}})();
 </script></body></html>`;
 
-type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time}
+type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time;partialSizeMu sync.Mutex;partialSizeCache map[string]statusPartialSize;completedPathMu sync.Mutex;completedPathCache map[string]statusCompletedPath}
 func(a *WebAPI)completedPath(path string)bool{return a.cfg.TrustCompletedRecords||completedEpisodeDir(path,a.cfg.RequireMCAP,a.cfg.MCAPPattern)}
 func serveWeb(c Config,host string,port int)error{
  if port<1||port>65535{return errors.New("web-port 必须在 1 到 65535 之间")}
@@ -727,14 +895,45 @@ func(a *WebAPI)updateTransferSample(now time.Time,downloaded,expected int64)(flo
  return a.statusRateBps,eta,math.Round(percent*100)/100
 }
 func maxInt64(a,b int64)int64{if a>b{return a};return b}
+type statusPartialSize struct{size int64;checkedAt time.Time}
+type statusCompletedPath struct{completed bool;checkedAt time.Time}
+
+// Dashboard-only filesystem caches. They never participate in download validation,
+// completion decisions, or scheduling; a short display delay is preferable to
+// repeatedly walking every partial/completed directory on each status poll.
+func(a *WebAPI)cachedPartialDirectorySize(root string,now time.Time)int64{
+ key:=filepath.Clean(strings.TrimSpace(root));if key=="."||key==""{return 0}
+ a.partialSizeMu.Lock()
+ if cached,ok:=a.partialSizeCache[key];ok&&now.Sub(cached.checkedAt)>=0&&now.Sub(cached.checkedAt)<30*time.Second{a.partialSizeMu.Unlock();return cached.size}
+ a.partialSizeMu.Unlock()
+ size,err:=directorySizeBytes(key);if err!=nil{size=0}
+ a.partialSizeMu.Lock()
+ if a.partialSizeCache==nil{a.partialSizeCache=map[string]statusPartialSize{}}
+ if _,exists:=a.partialSizeCache[key];exists||len(a.partialSizeCache)<512{a.partialSizeCache[key]=statusPartialSize{size:size,checkedAt:now}}
+ a.partialSizeMu.Unlock()
+ return size
+}
+func(a *WebAPI)cachedCompletedPath(target string,now time.Time)bool{
+ if a.cfg.TrustCompletedRecords{return true}
+ key:=filepath.Clean(strings.TrimSpace(target));if key=="."||key==""{return false}
+ a.completedPathMu.Lock()
+ if cached,ok:=a.completedPathCache[key];ok&&now.Sub(cached.checkedAt)>=0&&now.Sub(cached.checkedAt)<60*time.Second{a.completedPathMu.Unlock();return cached.completed}
+ a.completedPathMu.Unlock()
+ completed:=completedEpisodeDir(key,a.cfg.RequireMCAP,a.cfg.MCAPPattern)
+ a.completedPathMu.Lock()
+ if a.completedPathCache==nil{a.completedPathCache=map[string]statusCompletedPath{}}
+ if _,exists:=a.completedPathCache[key];exists||len(a.completedPathCache)<16384{a.completedPathCache[key]=statusCompletedPath{completed:completed,checkedAt:now}}
+ a.completedPathMu.Unlock()
+ return completed
+}
 func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
- scenes:=[]map[string]any{};sceneIndex:=map[string]int{};taskDisk:=map[string]string{};staleRecords:=0
+ sampledAt:=time.Now();scenes:=[]map[string]any{};sceneIndex:=map[string]int{};taskDisk:=map[string]string{};staleRecords:=0
  rowsAssign,err:=a.db.Query("SELECT task_name,disk_name FROM task_disk_assignments");if err==nil{for rowsAssign.Next(){var task,diskName string;if rowsAssign.Scan(&task,&diskName)==nil{taskDisk[task]=diskName}};rowsAssign.Close()}
  for _,t:=range a.cfg.Tasks{
   idx,ok:=sceneIndex[t.Scene];if !ok{idx=len(scenes);sceneIndex[t.Scene]=idx;scenes=append(scenes,map[string]any{"scene":t.Scene,"tasks":[]map[string]any{}})}
   rows:=scenes[idx]["tasks"].([]map[string]any);count:=0;seconds:=0.0;bytesCount:=int64(0);issues:=map[string]int{}
   records,e:=a.db.Query("SELECT content_time,file_size,target_path FROM downloaded_episodes WHERE task_name=?",t.Name)
-  if e==nil{for records.Next(){var sec sql.NullFloat64;var size sql.NullInt64;var target sql.NullString;if records.Scan(&sec,&size,&target)!=nil{continue};if target.Valid&&a.completedPath(target.String){count++;seconds+=sec.Float64;bytesCount+=size.Int64}else if target.Valid{staleRecords++}};records.Close()}
+  if e==nil{for records.Next(){var sec sql.NullFloat64;var size sql.NullInt64;var target sql.NullString;if records.Scan(&sec,&size,&target)!=nil{continue};if target.Valid&&a.cachedCompletedPath(target.String,sampledAt){count++;seconds+=sec.Float64;bytesCount+=size.Int64}else if target.Valid{staleRecords++}};records.Close()}
   issueRows,e:=a.db.Query("SELECT status,COUNT(*) FROM downloads WHERE task_name=? AND status<>'completed' GROUP BY status",t.Name)
   if e==nil{for issueRows.Next(){var state string;var n int;if issueRows.Scan(&state,&n)==nil{issues[state]=n}};issueRows.Close()}
   var assigned any=nil;if name,ok:=taskDisk[t.Name];ok{assigned=name};aliases:=t.Aliases;if aliases==nil{aliases=[]string{}};tags:=t.Tags;if tags==nil{tags=[]string{}}
@@ -747,14 +946,14 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
  control:=map[string]string{};for _,key:=range []string{"stop_requested","last_run"}{var v string;if a.db.QueryRow("SELECT value FROM control WHERE key=?",key).Scan(&v)==nil{control[key]=v}}
  var last any=map[string]any{};if raw:=control["last_run"];raw!=""{var v map[string]any;if json.Unmarshal([]byte(raw),&v)==nil{last=v}}
  runningEpisodes:=[]map[string]any{};runningBytes:=int64(0);expectedBytes:=int64(0)
- if running{rr,e:=a.db.Query("SELECT episode_id,task_name,disk_name,started_at,expected_bytes,partial_path FROM downloads WHERE status='running' ORDER BY updated_at DESC");if e==nil{for rr.Next(){var id,taskName string;var diskName,started,partial sql.NullString;var expected sql.NullInt64;if rr.Scan(&id,&taskName,&diskName,&started,&expected,&partial)==nil{partialBytes:=int64(0);if partial.Valid{partialBytes,_=directorySizeBytes(partial.String)};runningBytes+=partialBytes;if expected.Valid&&expected.Int64>0{expectedBytes+=expected.Int64};if len(runningEpisodes)<24{runningEpisodes=append(runningEpisodes,map[string]any{"episode_id":id,"task_name":taskName,"disk_name":diskName.String,"started_at":started.String,"expected_bytes":expected.Int64,"partial_bytes":partialBytes})}}};rr.Close()}}
- sampledAt:=time.Now();speedBps,etaSeconds,progressPercent:=a.updateTransferSample(sampledAt,runningBytes,expectedBytes)
+ if running{rr,e:=a.db.Query("SELECT episode_id,task_name,disk_name,started_at,expected_bytes,partial_path FROM downloads WHERE status='running' ORDER BY updated_at DESC");if e==nil{for rr.Next(){var id,taskName string;var diskName,started,partial sql.NullString;var expected sql.NullInt64;if rr.Scan(&id,&taskName,&diskName,&started,&expected,&partial)==nil{partialBytes:=int64(0);if partial.Valid{partialBytes=a.cachedPartialDirectorySize(partial.String,sampledAt)};runningBytes+=partialBytes;if expected.Valid&&expected.Int64>0{expectedBytes+=expected.Int64};if len(runningEpisodes)<24{runningEpisodes=append(runningEpisodes,map[string]any{"episode_id":id,"task_name":taskName,"disk_name":diskName.String,"started_at":started.String,"expected_bytes":expected.Int64,"partial_bytes":partialBytes})}}};rr.Close()}}
+ speedBps,etaSeconds,progressPercent:=a.updateTransferSample(sampledAt,runningBytes,expectedBytes)
  historySummary:=map[string]any{"completed":int64(0),"failed":int64(0),"paused":int64(0),"pending":int64(0),"completed_bytes":int64(0),"content_seconds":float64(0)}
  statusRows,summaryErr:=a.db.Query("SELECT status,COUNT(*) FROM downloads GROUP BY status")
  if summaryErr==nil{for statusRows.Next(){var status string;var count int64;if statusRows.Scan(&status,&count)==nil{switch status{case "failed":historySummary["failed"]=count;case "paused":historySummary["paused"]=count;case "pending":historySummary["pending"]=count}}};statusRows.Close()}
  diskTotals:=map[string]map[string]any{}
  ledgerRows,ledgerErr:=a.db.Query("SELECT COALESCE(disk_name,''),file_size,content_time,target_path FROM downloaded_episodes")
- if ledgerErr==nil{for ledgerRows.Next(){var name string;var size sql.NullInt64;var seconds sql.NullFloat64;var target sql.NullString;if ledgerRows.Scan(&name,&size,&seconds,&target)!=nil{continue};if !target.Valid||!a.completedPath(target.String){continue};historySummary["completed"]=historySummary["completed"].(int64)+1;historySummary["completed_bytes"]=historySummary["completed_bytes"].(int64)+size.Int64;historySummary["content_seconds"]=historySummary["content_seconds"].(float64)+seconds.Float64;item:=diskTotals[name];if item==nil{item=map[string]any{"disk_name":name,"count":int64(0),"bytes":int64(0),"seconds":float64(0)};diskTotals[name]=item};item["count"]=item["count"].(int64)+1;item["bytes"]=item["bytes"].(int64)+size.Int64;item["seconds"]=item["seconds"].(float64)+seconds.Float64};ledgerRows.Close()}
+ if ledgerErr==nil{for ledgerRows.Next(){var name string;var size sql.NullInt64;var seconds sql.NullFloat64;var target sql.NullString;if ledgerRows.Scan(&name,&size,&seconds,&target)!=nil{continue};if !target.Valid||!a.cachedCompletedPath(target.String,sampledAt){continue};historySummary["completed"]=historySummary["completed"].(int64)+1;historySummary["completed_bytes"]=historySummary["completed_bytes"].(int64)+size.Int64;historySummary["content_seconds"]=historySummary["content_seconds"].(float64)+seconds.Float64;item:=diskTotals[name];if item==nil{item=map[string]any{"disk_name":name,"count":int64(0),"bytes":int64(0),"seconds":float64(0)};diskTotals[name]=item};item["count"]=item["count"].(int64)+1;item["bytes"]=item["bytes"].(int64)+size.Int64;item["seconds"]=item["seconds"].(float64)+seconds.Float64};ledgerRows.Close()}
  diskNames:=make([]string,0,len(diskTotals));for name:=range diskTotals{diskNames=append(diskNames,name)};sort.Strings(diskNames)
  diskHistory:=make([]map[string]any,0,len(diskNames));for _,name:=range diskNames{diskHistory=append(diskHistory,diskTotals[name])}
  historyDays:=strings.TrimSpace(r.URL.Query().Get("history_days"));if historyDays!="7"&&historyDays!="30"&&historyDays!="90"&&historyDays!="365"&&historyDays!="all"{historyDays="30"}

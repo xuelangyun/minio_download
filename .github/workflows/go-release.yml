@@ -27,7 +27,7 @@ jobs:
       - name: Run focused unit tests
         working-directory: go
         run: |
-          go test ./... -run "^(TestSafeJoinRejectsTraversal|TestLoadConfigDBImportsPythonCountConfiguration|TestResumeReservationTracksOnlyRemainingBytes|TestCompletedEpisodeDirRequiresTaskInfo|TestWebAPIRequiresBearerTokenWhenConfigured|TestMissingMCAPCleanupCanRecoverAfterInterruption|TestFirstRunUsesSingleSQLiteDatabase|TestDurationTargetsPersistInSQLite|TestValidatePlanRejectsNegativeDurationTarget|TestLoadConfigDBRejectsDatabaseWithoutSchema|TestWebStatusReturnsConfiguredTasksAndProgress|TestSaveLastRunPersistsPerRunStatistics|TestClassifyFailure|TestRecordAndSetForRunAccumulatesTaskStats|TestRunTimingMetricsPersist|TestWebPlanApplyReplaceAndMerge)$"
+          go test ./... -run "^(TestSafeJoinRejectsTraversal|TestLoadConfigDBImportsPythonCountConfiguration|TestResumeReservationTracksOnlyRemainingBytes|TestCompletedEpisodeDirRequiresTaskInfo|TestWebAPIRequiresBearerTokenWhenConfigured|TestMissingMCAPCleanupCanRecoverAfterInterruption|TestFirstRunUsesSingleSQLiteDatabase|TestDurationTargetsPersistInSQLite|TestValidatePlanRejectsNegativeDurationTarget|TestLoadConfigDBRejectsDatabaseWithoutSchema|TestWebStatusReturnsConfiguredTasksAndProgress|TestSaveLastRunPersistsPerRunStatistics|TestClassifyFailure|TestRecordAndSetForRunAccumulatesTaskStats|TestRunTimingMetricsPersist|TestWebPlanApplyReplaceAndMerge|TestSQLiteLogWriterFlushesBufferedEntriesOnClose|TestDashboardPartialDirectorySizeCache)$"
       - name: Build Windows amd64
         working-directory: go
         run: |
