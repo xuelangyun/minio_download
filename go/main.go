@@ -408,14 +408,23 @@ input[type=file]{max-width:260px;color:var(--muted);font-size:12px}
 <script>
 let configData=null,statusData=null,logOffset=0,refreshTimer=null,diskMounts=[];
 const $=id=>document.getElementById(id);
-async function loadRunEpisodeDetails(el){
+async function loadRunEpisodeDetails(el,offset){
  const root=el.querySelector(".run-episode-results");if(!root)return;
- root.textContent="正在读取...";
- try{const q=new URLSearchParams({task:el.dataset.task,limit:"100"});const data=await api("/api/runs/"+encodeURIComponent(el.dataset.runId)+"/episodes?"+q.toString());
- const items=data.episodes||[];root.innerHTML=items.length?'<div class="muted">共 '+Number(data.total||0)+' 条，当前显示 '+items.length+' 条</div><table class="history-table"><thead><tr><th>Episode ID</th><th>状态</th><th>磁盘</th><th>容量</th><th>内容时长</th><th>错误</th></tr></thead><tbody>'+items.map(v=>'<tr><td>'+esc(v.episode_id)+'</td><td>'+esc(({completed:"成功",failed:"失败",paused:"已暂停"}[v.status]||v.status))+'</td><td>'+esc(v.disk_name||"-")+'</td><td>'+formatGiB(v.completed_bytes||0)+'</td><td>'+(Number(v.content_seconds||0)/60).toFixed(1)+' 分钟</td><td>'+esc(v.error||"-")+'</td></tr>').join("")+'</tbody></table>':'<div class="notice">该任务本次运行没有 Episode 明细。</div>';
- if(Number(data.total||0)>items.length)root.insertAdjacentHTML("beforeend",'<div class="muted">明细最多显示 100 条；可通过 API offset 参数继续分页。</div>');
- el.dataset.loaded="1";
- }catch(err){root.textContent="读取失败："+err.message;el.dataset.loaded="";el.addEventListener("toggle",()=>{if(el.open&&!el.dataset.loaded)loadRunEpisodeDetails(el)},{once:true})}
+ offset=Number(offset||0);root.dataset.loading="1";
+ if(offset===0)root.textContent="正在读取...";
+ try{
+  const q=new URLSearchParams({task:el.dataset.task,limit:"100",offset:String(offset)});
+  const data=await api("/api/runs/"+encodeURIComponent(el.dataset.runId)+"/episodes?"+q.toString());
+  const items=data.episodes||[],total=Number(data.total||0);
+  if(offset===0)root.innerHTML='<div class="muted run-episode-count"></div><table class="history-table"><thead><tr><th>Episode ID</th><th>状态</th><th>磁盘</th><th>容量</th><th>内容时长</th><th>错误</th></tr></thead><tbody></tbody></table><button type="button" class="btn secondary run-episode-more">加载更多</button>';
+  const count=root.querySelector(".run-episode-count"),body=root.querySelector("tbody"),more=root.querySelector(".run-episode-more");
+  body.insertAdjacentHTML("beforeend",items.map(v=>'<tr><td>'+esc(v.episode_id)+'</td><td>'+esc(({completed:"成功",failed:"失败",paused:"已暂停"}[v.status]||v.status))+'</td><td>'+esc(v.disk_name||"-")+'</td><td>'+formatGiB(v.completed_bytes||0)+'</td><td>'+(Number(v.content_seconds||0)/60).toFixed(1)+' 分钟</td><td>'+esc(v.error||"-")+'</td></tr>').join(""));
+  const loaded=offset+items.length;count.textContent='共 '+total+' 条，已加载 '+loaded+' 条';
+  more.hidden=loaded>=total;more.textContent='加载更多';more.onclick=()=>loadRunEpisodeDetails(el,loaded);
+  if(!total)root.innerHTML='<div class="notice">该任务本次运行没有 Episode 明细。</div>';
+  el.dataset.loaded="1";
+ }catch(err){root.textContent="读取失败："+err.message;el.dataset.loaded="";el.addEventListener("toggle",()=>{if(el.open&&!el.dataset.loaded)loadRunEpisodeDetails(el,0)},{once:true})}
+ finally{delete root.dataset.loading}
 }
 async function api(path,method,body){const headers={"Content-Type":"application/json"};const token=sessionStorage.getItem("minio_download_token");if(token)headers.Authorization="Bearer "+token;const response=await fetch(path,{method:method||"GET",headers,body:body===undefined?undefined:JSON.stringify(body)});const data=await response.json().catch(()=>({error:"服务器返回内容不是 JSON"}));if(!response.ok)throw new Error(data.error||("HTTP "+response.status));return data}
 function message(id,text,ok){$(id).textContent=text;$(id).className="notice "+(ok===true?"ok":ok===false?"bad":"")}
