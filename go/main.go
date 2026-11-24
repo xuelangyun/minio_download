@@ -223,20 +223,24 @@ func(a *App)liveStatusRelayLoop(ctx context.Context,address,token string){
  ticker:=time.NewTicker(500*time.Millisecond);defer ticker.Stop()
  var conn net.Conn
  var writer *bufio.Writer
+ retryDelay:=time.Second
+ retryAt:=time.Time{}
  closeConnection:=func(){if conn!=nil{_=conn.Close()};conn=nil;writer=nil}
+ scheduleRetry:=func(){retryAt=time.Now().Add(retryDelay);retryDelay*=2;if retryDelay>10*time.Second{retryDelay=10*time.Second}}
  connect:=func()bool{
-  candidate,err:=net.DialTimeout("tcp",address,2*time.Second);if err!=nil{return false}
+  if time.Now().Before(retryAt){return false}
+  candidate,err:=net.DialTimeout("tcp",address,2*time.Second);if err!=nil{scheduleRetry();return false}
   buffer:=bufio.NewWriter(candidate)
   _=candidate.SetWriteDeadline(time.Now().Add(2*time.Second))
-  if err=json.NewEncoder(buffer).Encode(map[string]string{"token":token});err!=nil{_=candidate.Close();return false}
-  if err=buffer.Flush();err!=nil{_=candidate.Close();return false}
-  conn=candidate;writer=buffer;return true
+  if err=json.NewEncoder(buffer).Encode(map[string]string{"token":token});err!=nil{_=candidate.Close();scheduleRetry();return false}
+  if err=buffer.Flush();err!=nil{_=candidate.Close();scheduleRetry();return false}
+  conn=candidate;writer=buffer;retryDelay=time.Second;retryAt=time.Time{};return true
  }
  send:=func(snapshot liveStatusSnapshot){
   if conn==nil&&!connect(){return}
   _=conn.SetWriteDeadline(time.Now().Add(2*time.Second))
-  if err:=json.NewEncoder(writer).Encode(snapshot);err!=nil{closeConnection();return}
-  if err:=writer.Flush();err!=nil{closeConnection()}
+  if err:=json.NewEncoder(writer).Encode(snapshot);err!=nil{closeConnection();scheduleRetry();return}
+  if err:=writer.Flush();err!=nil{closeConnection();scheduleRetry()}
  }
  var lastBytes int64
  var lastAt time.Time
@@ -915,7 +919,7 @@ $("set-token").onclick=async()=>{const token=$("access-token").value;if(token.le
  refreshTimer=setInterval(()=>{if(document.visibilityState==="visible"&&document.querySelector(".nav button.active")?.dataset.tab==="dashboard")refreshStatus()},5000);logRefreshTimer=setInterval(()=>{if(document.visibilityState==="visible"&&document.querySelector(".nav button.active")?.dataset.tab==="records")refreshLogs()},20000)}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad";$("setup-issues").textContent="初始化失败："+e.message}})();
 </script></body></html>`;
 
-type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time;partialSizeMu sync.Mutex;partialSizeCache map[string]statusPartialSize;completedPathMu sync.Mutex;completedPathCache map[string]statusCompletedPath;statusRelayAddr string;statusRelayToken string;liveMu sync.RWMutex;liveSnapshot liveStatusSnapshot;liveUpdatedAt time.Time;eventMu sync.Mutex;eventSubscribers map[chan []byte]struct{}}
+type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time;partialSizeMu sync.Mutex;partialSizeCache map[string]statusPartialSize;completedPathMu sync.Mutex;completedPathCache map[string]statusCompletedPath;statusRelayAddr string;statusRelayToken string;relayGeneration atomic.Uint64;liveMu sync.RWMutex;liveSnapshot liveStatusSnapshot;liveUpdatedAt time.Time;eventMu sync.Mutex;eventSubscribers map[chan []byte]struct{}}
 func(a *WebAPI)acceptStatusRelay(listener net.Listener){
  for{
   conn,err:=listener.Accept()
@@ -929,12 +933,13 @@ func(a *WebAPI)handleStatusRelay(conn net.Conn){
  if !scanner.Scan(){return}
  var auth map[string]string
  if err:=json.Unmarshal(scanner.Bytes(),&auth);err!=nil||!hmac.Equal([]byte(auth["token"]),[]byte(a.statusRelayToken)){return}
+ generation:=a.relayGeneration.Add(1)
  for scanner.Scan(){
   var snapshot liveStatusSnapshot
   if err:=json.Unmarshal(scanner.Bytes(),&snapshot);err!=nil{continue}
   a.publishLiveStatus(snapshot)
  }
- a.publishLiveStatus(liveStatusSnapshot{Running:false,RunningEpisodes:[]liveEpisode{}})
+ if a.relayGeneration.Load()==generation{a.publishLiveStatus(liveStatusSnapshot{Running:false,RunningEpisodes:[]liveEpisode{}})}
 }
 func(a *WebAPI)publishLiveStatus(snapshot liveStatusSnapshot){
  if snapshot.RunningEpisodes==nil{snapshot.RunningEpisodes=[]liveEpisode{}}
