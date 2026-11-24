@@ -200,7 +200,118 @@ func processIdentity(pid int,created float64)bool{
 const webUIHTML = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MinIO 下载器</title>
 <style>
-:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#172033;background:#f4f6fa;font-size:14px}*{box-sizing:border-box}body{margin:0}.top{background:#182235;color:#fff;padding:18px 24px;display:flex;justify-content:space-between;align-items:center}.top h1{font-size:19px;margin:0}.top small{color:#bdc7d8}.wrap{max-width:1180px;margin:22px auto;padding:0 18px}.nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}.nav button,.btn{border:1px solid #cbd3df;border-radius:7px;padding:9px 13px;background:#fff;color:#253047;cursor:pointer}.nav button.active,.btn.primary{background:#263b5c;color:#fff;border-color:#263b5c}.btn.danger{color:#b42318}.panel{display:none}.panel.active{display:block}.card{background:#fff;border:1px solid #e0e5ed;border-radius:10px;padding:18px;margin-bottom:16px}.card h2{font-size:16px;margin:0 0 14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.field label{display:block;font-weight:600;margin-bottom:5px}.field input,.field select,.field textarea,textarea{width:100%;border:1px solid #cbd3df;border-radius:6px;padding:9px;font:inherit}.field small,.hint{color:#64748b;font-size:12px}.field input[type=checkbox]{width:auto}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.notice{padding:11px 13px;background:#f1f5f9;border-radius:7px;margin:10px 0;color:#34445d}.ok{color:#16703c}.bad{color:#b42318}.status{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.metric{background:#f6f8fb;border-radius:8px;padding:14px}.metric b{display:block;font-size:22px;margin-top:5px}.editor{min-height:260px;font:12px ui-monospace,monospace;white-space:pre;tab-size:2}.disk-row{border:1px solid #dbe3ed;border-radius:8px;padding:13px;margin:10px 0;background:#fbfcfe}.disk-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.disk-actions{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:10px}.logs{height:440px;overflow:auto;background:#101827;color:#d4e0f0;padding:12px;border-radius:8px;white-space:pre-wrap;font:12px ui-monospace,monospace}.tag{display:inline-block;padding:3px 8px;border-radius:20px;background:#e9eef6;color:#35445d;margin-left:8px}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid #e4e9f0}code{background:#f1f5f9;padding:2px 4px;border-radius:4px}@media(max-width:600px){.top{padding:15px}.wrap{padding:0 10px}.card{padding:13px}}
+:root{
+ color-scheme:light;
+ --bg:#f3f6fb;--surface:#fff;--surface-soft:#f8faff;--ink:#182338;--muted:#68758a;
+ --line:#e2e8f0;--line-strong:#cbd5e1;--primary:#2457d6;--primary-hover:#1947b8;
+ --success:#168451;--danger:#c03932;--warning:#a16207;--radius:14px;
+ font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+ color:var(--ink);background:var(--bg);font-size:14px;font-synthesis:none;
+}
+*{box-sizing:border-box}
+body{margin:0;min-width:320px;background:linear-gradient(180deg,#edf3ff 0,#f5f7fb 240px,var(--bg) 100%);line-height:1.55}
+button,input,select,textarea{font:inherit}
+button{transition:background .16s,border-color .16s,box-shadow .16s,transform .16s}
+.top{
+ position:sticky;top:0;z-index:20;min-height:76px;padding:14px max(22px,calc((100vw - 1240px)/2));
+ display:flex;justify-content:space-between;align-items:center;gap:20px;
+ color:#fff;background:rgba(20,34,59,.96);border-bottom:1px solid rgba(255,255,255,.1);
+ box-shadow:0 5px 22px rgba(20,34,59,.13);backdrop-filter:blur(12px)
+}
+.top h1{font-size:20px;letter-spacing:.2px;margin:0;font-weight:700}
+.top small{display:block;margin-top:3px;color:#b9c7dc;font-size:12px}
+#connection-state{padding:6px 11px;border:1px solid rgba(255,255,255,.2);border-radius:999px;color:#dce8f8;font-size:12px;white-space:nowrap}
+.wrap{width:min(1240px,100%);margin:26px auto 56px;padding:0 22px}
+.nav{
+ position:sticky;top:76px;z-index:15;display:flex;gap:6px;overflow-x:auto;
+ padding:8px;margin:0 0 20px;background:rgba(255,255,255,.9);
+ border:1px solid var(--line);border-radius:13px;box-shadow:0 5px 18px rgba(26,43,75,.05);
+ backdrop-filter:blur(10px);scrollbar-width:thin
+}
+.nav button{
+ flex:0 0 auto;border:0;border-radius:9px;padding:10px 16px;background:transparent;
+ color:#526078;font-weight:600;cursor:pointer
+}
+.nav button:hover{background:#eef3ff;color:var(--primary)}
+.nav button.active{background:#e9efff;color:var(--primary);box-shadow:inset 0 0 0 1px #d8e3ff}
+.panel{display:none;animation:panel-in .18s ease-out}
+.panel.active{display:block}
+@keyframes panel-in{from{opacity:.65;transform:translateY(4px)}to{opacity:1;transform:none}}
+.card{
+ min-width:0;padding:22px;margin-bottom:18px;background:var(--surface);
+ border:1px solid var(--line);border-radius:var(--radius);
+ box-shadow:0 5px 18px rgba(26,43,75,.045)
+}
+.card h2{display:flex;align-items:center;gap:9px;margin:0 0 16px;font-size:16px;font-weight:700;letter-spacing:.1px}
+.card h2:before{content:"";width:4px;height:17px;border-radius:4px;background:var(--primary)}
+.card h3{margin:0 0 12px;font-size:14px}
+.card p{margin:0 0 14px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.field{min-width:0;margin:0 0 14px}
+.field label{display:block;margin:0 0 7px;color:#35435a;font-size:13px;font-weight:650}
+.field input,.field select,.field textarea,textarea{
+ width:100%;min-width:0;min-height:40px;padding:9px 11px;color:var(--ink);
+ background:#fff;border:1px solid var(--line-strong);border-radius:9px;outline:none;
+ transition:border-color .15s,box-shadow .15s
+}
+.field input:focus,.field select:focus,.field textarea:focus,textarea:focus{
+ border-color:#7196f2;box-shadow:0 0 0 3px rgba(36,87,214,.11)
+}
+.field input[type=checkbox]{width:auto;min-height:0;accent-color:var(--primary)}
+.field small,.hint{display:block;margin-top:6px;color:var(--muted);font-size:12px;line-height:1.6}
+.actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:16px}
+.btn{
+ display:inline-flex;align-items:center;justify-content:center;min-height:38px;
+ padding:8px 14px;border:1px solid var(--line-strong);border-radius:9px;
+ background:#fff;color:#344258;font-weight:600;cursor:pointer
+}
+.btn:hover{border-color:#9aabc3;background:#f7f9fc}
+.btn:active{transform:translateY(1px)}
+.btn.primary{background:var(--primary);border-color:var(--primary);color:#fff;box-shadow:0 3px 8px rgba(36,87,214,.16)}
+.btn.primary:hover{background:var(--primary-hover);border-color:var(--primary-hover)}
+.btn.danger{color:var(--danger);border-color:#f0c9c6;background:#fff}
+.btn.danger:hover{background:#fff4f3;border-color:#e5a6a1}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.notice{padding:12px 14px;margin:12px 0;border:1px solid #e1e8f5;border-radius:10px;background:#f5f8ff;color:#465873}
+.ok{color:var(--success)}.bad{color:var(--danger)}
+.status{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}
+.metric{min-width:0;padding:15px 16px;background:linear-gradient(145deg,#f8faff,#f2f6fd);border:1px solid #e5ebf5;border-radius:11px;color:#65738a}
+.metric b{display:block;margin-top:5px;color:#1c2c47;font-size:24px;font-weight:750;line-height:1.25;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.disk-row{padding:17px;margin:12px 0;background:#fbfcff;border:1px solid var(--line);border-radius:12px}
+.disk-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.disk-actions{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px}
+.editor{min-height:300px;font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre;tab-size:2;background:#fbfcff!important}
+.logs{height:440px;overflow:auto;padding:16px;border:1px solid #26364f;border-radius:11px;background:#111c2d;color:#d5e1f2;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace}
+.tag{display:inline-flex;vertical-align:middle;align-items:center;padding:3px 9px;margin-left:7px;border:1px solid rgba(255,255,255,.18);border-radius:999px;background:rgba(255,255,255,.1);color:#d9e6ff;font-size:11px;font-weight:600}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}
+th{position:sticky;top:0;background:#f5f7fb;color:#536178;font-weight:700}
+td,th{text-align:left;padding:11px 12px;border-bottom:1px solid #e8edf4}
+tr:last-child td{border-bottom:0}
+tbody tr:hover{background:#f8faff}
+code{padding:2px 5px;border-radius:5px;background:#eef2f8;color:#33445f;font-size:.92em}
+input[type=file]{max-width:260px;color:var(--muted);font-size:12px}
+#task-status,#disk-status,#plan-list{overflow-x:auto}
+#download-mode{font-weight:600}
+@media(max-width:900px){
+ .status{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .disk-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:600px){
+ .top{position:relative;min-height:68px;padding:13px 15px;align-items:flex-start}
+ .top h1{font-size:18px}.top small{max-width:230px}
+ #connection-state{font-size:11px;padding:5px 8px}
+ .wrap{margin:15px auto 32px;padding:0 12px}
+ .nav{position:sticky;top:0;margin-bottom:14px;padding:6px;gap:3px}
+ .nav button{padding:9px 12px;font-size:12px}
+ .card{padding:16px;margin-bottom:13px;border-radius:12px}
+ .grid,.disk-grid{grid-template-columns:minmax(0,1fr);gap:8px}
+ .status{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+ .metric{padding:12px}.metric b{font-size:20px}
+ .actions{gap:7px}.btn{padding:8px 11px;font-size:12px}
+ td,th{padding:9px 8px;white-space:nowrap}
+ .editor{min-height:240px}
+}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
 </style></head><body>
 <header class="top"><div><h1>MinIO 下载器 <span class="tag">Go</span></h1><small>首次启动：网页配置 · SQLite 单文件存储</small></div><div id="connection-state">正在连接…</div></header>
 <main class="wrap">
