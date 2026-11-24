@@ -1868,4 +1868,14 @@ func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
  if err=db.QueryRow("SELECT failed_count FROM run_task_history WHERE run_id='run-1' AND task_name='scene-task'").Scan(&failed);err!=nil||failed!=1{t.Fatalf("failed_count=%d err=%v",failed,err)}
  var status string
  if err=db.QueryRow("SELECT status FROM downloads WHERE episode_id='episode-1'").Scan(&status);err!=nil||status!="completed"{t.Fatalf("download status=%q err=%v",status,err)}
+ var successDetail,errorDetail string
+ if err=db.QueryRow("SELECT status FROM run_episode_history WHERE run_id='run-1' AND episode_id='episode-1'").Scan(&successDetail);err!=nil||successDetail!="completed"{t.Fatalf("success episode detail=%q err=%v",successDetail,err)}
+ if err=db.QueryRow("SELECT status||':'||error FROM run_episode_history WHERE run_id='run-1' AND episode_id='episode-2'").Scan(&errorDetail);err!=nil||errorDetail!="failed:simulated failure"{t.Fatalf("failure episode detail=%q err=%v",errorDetail,err)}
+ api:=&WebAPI{db:db}
+ req:=httptest.NewRequest("GET","/api/runs/run-1/episodes?task=scene-task&limit=10",nil);req.SetPathValue("id","run-1")
+ response:=httptest.NewRecorder();api.runEpisodes(response,req)
+ if response.Code!=http.StatusOK{t.Fatalf("run episodes API status=%d body=%s",response.Code,response.Body.String())}
+ var payload struct{Total int `json:"total"`;Episodes []struct{ID string `json:"episode_id"`;Status string `json:"status"`} `json:"episodes"`}
+ if err=json.Unmarshal(response.Body.Bytes(),&payload);err!=nil{t.Fatal(err)}
+ if payload.Total!=2||len(payload.Episodes)!=2{t.Fatalf("unexpected episode page: total=%d episodes=%d",payload.Total,len(payload.Episodes))}
 }
