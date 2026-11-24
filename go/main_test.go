@@ -1853,6 +1853,18 @@ func TestSaveLastRunPersistsPerRunStatistics(t *testing.T) {
  if result!="finished"||count!=1||bytes!=4096||seconds!=120||elapsed<=0{t.Fatalf("unexpected run history: result=%s count=%d bytes=%d seconds=%v elapsed=%v",result,count,bytes,seconds,elapsed)}
 }
 
+func TestClassifyFailure(t *testing.T) {
+ cases:=[]struct{message,want string}{
+  {"Get https://minio:9000: connection reset by peer","network"},
+  {"write /data/file: no space left on device","disk_space"},
+  {"The specified key does not exist","not_found"},
+  {"open /data/file: permission denied","permission"},
+  {"checksum mismatch while verifying object","integrity"},
+  {"unexpected application error","other"},
+ }
+ for _,tc:=range cases{t.Run(tc.want,func(t *testing.T){if got:=classifyFailure(errors.New(tc.message));got!=tc.want{t.Fatalf("classifyFailure(%q)=%q want %q",tc.message,got,tc.want)}})}
+}
+
 func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
  dbPath:=filepath.Join(t.TempDir(),"task-run.sqlite3")
  if err:=initializeSQLiteDatabase(dbPath);err!=nil{t.Fatal(err)}
@@ -1871,6 +1883,8 @@ func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
  var successDetail,errorDetail string
  if err=db.QueryRow("SELECT status FROM run_episode_history WHERE run_id='run-1' AND episode_id='episode-1'").Scan(&successDetail);err!=nil||successDetail!="completed"{t.Fatalf("success episode detail=%q err=%v",successDetail,err)}
  if err=db.QueryRow("SELECT status||':'||error FROM run_episode_history WHERE run_id='run-1' AND episode_id='episode-2'").Scan(&errorDetail);err!=nil||errorDetail!="failed:simulated failure"{t.Fatalf("failure episode detail=%q err=%v",errorDetail,err)}
+ var category string
+ if err=db.QueryRow("SELECT failure_category FROM run_episode_history WHERE run_id='run-1' AND episode_id='episode-2'").Scan(&category);err!=nil||category!="other"{t.Fatalf("failure category=%q err=%v",category,err)}
  if err=app.fail(Episode{ID:"episode-3",Task:"scene-task"},DiskConfig{Name:"disk-a"},"","",context.Canceled);err!=nil{t.Fatalf("paused episode should not be an error: %v",err)}
  var pausedStatus string
  if err=db.QueryRow("SELECT status FROM run_episode_history WHERE run_id='run-1' AND episode_id='episode-3'").Scan(&pausedStatus);err!=nil||pausedStatus!="paused"{t.Fatalf("paused episode status=%q err=%v",pausedStatus,err)}
