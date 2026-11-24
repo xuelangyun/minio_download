@@ -1,3 +1,4 @@
+# One-time release helper; remove after v0.0.3 is published.
 name: Publish v0.0.3 release assets
 
 on:
