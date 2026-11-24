@@ -380,6 +380,137 @@ input[type=file]{max-width:260px;color:var(--muted);font-size:12px}
 .task-save-actions{padding-top:14px;border-top:1px solid var(--line)}
 @media(max-width:600px){.task-toolbar{align-items:flex-start}.task-scene-head{flex-wrap:wrap}.task-scene-head input{max-width:none;flex-basis:100%}.task-scene-head .scene-count{margin-left:0}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+
+/* Compact responsive layout refresh */
+:root{
+ --bg:#f3f6fb;--surface:#fff;--surface-soft:#f8faff;--line:#e3e9f2;
+ --line-strong:#cbd5e1;--radius:12px
+}
+body{background:linear-gradient(180deg,#edf3fc 0,#f5f7fb 190px,var(--bg) 100%);line-height:1.48}
+.top{
+ min-height:62px;padding:9px max(18px,calc((100vw - 1400px)/2));
+ gap:14px;background:linear-gradient(110deg,#172943,#223b60);
+ box-shadow:0 3px 14px rgba(20,34,59,.12)
+}
+.top h1{font-size:18px}.top small{margin-top:1px;font-size:11px}
+#connection-state{padding:5px 10px;font-size:11px}
+.wrap{width:min(1440px,100%);margin:16px auto 34px;padding:0 18px}
+.nav{
+ top:62px;gap:4px;padding:6px;margin-bottom:12px;border-radius:11px;
+ box-shadow:0 3px 12px rgba(26,43,75,.045)
+}
+.nav button{padding:8px 12px;border-radius:8px;font-size:13px}
+.card{
+ padding:16px;margin-bottom:12px;border-radius:12px;
+ box-shadow:0 2px 10px rgba(26,43,75,.035)
+}
+.card h2{gap:8px;margin-bottom:11px;font-size:15px}
+.card h2:before{height:15px;width:3px}
+.card h3{margin-bottom:9px;font-size:13px}
+.card p{margin-bottom:10px}
+.card .card{padding:14px;margin:12px 0;border-radius:10px;box-shadow:none;background:#f8faff!important}
+.grid{gap:11px}
+.field{margin-bottom:10px}
+.field label{margin-bottom:5px;font-size:12px}
+.field input,.field select,.field textarea,textarea{
+ min-height:36px;padding:7px 10px;border-radius:8px;font-size:13px
+}
+.field small,.hint{margin-top:4px;font-size:11px;line-height:1.5}
+.actions{gap:7px;margin-top:11px}
+.btn{min-height:34px;padding:6px 11px;border-radius:8px;font-size:12px}
+.notice{padding:9px 11px;margin:9px 0;border-radius:9px;font-size:12px}
+.status{grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;margin:12px 0}
+.metric{padding:11px 13px;border-radius:10px}
+.metric b{margin-top:3px;font-size:21px;line-height:1.2}
+.transfer-panel{padding:12px 14px;margin:0 0 12px;border-radius:10px}
+.progress-track{height:8px;margin:9px 0 7px}
+.disk-monitor-grid{gap:9px}
+.disk-monitor{padding:12px;border-radius:10px}
+.disk-monitor-track{margin:9px 0 7px}
+.active-list{gap:7px}
+.active-item{padding:9px 11px;gap:10px}
+.active-item-progress{margin:7px 0 5px}
+.section-heading{gap:10px}
+.summary-chip{padding:4px 8px;font-size:10px}
+.history-grid{gap:8px;margin-top:9px}
+.history-card{padding:10px;border-radius:9px}
+.history-table{margin-top:9px;font-size:11px}
+.history-table th,.history-table td{padding:7px 9px}
+table{font-size:12px}
+td,th{padding:8px 10px}
+th{z-index:1}
+.disk-row{padding:12px;margin:9px 0;border-radius:10px}
+.disk-grid{gap:9px}
+.disk-actions{margin-top:7px}
+.logs{height:min(380px,52vh);padding:12px;border-radius:9px;font-size:11px}
+.task-toolbar{gap:10px;margin:13px 0 9px;padding-bottom:9px}
+.task-toolbar strong{font-size:14px}
+.task-editor{gap:10px}
+.task-scene{border-radius:10px}
+.task-scene-head{padding:9px 11px;gap:8px}
+.task-scene-head input{padding:7px 9px;font-size:12px}
+.task-table{min-width:820px}
+.task-table td{padding:6px 7px}
+.task-table input{padding:6px 7px;font-size:11px}
+.task-scene-foot{padding:8px 10px}
+.json-tools{margin-top:12px;padding:10px 12px}
+.task-save-actions{padding-top:11px}
+#dashboard.panel.active{
+ display:grid;grid-template-columns:repeat(12,minmax(0,1fr));
+ gap:12px;align-items:start
+}
+#dashboard>.card{min-width:0;margin:0}
+#dashboard>.card:nth-child(1),
+#dashboard>.card:nth-child(4),
+#dashboard>.card:nth-child(5){grid-column:1/-1}
+#dashboard>.card:nth-child(2),
+#dashboard>.card:nth-child(3){grid-column:span 6}
+#dashboard .status{margin:10px 0}
+#dashboard #run-history{max-width:100%;overflow-x:auto}
+#dashboard #task-status,#dashboard #disk-history{max-width:100%;overflow-x:auto}
+#run-history .history-table{min-width:980px}
+#task-status table{min-width:560px}
+#connection-fields,#advanced-fields{align-items:start}
+#connection-fields .field,#advanced-fields .field{padding:10px 11px;margin:0;border:1px solid #edf0f5;border-radius:9px;background:#fbfcff}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{
+ outline:2px solid rgba(36,87,214,.55);outline-offset:2px
+}
+@media(max-width:1050px){
+ .wrap{width:min(100%,100%);padding:0 14px}
+ .status{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+@media(max-width:820px){
+ #dashboard.panel.active{display:block}
+ #dashboard>.card{margin-bottom:11px}
+ .top{padding:9px 14px}
+ .nav{top:62px}
+ .status{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:600px){
+ .top{min-height:60px;padding:10px 12px}
+ .top h1{font-size:16px}.top small{font-size:10px}
+ #connection-state{padding:4px 7px;font-size:10px}
+ .wrap{margin:11px auto 24px;padding:0 10px}
+ .nav{top:0;margin-bottom:10px;padding:5px}
+ .nav button{padding:8px 10px;font-size:11px}
+ .card{padding:13px;margin-bottom:10px;border-radius:10px}
+ .card .card{padding:11px;margin:10px 0}
+ .grid,.disk-grid{grid-template-columns:minmax(0,1fr);gap:7px}
+ .status{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+ .metric{padding:10px}.metric b{font-size:18px}
+ .field{margin-bottom:8px}
+ .actions{gap:6px}
+ .btn{min-height:33px;padding:6px 9px;font-size:11px}
+ .section-heading{align-items:flex-start}
+ .transfer-head{align-items:flex-start;flex-direction:column;gap:3px}
+ .task-toolbar{align-items:flex-start}
+ .task-scene-head{flex-wrap:wrap}
+ .task-scene-head input{max-width:none;flex-basis:100%}
+ .task-scene-head .scene-count{margin-left:0}
+ .disk-monitor-stats{font-size:10px}
+ .logs{height:340px}
+}
+
 </style></head><body>
 <header class="top"><div><h1>MinIO 下载器 <span class="tag">Go</span></h1><small>首次启动：网页配置 · SQLite 单文件存储</small></div><div id="connection-state">正在连接…</div></header>
 <main class="wrap">
