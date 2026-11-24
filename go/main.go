@@ -188,6 +188,14 @@ func initializeSQLiteDatabase(name string)error{
  }
  return nil
 }
+func ensureColumn(db *sql.DB,table,column,typ string)error{
+ rows,err:=db.Query("PRAGMA table_info("+table+")");if err!=nil{return err}
+ found:=false
+ for rows.Next(){var cid,notnull,pk int;var name,kind string;var def sql.NullString;if err=rows.Scan(&cid,&name,&kind,&notnull,&def,&pk);err!=nil{rows.Close();return err};if name==column{found=true}}
+ if err=rows.Err();err!=nil{rows.Close();return err};if err=rows.Close();err!=nil{return err}
+ if !found{_,err=db.Exec("ALTER TABLE "+table+" ADD COLUMN "+column+" "+typ)}
+ return err
+}
 func processIdentity(pid int,created float64)bool{
  if pid<=0{return false}
  proc,err:=process.NewProcess(int32(pid));if err!=nil{return false}
