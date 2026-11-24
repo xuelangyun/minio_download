@@ -982,6 +982,7 @@ func TestWebStatusReturnsConfiguredTasksAndProgress(t *testing.T) {
 		"CREATE TABLE downloads(episode_id TEXT PRIMARY KEY,task_name TEXT,status TEXT,error TEXT,parent_key TEXT,updated_at TEXT)",
 		"CREATE TABLE task_disk_assignments(task_name TEXT,disk_name TEXT)",
 		"CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT)",
+  "CREATE TABLE run_history(run_id TEXT PRIMARY KEY,started_at TEXT,finished_at TEXT,duration_seconds REAL,mode TEXT,result TEXT,completed_count INTEGER,completed_bytes INTEGER,content_seconds REAL,error TEXT)",
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
@@ -998,8 +999,12 @@ func TestWebStatusReturnsConfiguredTasksAndProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := &WebAPI{cfg: Config{Tasks: []Task{{Name: "桌面收纳", Scene: "Household", TargetCount: 40, Tags: []string{"家居"}}}}, db: db}
+ now:=time.Now().UTC()
+ if _,err=db.Exec("INSERT INTO run_history VALUES(?,?,?,?,?,?,?,?,?,?)","recent",now.Format(time.RFC3339Nano),now.Format(time.RFC3339Nano),10,"count","finished",1,1024,60,"");err!=nil{t.Fatal(err)}
+ oldTime:=now.Add(-10*24*time.Hour)
+ if _,err=db.Exec("INSERT INTO run_history VALUES(?,?,?,?,?,?,?,?,?,?)","older",oldTime.Format(time.RFC3339Nano),oldTime.Format(time.RFC3339Nano),10,"count","finished",1,1024,60,"");err!=nil{t.Fatal(err)}
 	recorder := httptest.NewRecorder()
-	api.status(recorder, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+	api.status(recorder, httptest.NewRequest(http.MethodGet, "/api/status?history_days=7", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected status code: %d", recorder.Code)
 	}
@@ -1011,6 +1016,10 @@ func TestWebStatusReturnsConfiguredTasksAndProgress(t *testing.T) {
 	tasks := scenes[0].(map[string]any)["tasks"].([]any)
 	task := tasks[0].(map[string]any)
 	if response["stale_records"] != float64(1) { t.Fatalf("expected one stale record, got %#v", response["stale_records"]) }
+ history:=response["run_history"].([]any);if len(history)!=1||history[0].(map[string]any)["run_id"]!="recent"{t.Fatalf("7-day history filter returned unexpected runs: %#v",history)}
+ allRecorder:=httptest.NewRecorder();api.status(allRecorder,httptest.NewRequest(http.MethodGet,"/api/status?history_days=all",nil))
+ var allResponse map[string]any;if err=json.Unmarshal(allRecorder.Body.Bytes(),&allResponse);err!=nil{t.Fatal(err)}
+ allHistory:=allResponse["run_history"].([]any);if len(allHistory)!=2{t.Fatalf("all history filter should return both runs, got %#v",allHistory)}
 	if task["downloaded"] != float64(1) || task["hours"] != float64(1) || task["disk"] != "disk1" {
 		t.Fatalf("unexpected task progress: %#v", task)
 	}
