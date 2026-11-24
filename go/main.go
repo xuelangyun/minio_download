@@ -2029,7 +2029,7 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
  var wg sync.WaitGroup;errs:=make(chan error,len(byDisk))
  for diskName,batches:=range byDisk{
   diskName,batches:=diskName,batches;wg.Add(1)
-  go func(){started:=time.Now();defer wg.Done();defer func(){if err:=a.recordRunDiskTiming(diskName,started,time.Since(started).Seconds());err!=nil{log.Printf("保存磁盘运行统计失败 %s: %v",diskName,err)}}();for _,b:=range batches{if a.ctx.Err()!=nil{return};if err:=a.downloadTask(b);err!=nil{errs<-err;return}}}()
+  go func(){started:=time.Now();defer wg.Done();defer func(){if err:=a.recordRunDiskTiming(diskName,time.Since(started).Seconds());err!=nil{log.Printf("保存磁盘运行统计失败 %s: %v",diskName,err)}}();for _,b:=range batches{if a.ctx.Err()!=nil{return};if err:=a.downloadTask(b);err!=nil{errs<-err;return}}}()
  }
  wg.Wait();close(errs)
  for err:=range errs{if err!=nil{return err}}
@@ -2044,7 +2044,7 @@ func(a *App)recordRunTaskTiming(taskName string,waitSeconds,durationSeconds floa
  _,err:=a.db.Exec("INSERT INTO run_task_history(run_id,task_name,wait_seconds,duration_seconds) VALUES(?,?,?,?) ON CONFLICT(run_id,task_name) DO UPDATE SET wait_seconds=run_task_history.wait_seconds+excluded.wait_seconds,duration_seconds=run_task_history.duration_seconds+excluded.duration_seconds",a.runID,taskName,waitSeconds,durationSeconds)
  return err
 }
-func(a *App)recordRunDiskTiming(diskName string,started time.Time,durationSeconds float64)error{
+func(a *App)recordRunDiskTiming(diskName string,durationSeconds float64)error{
  if a.runID==""{return nil}
  var bytes int64
  if err:=a.db.QueryRow("SELECT COALESCE(SUM(completed_bytes),0) FROM run_episode_history WHERE run_id=? AND disk_name=? AND status='completed'",a.runID,diskName).Scan(&bytes);err!=nil{return err}
