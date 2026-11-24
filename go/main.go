@@ -357,7 +357,7 @@ func processIdentity(pid int,created float64)bool{
 }
 
 
- struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time;partialSizeMu sync.Mutex;partialSizeCache map[string]statusPartialSize;completedPathMu sync.Mutex;completedPathCache map[string]statusCompletedPath;statusRelayAddr string;statusRelayToken string;relayGeneration atomic.Uint64;liveMu sync.RWMutex;liveSnapshot liveStatusSnapshot;liveUpdatedAt time.Time;eventMu sync.Mutex;eventSubscribers map[chan []byte]struct{}}
+type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time;partialSizeMu sync.Mutex;partialSizeCache map[string]statusPartialSize;completedPathMu sync.Mutex;completedPathCache map[string]statusCompletedPath;statusRelayAddr string;statusRelayToken string;relayGeneration atomic.Uint64;liveMu sync.RWMutex;liveSnapshot liveStatusSnapshot;liveUpdatedAt time.Time;eventMu sync.Mutex;eventSubscribers map[chan []byte]struct{}}
 func(a *WebAPI)acceptStatusRelay(listener net.Listener){
  for{
   conn,err:=listener.Accept()
