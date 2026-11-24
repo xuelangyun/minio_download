@@ -23,6 +23,60 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
+
+func TestDurationTargetsPersistInSQLite(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "config.sqlite3")
+	if err := initializeSQLiteDatabase(dbPath); err != nil {
+		t.Fatalf("initialize SQLite schema: %v", err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	payload := planPayload{
+		DataVersion: "test-version",
+		Scenes: []planScene{{
+			Scene: "test-scene",
+			Tasks: []planTask{{Name: "duration-task", Count: 12, Hours: 3.75}},
+		}},
+	}
+	if _, err = validatePlanPayload(json.RawMessage(mustJSON(payload))); err != nil {
+		t.Fatalf("validate plan: %v", err)
+	}
+	if err = persistPlanPayload(db, payload); err != nil {
+		db.Close()
+		t.Fatalf("persist plan: %v", err)
+	}
+	cfg := Config{ConfigDB: dbPath}
+	if err = loadConfigDB(&cfg, "duration"); err != nil {
+		t.Fatalf("load duration config: %v", err)
+	}
+	if len(cfg.Tasks) != 1 {
+		t.Fatalf("expected one task, got %d", len(cfg.Tasks))
+	}
+	if got := cfg.Tasks[0].TargetHours; got != 3.75 {
+		t.Fatalf("target hours did not survive SQLite round trip: got %v, want 3.75", got)
+	}
+	if got := cfg.Tasks[0].TargetCount; got != 12 {
+		t.Fatalf("target count changed during SQLite round trip: got %d, want 12", got)
+	}
+}
+
+func TestValidatePlanRejectsNegativeDurationTarget(t *testing.T) {
+	payload := planPayload{
+		DataVersion: "test-version",
+		Scenes: []planScene{{
+			Scene: "test-scene",
+			Tasks: []planTask{{Name: "bad-duration", Hours: -0.5}},
+		}},
+	}
+	if _, err := validatePlanPayload(json.RawMessage(mustJSON(payload))); err == nil {
+		t.Fatal("expected negative target_hours to be rejected")
+	}
+}
+
 func TestSafeComponent(t *testing.T) {
 	for _, in := range []string{"", ".", "..", "a/b", "a:b", "name. "} {
 		got := safe(in)
@@ -854,7 +908,7 @@ func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
 	}
 }
 
-func TestLoadConfigDBRejectsDurationMode(t *testing.T) {
+func TestLoadConfigDBRejectsDatabaseWithoutSchema(t *testing.T) {
 	cfg := Config{ConfigDB: filepath.Join(t.TempDir(), "config.sqlite3")}
 	if err := loadConfigDB(&cfg, "duration"); err == nil {
 		t.Fatal("duration mode must not silently replace hour targets with count targets")
@@ -928,6 +982,7 @@ func TestWebStatusReturnsConfiguredTasksAndProgress(t *testing.T) {
 		"CREATE TABLE downloads(episode_id TEXT PRIMARY KEY,task_name TEXT,status TEXT,error TEXT,parent_key TEXT,updated_at TEXT)",
 		"CREATE TABLE task_disk_assignments(task_name TEXT,disk_name TEXT)",
 		"CREATE TABLE control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT)",
+  "CREATE TABLE run_history(run_id TEXT PRIMARY KEY,started_at TEXT,finished_at TEXT,duration_seconds REAL,mode TEXT,result TEXT,completed_count INTEGER,completed_bytes INTEGER,content_seconds REAL,error TEXT)",
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
@@ -944,8 +999,12 @@ func TestWebStatusReturnsConfiguredTasksAndProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := &WebAPI{cfg: Config{Tasks: []Task{{Name: "桌面收纳", Scene: "Household", TargetCount: 40, Tags: []string{"家居"}}}}, db: db}
+ now:=time.Now().UTC()
+ if _,err=db.Exec("INSERT INTO run_history VALUES(?,?,?,?,?,?,?,?,?,?)","recent",now.Format(time.RFC3339Nano),now.Format(time.RFC3339Nano),10,"count","finished",1,1024,60,"");err!=nil{t.Fatal(err)}
+ oldTime:=now.Add(-10*24*time.Hour)
+ if _,err=db.Exec("INSERT INTO run_history VALUES(?,?,?,?,?,?,?,?,?,?)","older",oldTime.Format(time.RFC3339Nano),oldTime.Format(time.RFC3339Nano),10,"count","finished",1,1024,60,"");err!=nil{t.Fatal(err)}
 	recorder := httptest.NewRecorder()
-	api.status(recorder, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+	api.status(recorder, httptest.NewRequest(http.MethodGet, "/api/status?history_days=7", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("unexpected status code: %d", recorder.Code)
 	}
@@ -957,6 +1016,10 @@ func TestWebStatusReturnsConfiguredTasksAndProgress(t *testing.T) {
 	tasks := scenes[0].(map[string]any)["tasks"].([]any)
 	task := tasks[0].(map[string]any)
 	if response["stale_records"] != float64(1) { t.Fatalf("expected one stale record, got %#v", response["stale_records"]) }
+ history:=response["run_history"].([]any);if len(history)!=1||history[0].(map[string]any)["run_id"]!="recent"{t.Fatalf("7-day history filter returned unexpected runs: %#v",history)}
+ allRecorder:=httptest.NewRecorder();api.status(allRecorder,httptest.NewRequest(http.MethodGet,"/api/status?history_days=all",nil))
+ var allResponse map[string]any;if err=json.Unmarshal(allRecorder.Body.Bytes(),&allResponse);err!=nil{t.Fatal(err)}
+ allHistory:=allResponse["run_history"].([]any);if len(allHistory)!=2{t.Fatalf("all history filter should return both runs, got %#v",allHistory)}
 	if task["downloaded"] != float64(1) || task["hours"] != float64(1) || task["disk"] != "disk1" {
 		t.Fatalf("unexpected task progress: %#v", task)
 	}
@@ -1780,4 +1843,103 @@ func TestFirstRunUsesSingleSQLiteDatabase(t *testing.T) {
 	if len(entries) != 1 || entries[0].Name() != "minio_download.sqlite3" {
 		t.Fatalf("expected a single persistent SQLite file, found %v", entries)
 	}
+}
+
+func TestSaveLastRunPersistsPerRunStatistics(t *testing.T) {
+ dbPath:=filepath.Join(t.TempDir(),"run-history.sqlite3")
+ if err:=initializeSQLiteDatabase(dbPath);err!=nil{t.Fatal(err)}
+ db,err:=sql.Open("sqlite",dbPath);if err!=nil{t.Fatal(err)};defer db.Close();db.SetMaxOpenConns(1)
+ started:=time.Now().UTC().Add(-2*time.Minute)
+ startedAt:=started.Format(time.RFC3339Nano)
+ completedAt:=time.Now().UTC().Format(time.RFC3339Nano)
+ if _,err=db.Exec("INSERT INTO downloads(episode_id,task_name,expected_bytes,status,completed_at,updated_at) VALUES('ep-1','task',4096,'completed',?,?)",completedAt,completedAt);err!=nil{t.Fatal(err)}
+ if _,err=db.Exec("INSERT INTO downloaded_episodes(episode_id,task_name,file_size,content_time,downloaded_at) VALUES('ep-1','task',4096,120,?)",completedAt);err!=nil{t.Fatal(err)}
+ if _,err=db.Exec("INSERT INTO run_task_history(run_id,task_name,completed_count,completed_bytes,content_seconds) VALUES('test-run-1','task',1,4096,120)");err!=nil{t.Fatal(err)}
+ app:=&App{db:db,mode:"duration",runID:"test-run-1",runStartedAt:started}
+ app.saveLastRun("finished",nil)
+ var result string;var count,bytes int64;var seconds,elapsed float64
+ if err=db.QueryRow("SELECT result,completed_count,completed_bytes,content_seconds,duration_seconds FROM run_history WHERE run_id='test-run-1'").Scan(&result,&count,&bytes,&seconds,&elapsed);err!=nil{t.Fatal(err)}
+ if result!="finished"||count!=1||bytes!=4096||seconds!=120||elapsed<=0{t.Fatalf("unexpected run history: result=%s count=%d bytes=%d seconds=%v elapsed=%v",result,count,bytes,seconds,elapsed)}
+}
+
+func TestClassifyFailure(t *testing.T) {
+ cases:=[]struct{message,want string}{
+  {"Get https://minio:9000: connection reset by peer","network"},
+  {"write /data/file: no space left on device","disk_space"},
+  {"The specified key does not exist","not_found"},
+  {"open /data/file: permission denied","permission"},
+  {"checksum mismatch while verifying object","integrity"},
+  {"unexpected application error","other"},
+ }
+ for _,tc:=range cases{t.Run(tc.want,func(t *testing.T){if got:=classifyFailure(errors.New(tc.message));got!=tc.want{t.Fatalf("classifyFailure(%q)=%q want %q",tc.message,got,tc.want)}})}
+}
+
+func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
+ dbPath:=filepath.Join(t.TempDir(),"task-run.sqlite3")
+ if err:=initializeSQLiteDatabase(dbPath);err!=nil{t.Fatal(err)}
+ db,err:=sql.Open("sqlite",dbPath);if err!=nil{t.Fatal(err)};defer db.Close();db.SetMaxOpenConns(1)
+ app:=&App{db:db,runID:"run-1"}
+ episode:=Episode{ID:"episode-1",Task:"scene-task",Size:8192,Duration:90,ParentKey:"parent"}
+ if err:=app.recordAndSetForRun(episode,DiskConfig{Name:"disk-a"},"/tmp/task/episode-1");err!=nil{t.Fatal(err)}
+ var count,bytes int64;var seconds float64
+ if err=db.QueryRow("SELECT completed_count,completed_bytes,content_seconds FROM run_task_history WHERE run_id='run-1' AND task_name='scene-task'").Scan(&count,&bytes,&seconds);err!=nil{t.Fatal(err)}
+ if count!=1||bytes!=8192||seconds!=90{t.Fatalf("unexpected task stats: count=%d bytes=%d seconds=%v",count,bytes,seconds)}
+ if err=app.fail(Episode{ID:"episode-2",Task:"scene-task",Size:1024},DiskConfig{Name:"disk-a"},"","",errors.New("simulated failure"));err==nil{t.Fatal("expected simulated episode failure")}
+ var failed int64
+ if err=db.QueryRow("SELECT failed_count FROM run_task_history WHERE run_id='run-1' AND task_name='scene-task'").Scan(&failed);err!=nil||failed!=1{t.Fatalf("failed_count=%d err=%v",failed,err)}
+ var status string
+ if err=db.QueryRow("SELECT status FROM downloads WHERE episode_id='episode-1'").Scan(&status);err!=nil||status!="completed"{t.Fatalf("download status=%q err=%v",status,err)}
+ var successDetail,errorDetail string
+ if err=db.QueryRow("SELECT status FROM run_episode_history WHERE run_id='run-1' AND episode_id='episode-1'").Scan(&successDetail);err!=nil||successDetail!="completed"{t.Fatalf("success episode detail=%q err=%v",successDetail,err)}
+ if err=db.QueryRow("SELECT status||':'||error FROM run_episode_history WHERE run_id='run-1' AND episode_id='episode-2'").Scan(&errorDetail);err!=nil||errorDetail!="failed:simulated failure"{t.Fatalf("failure episode detail=%q err=%v",errorDetail,err)}
+ var category string
+ if err=db.QueryRow("SELECT failure_category FROM run_episode_history WHERE run_id='run-1' AND episode_id='episode-2'").Scan(&category);err!=nil||category!="other"{t.Fatalf("failure category=%q err=%v",category,err)}
+ if err=app.fail(Episode{ID:"episode-3",Task:"scene-task"},DiskConfig{Name:"disk-a"},"","",context.Canceled);err!=nil{t.Fatalf("paused episode should not be an error: %v",err)}
+ var pausedStatus string
+ if err=db.QueryRow("SELECT status FROM run_episode_history WHERE run_id='run-1' AND episode_id='episode-3'").Scan(&pausedStatus);err!=nil||pausedStatus!="paused"{t.Fatalf("paused episode status=%q err=%v",pausedStatus,err)}
+ api:=&WebAPI{db:db}
+ req:=httptest.NewRequest("GET","/api/runs/run-1/episodes?task=scene-task&limit=10",nil);req.SetPathValue("id","run-1")
+ response:=httptest.NewRecorder();api.runEpisodes(response,req)
+ if response.Code!=http.StatusOK{t.Fatalf("run episodes API status=%d body=%s",response.Code,response.Body.String())}
+ var payload struct{Total int `json:"total"`;Episodes []struct{ID string `json:"episode_id"`;Status string `json:"status"`} `json:"episodes"`;FailureCategories map[string]int `json:"failure_categories"`}
+ if err=json.Unmarshal(response.Body.Bytes(),&payload);err!=nil{t.Fatal(err)}
+ if payload.Total!=3||len(payload.Episodes)!=3{t.Fatalf("unexpected episode page: total=%d episodes=%d",payload.Total,len(payload.Episodes))};if payload.FailureCategories["other"]!=1{t.Fatalf("unexpected failure category counts: %#v",payload.FailureCategories)}
+ pageReq:=httptest.NewRequest("GET","/api/runs/run-1/episodes?task=scene-task&limit=1&offset=1",nil);pageReq.SetPathValue("id","run-1")
+ pageResponse:=httptest.NewRecorder();api.runEpisodes(pageResponse,pageReq)
+ var pagePayload struct{Total int `json:"total"`;Offset int `json:"offset"`;Episodes []map[string]any `json:"episodes"`}
+ if pageResponse.Code!=http.StatusOK{t.Fatalf("paginated API status=%d body=%s",pageResponse.Code,pageResponse.Body.String())}
+ if err=json.Unmarshal(pageResponse.Body.Bytes(),&pagePayload);err!=nil{t.Fatal(err)}
+ if pagePayload.Total!=3||pagePayload.Offset!=1||len(pagePayload.Episodes)!=1{t.Fatalf("unexpected paginated response: total=%d offset=%d items=%d",pagePayload.Total,pagePayload.Offset,len(pagePayload.Episodes))}
+ categoryReq:=httptest.NewRequest("GET","/api/runs/run-1/episodes?task=scene-task&status=failed&category=other",nil);categoryReq.SetPathValue("id","run-1")
+ categoryResponse:=httptest.NewRecorder();api.runEpisodes(categoryResponse,categoryReq)
+ var categoryPayload struct{Total int `json:"total"`;Episodes []struct{Status string `json:"status"`;Category string `json:"failure_category"`} `json:"episodes"`}
+ if categoryResponse.Code!=http.StatusOK{t.Fatalf("category filter status=%d body=%s",categoryResponse.Code,categoryResponse.Body.String())}
+ if err=json.Unmarshal(categoryResponse.Body.Bytes(),&categoryPayload);err!=nil{t.Fatal(err)}
+ if categoryPayload.Total!=1||len(categoryPayload.Episodes)!=1||categoryPayload.Episodes[0].Status!="failed"||categoryPayload.Episodes[0].Category!="other"{t.Fatalf("unexpected category filter response: %#v",categoryPayload)}
+ invalidReq:=httptest.NewRequest("GET","/api/runs/run-1/episodes?category=unknown",nil);invalidReq.SetPathValue("id","run-1")
+ invalidResponse:=httptest.NewRecorder();api.runEpisodes(invalidResponse,invalidReq)
+ if invalidResponse.Code!=http.StatusBadRequest{t.Fatalf("invalid category should return 400, got %d",invalidResponse.Code)}
+ exportReq:=httptest.NewRequest("GET","/api/runs/run-1/export.csv?task=scene-task&status=failed&category=other",nil);exportReq.SetPathValue("id","run-1")
+ exportResponse:=httptest.NewRecorder();api.exportRunCSV(exportResponse,exportReq)
+ if exportResponse.Code!=http.StatusOK{t.Fatalf("CSV export status=%d body=%s",exportResponse.Code,exportResponse.Body.String())}
+ if !strings.Contains(exportResponse.Header().Get("Content-Type"),"text/csv")||!strings.Contains(exportResponse.Header().Get("Content-Disposition"),"run-run-1-episodes.csv"){t.Fatalf("unexpected CSV headers: %#v",exportResponse.Header())}
+ csvBody:=exportResponse.Body.String();if !strings.Contains(csvBody,"episode-2")||strings.Contains(csvBody,"episode-1")||!strings.Contains(csvBody,"simulated failure")||!strings.Contains(csvBody,"task_summary")||!strings.Contains(csvBody,"50.0%")||!strings.Contains(csvBody,"等待秒数")||!strings.Contains(csvBody,"平均字节每秒"){t.Fatalf("CSV export did not include filtered Episode rows and task summary: %q",csvBody)}
+ if csvSafeCell("=HYPERLINK(1)")!="'=HYPERLINK(1)"||csvSafeCell("normal")!="normal"{t.Fatal("CSV formula injection protection failed")}
+}
+
+func TestRunTimingMetricsPersist(t *testing.T) {
+ dbPath:=filepath.Join(t.TempDir(),"timing.sqlite3")
+ if err:=initializeSQLiteDatabase(dbPath);err!=nil{t.Fatal(err)}
+ db,err:=sql.Open("sqlite",dbPath);if err!=nil{t.Fatal(err)};defer db.Close();db.SetMaxOpenConns(1)
+ app:=&App{db:db,runID:"timing-run"}
+ if err=app.recordRunTaskTiming("task-a",5,10);err!=nil{t.Fatal(err)}
+ if err=app.recordRunTaskTiming("task-a",3,20);err!=nil{t.Fatal(err)}
+ var wait,duration float64
+ if err=db.QueryRow("SELECT wait_seconds,duration_seconds FROM run_task_history WHERE run_id=? AND task_name=?","timing-run","task-a").Scan(&wait,&duration);err!=nil{t.Fatal(err)}
+ if wait!=8||duration!=30{t.Fatalf("unexpected task timing: wait=%v duration=%v",wait,duration)}
+ if _,err=db.Exec("INSERT INTO run_episode_history(run_id,episode_id,task_name,status,disk_name,completed_bytes,content_seconds,updated_at) VALUES('timing-run','ep-1','task-a','completed','disk-a',10485760,60,?)",time.Now().UTC().Format(time.RFC3339Nano));err!=nil{t.Fatal(err)}
+ if err=app.recordRunDiskTiming("disk-a",20);err!=nil{t.Fatal(err)}
+ var diskDuration float64;var bytes int64
+ if err=db.QueryRow("SELECT duration_seconds,completed_bytes FROM run_disk_history WHERE run_id=? AND disk_name=?","timing-run","disk-a").Scan(&diskDuration,&bytes);err!=nil{t.Fatal(err)}
+ if diskDuration!=20||bytes!=10485760{t.Fatalf("unexpected disk timing: duration=%v bytes=%d",diskDuration,bytes)}
 }

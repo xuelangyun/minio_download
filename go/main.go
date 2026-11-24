@@ -10,6 +10,7 @@ import (
  "crypto/md5"
  "database/sql"
  "encoding/json"
+ "encoding/csv"
  "os/exec"
  "errors"
  "flag"
@@ -55,7 +56,7 @@ type Config struct {
  Disks []DiskConfig `json:"disks"`; Tasks []Task `json:"tasks"`
 }
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
-type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool; spaceMu sync.Mutex; spaceInFlight map[string]uint64; processCreated float64 }
+type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool; spaceMu sync.Mutex; spaceInFlight map[string]uint64; processCreated float64; runID string; runStartedAt time.Time }
 //go:embed config.count.example.json
 var defaultCountConfigJSON []byte
 
@@ -135,6 +136,10 @@ func main(){
   if !*cleanup{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
   n,e:=a.cleanup(true);if e!=nil{log.Fatal(e)};log.Printf("清理预览结束：%d 条",n);return
  }
+ a.runStartedAt=time.Now().UTC();a.runID=strconv.FormatInt(a.runStartedAt.UnixNano(),10)
+ runStartText:=a.runStartedAt.Format(time.RFC3339Nano)
+ if _,err=a.db.Exec("UPDATE run_history SET result='interrupted',finished_at=?,duration_seconds=MAX(0,(julianday(?) - julianday(started_at))*86400),error='下载进程未正常结束' WHERE result='running'",runStartText,runStartText);err!=nil{log.Fatalf("恢复异常中断的运行历史失败: %v",err)}
+ if _,err=a.db.Exec("INSERT INTO run_history(run_id,started_at,finished_at,duration_seconds,mode,result) VALUES(?,?,?,?,?,?)",a.runID,a.runStartedAt.Format(time.RFC3339Nano),a.runStartedAt.Format(time.RFC3339Nano),0,a.mode,"running");err!=nil{log.Fatalf("创建运行历史失败: %v",err)}
  if err=a.recoverPendingCleanup();err!=nil{log.Fatalf("恢复上次未完成的缺失 mcap 清理失败: %v",err)}
  if *cleanup{n,e:=a.cleanup(false);if e!=nil{log.Fatal(e)};log.Printf("清理结束：%d 条",n)}
  rows,err:=a.fetch();if err!=nil{if ctx.Err()!=nil{log.Print("已安全暂停（候选查询期间收到暂停请求）");a.saveLastRun("paused",nil);return};log.Printf("候选查询失败: %v",err);a.saveLastRun("error",err);return}
@@ -160,7 +165,7 @@ func initializeSQLiteDatabase(name string)error{
  if _,err=db.Exec("PRAGMA busy_timeout=30000; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;"+
   "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);"+
   "CREATE TABLE IF NOT EXISTS scenes(id INTEGER PRIMARY KEY AUTOINCREMENT,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE);"+
-  "CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL,target_count INTEGER NOT NULL DEFAULT 0,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]');"+
+  "CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL,target_count INTEGER NOT NULL DEFAULT 0,target_hours REAL NOT NULL DEFAULT 0,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]');"+
   "CREATE TABLE IF NOT EXISTS task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL,PRIMARY KEY(task_id,position));"+
   "CREATE TABLE IF NOT EXISTS disks(name TEXT PRIMARY KEY,position INTEGER NOT NULL,path TEXT NOT NULL,mountpoint TEXT NOT NULL);"+
   "CREATE TABLE IF NOT EXISTS plans(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL UNIQUE,note TEXT NOT NULL DEFAULT '',payload TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);"+
@@ -169,6 +174,11 @@ func initializeSQLiteDatabase(name string)error{
   "CREATE TABLE IF NOT EXISTS task_disk_assignments(task_name TEXT NOT NULL,disk_name TEXT NOT NULL,last_used_at TEXT NOT NULL,PRIMARY KEY(task_name,disk_name));"+
   "CREATE TABLE IF NOT EXISTS downloaded_episodes(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,source_task_name TEXT,job_id INTEGER,sn_code TEXT,parent_key TEXT,disk_name TEXT,target_path TEXT,file_size INTEGER,content_time REAL,create_time TEXT,downloaded_at TEXT NOT NULL);"+
   "CREATE TABLE IF NOT EXISTS runtime_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,message TEXT NOT NULL);"+
+  "CREATE TABLE IF NOT EXISTS run_history(run_id TEXT PRIMARY KEY,started_at TEXT NOT NULL,finished_at TEXT NOT NULL,duration_seconds REAL NOT NULL,mode TEXT NOT NULL,result TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,error TEXT);"+
+  "CREATE TABLE IF NOT EXISTS run_task_history(run_id TEXT NOT NULL,task_name TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,failed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,wait_seconds REAL NOT NULL DEFAULT 0,duration_seconds REAL NOT NULL DEFAULT 0,PRIMARY KEY(run_id,task_name));CREATE TABLE IF NOT EXISTS run_disk_history(run_id TEXT NOT NULL,disk_name TEXT NOT NULL,duration_seconds REAL NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(run_id,disk_name));"+
+  "CREATE TABLE IF NOT EXISTS run_episode_history(run_id TEXT NOT NULL,episode_id TEXT NOT NULL,task_name TEXT NOT NULL,status TEXT NOT NULL,error TEXT,disk_name TEXT,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,failure_category TEXT NOT NULL DEFAULT '',PRIMARY KEY(run_id,episode_id));"+
+  "CREATE INDEX IF NOT EXISTS idx_run_episode_lookup ON run_episode_history(run_id,task_name,status,updated_at);"+
+  "CREATE INDEX IF NOT EXISTS idx_run_history_started ON run_history(started_at);"+
   "CREATE TABLE IF NOT EXISTS process_state(id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,created REAL NOT NULL,mode TEXT NOT NULL,updated_at TEXT NOT NULL);"+
   "CREATE INDEX IF NOT EXISTS idx_download_task_status ON downloads(task_name,status);"+
   "CREATE INDEX IF NOT EXISTS idx_downloaded_task ON downloaded_episodes(task_name);"+
@@ -200,7 +210,176 @@ func processIdentity(pid int,created float64)bool{
 const webUIHTML = `<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MinIO 下载器</title>
 <style>
-:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#172033;background:#f4f6fa;font-size:14px}*{box-sizing:border-box}body{margin:0}.top{background:#182235;color:#fff;padding:18px 24px;display:flex;justify-content:space-between;align-items:center}.top h1{font-size:19px;margin:0}.top small{color:#bdc7d8}.wrap{max-width:1180px;margin:22px auto;padding:0 18px}.nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}.nav button,.btn{border:1px solid #cbd3df;border-radius:7px;padding:9px 13px;background:#fff;color:#253047;cursor:pointer}.nav button.active,.btn.primary{background:#263b5c;color:#fff;border-color:#263b5c}.btn.danger{color:#b42318}.panel{display:none}.panel.active{display:block}.card{background:#fff;border:1px solid #e0e5ed;border-radius:10px;padding:18px;margin-bottom:16px}.card h2{font-size:16px;margin:0 0 14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.field label{display:block;font-weight:600;margin-bottom:5px}.field input,.field select,.field textarea,textarea{width:100%;border:1px solid #cbd3df;border-radius:6px;padding:9px;font:inherit}.field small,.hint{color:#64748b;font-size:12px}.field input[type=checkbox]{width:auto}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.notice{padding:11px 13px;background:#f1f5f9;border-radius:7px;margin:10px 0;color:#34445d}.ok{color:#16703c}.bad{color:#b42318}.status{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.metric{background:#f6f8fb;border-radius:8px;padding:14px}.metric b{display:block;font-size:22px;margin-top:5px}.editor{min-height:260px;font:12px ui-monospace,monospace;white-space:pre;tab-size:2}.logs{height:440px;overflow:auto;background:#101827;color:#d4e0f0;padding:12px;border-radius:8px;white-space:pre-wrap;font:12px ui-monospace,monospace}.tag{display:inline-block;padding:3px 8px;border-radius:20px;background:#e9eef6;color:#35445d;margin-left:8px}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px;border-bottom:1px solid #e4e9f0}code{background:#f1f5f9;padding:2px 4px;border-radius:4px}@media(max-width:600px){.top{padding:15px}.wrap{padding:0 10px}.card{padding:13px}}
+:root{
+ color-scheme:light;
+ --bg:#f3f6fb;--surface:#fff;--surface-soft:#f8faff;--ink:#182338;--muted:#68758a;
+ --line:#e2e8f0;--line-strong:#cbd5e1;--primary:#2457d6;--primary-hover:#1947b8;
+ --success:#168451;--danger:#c03932;--warning:#a16207;--radius:14px;
+ font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+ color:var(--ink);background:var(--bg);font-size:14px;font-synthesis:none;
+}
+*{box-sizing:border-box}
+body{margin:0;min-width:320px;background:linear-gradient(180deg,#edf3ff 0,#f5f7fb 240px,var(--bg) 100%);line-height:1.55}
+button,input,select,textarea{font:inherit}
+button{transition:background .16s,border-color .16s,box-shadow .16s,transform .16s}
+.top{
+ position:sticky;top:0;z-index:20;min-height:76px;padding:14px max(22px,calc((100vw - 1240px)/2));
+ display:flex;justify-content:space-between;align-items:center;gap:20px;
+ color:#fff;background:rgba(20,34,59,.96);border-bottom:1px solid rgba(255,255,255,.1);
+ box-shadow:0 5px 22px rgba(20,34,59,.13);backdrop-filter:blur(12px)
+}
+.top h1{font-size:20px;letter-spacing:.2px;margin:0;font-weight:700}
+.top small{display:block;margin-top:3px;color:#b9c7dc;font-size:12px}
+#connection-state{padding:6px 11px;border:1px solid rgba(255,255,255,.2);border-radius:999px;color:#dce8f8;font-size:12px;white-space:nowrap}
+.wrap{width:min(1240px,100%);margin:26px auto 56px;padding:0 22px}
+.nav{
+ position:sticky;top:76px;z-index:15;display:flex;gap:6px;overflow-x:auto;
+ padding:8px;margin:0 0 20px;background:rgba(255,255,255,.9);
+ border:1px solid var(--line);border-radius:13px;box-shadow:0 5px 18px rgba(26,43,75,.05);
+ backdrop-filter:blur(10px);scrollbar-width:thin
+}
+.nav button{
+ flex:0 0 auto;border:0;border-radius:9px;padding:10px 16px;background:transparent;
+ color:#526078;font-weight:600;cursor:pointer
+}
+.nav button:hover{background:#eef3ff;color:var(--primary)}
+.nav button.active{background:#e9efff;color:var(--primary);box-shadow:inset 0 0 0 1px #d8e3ff}
+.panel{display:none;animation:panel-in .18s ease-out}
+.panel.active{display:block}
+@keyframes panel-in{from{opacity:.65;transform:translateY(4px)}to{opacity:1;transform:none}}
+.card{
+ min-width:0;padding:22px;margin-bottom:18px;background:var(--surface);
+ border:1px solid var(--line);border-radius:var(--radius);
+ box-shadow:0 5px 18px rgba(26,43,75,.045)
+}
+.card h2{display:flex;align-items:center;gap:9px;margin:0 0 16px;font-size:16px;font-weight:700;letter-spacing:.1px}
+.card h2:before{content:"";width:4px;height:17px;border-radius:4px;background:var(--primary)}
+.card h3{margin:0 0 12px;font-size:14px}
+.card p{margin:0 0 14px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.field{min-width:0;margin:0 0 14px}
+.field label{display:block;margin:0 0 7px;color:#35435a;font-size:13px;font-weight:650}
+.field input,.field select,.field textarea,textarea{
+ width:100%;min-width:0;min-height:40px;padding:9px 11px;color:var(--ink);
+ background:#fff;border:1px solid var(--line-strong);border-radius:9px;outline:none;
+ transition:border-color .15s,box-shadow .15s
+}
+.field input:focus,.field select:focus,.field textarea:focus,textarea:focus{
+ border-color:#7196f2;box-shadow:0 0 0 3px rgba(36,87,214,.11)
+}
+.field input[type=checkbox]{width:auto;min-height:0;accent-color:var(--primary)}
+.field small,.hint{display:block;margin-top:6px;color:var(--muted);font-size:12px;line-height:1.6}
+.actions{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:16px}
+.btn{
+ display:inline-flex;align-items:center;justify-content:center;min-height:38px;
+ padding:8px 14px;border:1px solid var(--line-strong);border-radius:9px;
+ background:#fff;color:#344258;font-weight:600;cursor:pointer
+}
+.btn:hover{border-color:#9aabc3;background:#f7f9fc}
+.btn:active{transform:translateY(1px)}
+.btn.primary{background:var(--primary);border-color:var(--primary);color:#fff;box-shadow:0 3px 8px rgba(36,87,214,.16)}
+.btn.primary:hover{background:var(--primary-hover);border-color:var(--primary-hover)}
+.btn.danger{color:var(--danger);border-color:#f0c9c6;background:#fff}
+.btn.danger:hover{background:#fff4f3;border-color:#e5a6a1}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.notice{padding:12px 14px;margin:12px 0;border:1px solid #e1e8f5;border-radius:10px;background:#f5f8ff;color:#465873}
+.ok{color:var(--success)}.bad{color:var(--danger)}
+.status{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}
+.metric{min-width:0;padding:15px 16px;background:linear-gradient(145deg,#f8faff,#f2f6fd);border:1px solid #e5ebf5;border-radius:11px;color:#65738a}
+.metric b{display:block;margin-top:5px;color:#1c2c47;font-size:24px;font-weight:750;line-height:1.25;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.transfer-panel{padding:15px 16px;margin:2px 0 16px;border:1px solid #e4eaf4;border-radius:12px;background:#fbfcff}
+.transfer-head,.transfer-foot,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.transfer-head strong{font-size:13px;color:#33445f}.transfer-head span,.transfer-foot{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.progress-track{height:10px;margin:12px 0 9px;border-radius:99px;background:#e8edf5;overflow:hidden}
+.progress-fill{height:100%;border-radius:99px;background:linear-gradient(90deg,#3974e8,#64a4ff);transition:width .25s ease}
+.transfer-foot{flex-wrap:wrap}
+.section-heading h2{margin:0}.section-heading .hint{margin:5px 0 0}
+.summary-chip{flex:0 0 auto;padding:5px 9px;border-radius:99px;background:#f0f4fb;color:#52627a;font-size:11px;font-weight:650}
+.disk-monitor-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.disk-monitor{min-width:0;padding:15px;border:1px solid var(--line);border-radius:11px;background:#fbfcff}
+.disk-monitor-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.disk-monitor-name{font-weight:700;color:#293a54;overflow-wrap:anywhere}
+.disk-monitor-state{font-size:11px;font-weight:650;white-space:nowrap}
+.disk-monitor-state.good{color:var(--success)}.disk-monitor-state.bad{color:var(--danger)}
+.disk-monitor-path{margin-top:5px;color:var(--muted);font-size:11px;overflow-wrap:anywhere}
+.disk-monitor-track{height:8px;margin:12px 0 8px;border-radius:99px;background:#e9edf4;overflow:hidden}
+.disk-monitor-fill{height:100%;border-radius:99px;background:#6b8ed8}
+.disk-monitor-fill.warn{background:#d99a3d}.disk-monitor-fill.critical{background:#cf625b}
+.disk-monitor-stats{display:flex;justify-content:space-between;gap:8px;color:#65738a;font-size:11px;font-variant-numeric:tabular-nums}
+.active-list{display:grid;gap:10px}
+.active-item{display:block}
+.active-item-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.active-item-progress{height:6px;margin:9px 0 7px;border-radius:99px;background:#e9edf4;overflow:hidden}
+.active-item-progress>span{display:block;height:100%;border-radius:99px;background:#5b8ce6}
+.active-item-bottom{display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.run-state-chip{border-color:#c8d6f4;background:#edf3ff;color:#315aab}
+.run-state-chip.pending{border-color:#f0d7a9;background:#fff8e9;color:#95651b}
+.history-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:12px}.history-card{border:1px solid var(--line);border-radius:10px;padding:12px}.history-card b{display:block;margin-bottom:5px}.history-card small{color:var(--muted)}.history-table{width:100%;border-collapse:collapse;margin-top:12px;font-size:12px}.history-table th,.history-table td{padding:8px;border-bottom:1px solid var(--line);text-align:left}.failure-list{display:grid;gap:6px;margin-top:12px}.failure-item{padding:9px 11px;border-radius:8px;background:#fff5f3;color:#8f3d35;font-size:12px;overflow-wrap:anywhere}
+
+.active-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid var(--line);border-radius:9px;background:#fbfcff}
+.active-item-main{min-width:0}.active-item-title{font-size:12px;font-weight:650;color:#34445d;overflow-wrap:anywhere}
+.active-item-meta{margin-top:4px;color:var(--muted);font-size:11px}
+.active-item-size{flex:0 0 auto;color:#52627a;font-size:12px;font-variant-numeric:tabular-nums}
+@media(max-width:720px){.disk-monitor-grid{grid-template-columns:1fr}.section-heading{align-items:flex-start}}
+.disk-row{padding:17px;margin:12px 0;background:#fbfcff;border:1px solid var(--line);border-radius:12px}
+.disk-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.disk-actions{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px}
+.editor{min-height:300px;font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre;tab-size:2;background:#fbfcff!important}
+.logs{height:440px;overflow:auto;padding:16px;border:1px solid #26364f;border-radius:11px;background:#111c2d;color:#d5e1f2;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace}
+.tag{display:inline-flex;vertical-align:middle;align-items:center;padding:3px 9px;margin-left:7px;border:1px solid rgba(255,255,255,.18);border-radius:999px;background:rgba(255,255,255,.1);color:#d9e6ff;font-size:11px;font-weight:600}
+table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px}
+th{position:sticky;top:0;background:#f5f7fb;color:#536178;font-weight:700}
+td,th{text-align:left;padding:11px 12px;border-bottom:1px solid #e8edf4}
+tr:last-child td{border-bottom:0}
+tbody tr:hover{background:#f8faff}
+code{padding:2px 5px;border-radius:5px;background:#eef2f8;color:#33445f;font-size:.92em}
+input[type=file]{max-width:260px;color:var(--muted);font-size:12px}
+#task-status,#disk-status,#plan-list{overflow-x:auto}
+#download-mode{font-weight:600}
+@media(max-width:900px){
+ .status{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .disk-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:600px){
+ .top{position:relative;min-height:68px;padding:13px 15px;align-items:flex-start}
+ .top h1{font-size:18px}.top small{max-width:230px}
+ #connection-state{font-size:11px;padding:5px 8px}
+ .wrap{margin:15px auto 32px;padding:0 12px}
+ .nav{position:sticky;top:0;margin-bottom:14px;padding:6px;gap:3px}
+ .nav button{padding:9px 12px;font-size:12px}
+ .card{padding:16px;margin-bottom:13px;border-radius:12px}
+ .grid,.disk-grid{grid-template-columns:minmax(0,1fr);gap:8px}
+ .status{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+ .metric{padding:12px}.metric b{font-size:20px}
+ .actions{gap:7px}.btn{padding:8px 11px;font-size:12px}
+ td,th{padding:9px 8px;white-space:nowrap}
+ .editor{min-height:240px}
+}
+.task-toolbar{display:flex;justify-content:space-between;align-items:center;gap:14px;margin:18px 0 12px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.task-toolbar strong{font-size:15px}.task-editor{display:grid;gap:14px}
+.task-scene{min-width:0;border:1px solid var(--line);border-radius:12px;background:#fff;overflow:hidden}
+.task-scene-head{display:flex;align-items:center;gap:10px;padding:12px 14px;background:#f6f8fc;border-bottom:1px solid var(--line)}
+.task-scene-head label{flex:0 0 auto;color:#536178;font-size:12px;font-weight:700}
+.task-scene-head input{flex:1;min-width:0;max-width:420px;padding:8px 10px;border:1px solid var(--line-strong);border-radius:8px;background:#fff}
+.task-scene-head .scene-count{margin-left:auto;color:var(--muted);font-size:12px;white-space:nowrap}
+.task-table-wrap{overflow-x:auto}
+.task-table{min-width:900px}
+.task-table input{width:100%;min-width:80px;padding:7px 8px;border:1px solid #dbe2ec;border-radius:7px;background:#fff;font-size:12px}
+.task-table input:focus{outline:2px solid rgba(36,87,214,.15);border-color:#7196f2}
+.task-table th{font-size:11px;white-space:nowrap}
+.task-table td{padding:7px 8px;vertical-align:middle}
+.task-table .task-name{min-width:150px}.task-table .task-dir{min-width:120px}
+.task-table .task-actions{white-space:nowrap;text-align:right}
+.task-mini{padding:5px 8px;border:1px solid var(--line);border-radius:7px;background:#fff;color:#526078;cursor:pointer}
+.task-mini:hover{background:#edf2ff;border-color:#b8c9f4;color:var(--primary)}
+.task-mini.remove:hover{background:#fff2f1;border-color:#f0c5c1;color:var(--danger)}
+.task-scene-foot{display:flex;justify-content:space-between;align-items:center;padding:10px 13px;background:#fbfcfe;border-top:1px solid #edf0f5}
+.task-scene-foot .hint{margin:0}
+.json-tools{margin-top:18px;padding:12px 14px;border:1px dashed var(--line-strong);border-radius:10px;background:#fbfcff}
+.json-tools summary{cursor:pointer;color:#526078;font-weight:650;font-size:13px}
+.task-save-actions{padding-top:14px;border-top:1px solid var(--line)}
+@media(max-width:600px){.task-toolbar{align-items:flex-start}.task-scene-head{flex-wrap:wrap}.task-scene-head input{max-width:none;flex-basis:100%}.task-scene-head .scene-count{margin-left:0}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
 </style></head><body>
 <header class="top"><div><h1>MinIO 下载器 <span class="tag">Go</span></h1><small>首次启动：网页配置 · SQLite 单文件存储</small></div><div id="connection-state">正在连接…</div></header>
 <main class="wrap">
@@ -208,14 +387,18 @@ const webUIHTML = `<!doctype html>
 <button class="active" data-tab="dashboard">运行状态</button><button data-tab="connection">连接配置</button><button data-tab="disks">磁盘配置</button><button data-tab="tasks">任务配置</button><button data-tab="advanced">运行参数</button><button data-tab="records">日志记录</button>
 </div>
 <section id="dashboard" class="panel active">
-<div class="card"><h2>下载任务</h2><div class="status" id="metrics"></div><div id="setup-issues" class="notice">正在检查配置…</div><div class="actions"><button class="btn primary" id="start-run">开始下载</button><button class="btn" id="pause-run">安全暂停</button><button class="btn danger" id="force-run">强制停止</button><button class="btn" id="refresh">刷新状态</button></div></div>
-<div class="card"><h2>磁盘状态</h2><div id="disk-status"></div></div><div class="card"><h2>任务进度</h2><div id="task-status"></div></div>
+<div class="card"><h2>下载任务</h2><div class="field" style="max-width:320px"><label for="download-mode">下载目标模式</label><select id="download-mode"><option value="count">按条数下载</option><option value="duration">按时长下载</option></select><small>按时长模式根据已完成数据的 content_time 累计，达到任务目标后停止补充。</small></div><div class="status" id="metrics"></div><div id="transfer-panel" class="transfer-panel"><div class="transfer-head"><strong>当前传输进度</strong><span id="transfer-summary">等待状态数据</span></div><div class="progress-track"><div id="transfer-bar" class="progress-fill" style="width:0%"></div></div><div class="transfer-foot"><span id="transfer-downloaded">已传输 0 GiB</span><span id="transfer-remaining">待传输 —</span></div></div><div id="setup-issues" class="notice">正在检查配置…</div><div class="actions"><button class="btn primary" id="start-run">开始下载</button><button class="btn" id="pause-run">安全暂停</button><button class="btn danger" id="force-run">强制停止</button><button class="btn" id="refresh">刷新状态</button><span id="run-control-state" class="summary-chip">等待状态</span></div></div>
+<div class="card"><div class="section-heading"><div><h2>磁盘容量</h2><p class="hint">显示各下载磁盘的已用空间、可用空间和挂载状态。</p></div><span id="disk-total-summary" class="summary-chip">尚无磁盘</span></div><div id="disk-status" class="disk-monitor-grid"></div></div><div class="card"><div class="section-heading"><div><h2>正在下载</h2><p class="hint">当前正在处理的 Episode。</p></div><span id="active-count" class="summary-chip">0 个活动任务</span></div><div id="active-downloads"></div></div><div class="card"><div class="section-heading"><div><h2>运行与历史统计</h2><p class="hint">基于 SQLite 下载状态和完成台账统计，不代表单次运行增量。</p></div><span id="last-run-state" class="summary-chip">暂无运行记录</span></div><div id="run-summary" class="status"></div><div id="disk-history"></div><div class="actions"><label for="run-history-range">运行历史时间范围</label><select id="run-history-range"><option value="7">最近 7 天</option><option value="30" selected>最近 30 天</option><option value="90">最近 90 天</option><option value="365">最近一年</option><option value="all">全部（最多 50 次）</option></select></div><div id="run-history"></div><div id="last-run-detail" class="notice">暂无历史运行结果</div><div id="recent-failures"></div></div><div class="card"><h2>任务进度</h2><div id="task-status"></div></div>
 </section>
 <section id="connection" class="panel">
 <div class="card"><h2>MinIO 和 PostgreSQL</h2><div class="hint">连接信息保存到 SQLite。Secret Key 和数据库密码不会回显；留空表示保留已保存的密码。</div><div id="connection-fields" class="grid"></div><div class="actions"><button class="btn primary" id="save-connection">保存连接配置</button><button class="btn" id="test-minio">测试 MinIO</button><button class="btn" id="test-pg">测试 PostgreSQL</button></div><div id="connection-result" class="notice">尚未测试连接</div></div>
 </section>
-<section id="disks" class="panel"><div class="card"><h2>下载磁盘</h2><p class="hint">配置下载目录及其实际挂载点。可配置多块磁盘；同一块磁盘上的任务按队列调度。</p><textarea id="disk-json" class="editor" spellcheck="false"></textarea><div class="actions"><button class="btn" id="check-disks">检查磁盘</button><button class="btn primary" id="save-disks">保存磁盘配置</button></div><div id="disk-result" class="notice">建议先检查，再保存。</div></div></section>
-<section id="tasks" class="panel"><div class="card"><h2>任务与目标条数</h2><p class="hint">首次启动自动载入内置任务清单。可以调整任务、别名、目录、标签和每个任务的目标条数。</p><div class="field"><label for="data-version">数据版本目录</label><input id="data-version" placeholder="例如：银河2.2数据"></div><p><textarea id="task-json" class="editor" spellcheck="false"></textarea></p><div class="actions"><button class="btn primary" id="save-tasks">保存任务配置</button><button class="btn" id="reset-tasks">恢复内置默认任务</button></div><div id="task-result" class="notice"></div></div></section>
+<section id="disks" class="panel"><div class="card"><h2>下载磁盘</h2><p class="hint">通过图形界面添加磁盘、选择真实挂载点并设置下载目录。保存前会检查挂载状态、目录权限和剩余空间。</p><div id="disk-list" class="disk-list"></div><div class="actions"><button class="btn" id="detect-disks">重新检测磁盘</button><button class="btn" id="add-disk">添加磁盘</button><button class="btn" id="check-disks">检查磁盘</button><button class="btn primary" id="save-disks">保存磁盘配置</button></div><div id="disk-result" class="notice">先添加磁盘并选择挂载点，再检查和保存。</div></div></section>
+<section id="tasks" class="panel"><div class="card"><h2>任务与下载目标</h2><p class="hint">任务清单保存在 SQLite。每个任务可配置目标条数和目标时长（小时）；启动时选择对应下载模式。</p><div class="card" style="background:#f8fafc"><h3>任务方案库</h3><div class="grid"><div class="field"><label for="plan-name">方案名称</label><input id="plan-name" placeholder="例如：日常采集任务"></div><div class="field"><label for="plan-note">方案备注</label><input id="plan-note" placeholder="可选"></div></div><div class="actions"><button class="btn primary" id="save-plan">保存当前任务为方案</button><button class="btn" id="refresh-plans">刷新方案</button><input id="plan-import-file" type="file" accept=".json,application/json" style="max-width:240px"><button class="btn" id="import-plan">导入方案 JSON</button></div><div id="plan-list"></div><div id="plan-result" class="notice">方案可重复载入，支持替换当前任务清单。</div></div><div class="field"><label for="data-version">数据版本目录</label><input id="data-version" placeholder="例如：银河2.2数据"><small>用于区分不同批次或版本的数据目录。</small></div>
+<div class="task-toolbar"><div><strong>任务清单</strong><div class="hint">按场景组织任务。目标条数和目标时长分别保存，运行时由下载模式决定使用哪一个。</div></div><button class="btn primary" id="add-scene">＋ 添加场景</button></div>
+<div id="task-editor" class="task-editor"></div>
+<details class="json-tools"><summary>高级设置：查看 / 编辑 JSON</summary><p class="hint">适合批量编辑或排查问题。修改 JSON 后点击“应用 JSON”同步到上方表格。</p><textarea id="task-json" class="editor" spellcheck="false"></textarea><div class="actions"><button class="btn" id="apply-task-json">应用 JSON 到表格</button></div></details>
+<div class="actions task-save-actions"><button class="btn primary" id="save-tasks">保存任务配置</button><button class="btn" id="reset-tasks">恢复内置默认任务</button><span class="hint">保存后立即写入 SQLite。</span></div><div id="task-result" class="notice"></div></div></section>
 <section id="advanced" class="panel">
 <div class="card"><h2>运行与传输参数</h2><div id="advanced-fields" class="grid"></div><div class="actions"><button class="btn primary" id="save-advanced">保存运行参数</button></div></div>
 <div class="card"><h2>Web 访问安全</h2><p class="hint">默认仅监听本机 127.0.0.1。需要局域网访问时，先在本机设置访问口令，再将监听地址改为 0.0.0.0 并重启程序。</p><div class="field"><label for="access-token">访问口令（至少 12 个字符）</label><input id="access-token" type="password" autocomplete="new-password" placeholder="仅用于设置或轮换口令"></div><div class="actions"><button class="btn primary" id="set-token">设置 / 更新口令</button></div><div id="token-result" class="notice"></div></div>
@@ -224,32 +407,151 @@ const webUIHTML = `<!doctype html>
 <section id="records" class="panel"><div class="card"><h2>运行日志（SQLite）</h2><div class="actions"><button class="btn" id="refresh-logs">刷新日志</button></div><pre id="logs" class="logs"></pre></div></section>
 </main>
 <script>
-let configData=null,statusData=null,logOffset=0,refreshTimer=null;
+let configData=null,statusData=null,logOffset=0,refreshTimer=null,diskMounts=[];
 const $=id=>document.getElementById(id);
+async function downloadRunCSV(runID){
+ try{
+  const headers={};const token=sessionStorage.getItem("minio_download_token");if(token)headers.Authorization="Bearer "+token;
+  const response=await fetch("/api/runs/"+encodeURIComponent(runID)+"/export.csv",{headers});
+  if(!response.ok){const data=await response.json().catch(()=>({}));throw new Error(data.error||("HTTP "+response.status))}
+  const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");
+  link.href=url;link.download="run-"+String(runID).replace(/[^a-zA-Z0-9_-]/g,"")+'-episodes.csv';document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(url);
+ }catch(err){alert("导出运行明细失败："+err.message)}
+}
+async function loadRunEpisodeDetails(el,offset,filters){
+ const root=el.querySelector(".run-episode-results");if(!root)return;
+ offset=Number(offset||0);filters=filters||{status:"",category:""};
+ root.dataset.loading="1";
+ if(offset===0)root.innerHTML='<div class="run-episode-filters"><label>状态 <select class="run-filter-status"><option value="">全部</option><option value="completed">成功</option><option value="failed">失败</option><option value="paused">暂停</option></select></label><label>失败分类 <select class="run-filter-category"><option value="">全部</option><option value="network">网络</option><option value="disk_space">磁盘空间</option><option value="not_found">对象不存在</option><option value="permission">权限</option><option value="integrity">完整性</option><option value="other">其他</option></select></label><button type="button" class="btn secondary run-filter-apply">筛选</button></div><div class="muted run-episode-count"></div><div class="muted run-failure-summary"></div><table class="history-table"><thead><tr><th>Episode ID</th><th>状态</th><th>失败分类</th><th>磁盘</th><th>容量</th><th>内容时长</th><th>错误</th></tr></thead><tbody></tbody></table><button type="button" class="btn secondary run-episode-more">加载更多</button>';
+ if(offset===0){root.querySelector(".run-filter-status").value=filters.status;root.querySelector(".run-filter-category").value=filters.category;root.querySelector(".run-filter-apply").onclick=()=>loadRunEpisodeDetails(el,0,{status:root.querySelector(".run-filter-status").value,category:root.querySelector(".run-filter-category").value})}
+ try{
+  const q=new URLSearchParams({task:el.dataset.task,limit:"100",offset:String(offset)});
+  if(filters.status)q.set("status",filters.status);if(filters.category)q.set("category",filters.category);
+  const data=await api("/api/runs/"+encodeURIComponent(el.dataset.runId)+"/episodes?"+q.toString());
+  const items=data.episodes||[],total=Number(data.total||0);
+  const count=root.querySelector(".run-episode-count"),summary=root.querySelector(".run-failure-summary"),body=root.querySelector("tbody"),more=root.querySelector(".run-episode-more");
+  const categoryNames={network:"网络",disk_space:"磁盘空间",not_found:"对象不存在",permission:"权限",integrity:"完整性",other:"其他"};
+  const categoryItems=Object.entries(data.failure_categories||{}).filter(([,n])=>Number(n)>0).map(([k,n])=>(categoryNames[k]||k)+" "+n+" 次");
+  summary.textContent=categoryItems.length?"失败原因："+categoryItems.join(" / "):"暂无失败记录";
+  body.insertAdjacentHTML("beforeend",items.map(v=>'<tr><td>'+esc(v.episode_id)+'</td><td>'+esc(({completed:"成功",failed:"失败",paused:"已暂停"}[v.status]||v.status))+'</td><td>'+esc(({network:"网络",disk_space:"磁盘空间",not_found:"对象不存在",permission:"权限",integrity:"完整性",other:"其他",paused:"暂停"}[v.failure_category]||"-"))+'</td><td>'+esc(v.disk_name||"-")+'</td><td>'+formatGiB(v.completed_bytes||0)+'</td><td>'+(Number(v.content_seconds||0)/60).toFixed(1)+' 分钟</td><td>'+esc(v.error||"-")+'</td></tr>').join(""));
+  const loaded=offset+items.length;count.textContent='共 '+total+' 条，已加载 '+loaded+' 条';more.hidden=loaded>=total;more.textContent='加载更多';more.onclick=()=>loadRunEpisodeDetails(el,loaded,filters);
+  if(!total){root.querySelector("table").hidden=true;more.hidden=true;count.textContent="共 0 条 Episode"}
+  el.dataset.loaded="1";el.dataset.filters=JSON.stringify(filters);
+ }catch(err){root.querySelector(".run-episode-count").textContent="读取失败："+err.message}
+ finally{delete root.dataset.loading}
+}
 async function api(path,method,body){const headers={"Content-Type":"application/json"};const token=sessionStorage.getItem("minio_download_token");if(token)headers.Authorization="Bearer "+token;const response=await fetch(path,{method:method||"GET",headers,body:body===undefined?undefined:JSON.stringify(body)});const data=await response.json().catch(()=>({error:"服务器返回内容不是 JSON"}));if(!response.ok)throw new Error(data.error||("HTTP "+response.status));return data}
 function message(id,text,ok){$(id).textContent=text;$(id).className="notice "+(ok===true?"ok":ok===false?"bad":"")}
 function esc(v){return String(v===undefined||v===null?"":v).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]))}
 function fieldsFor(groups){const schema=configData.schema.filter(x=>groups.includes(x.group));return schema.map(item=>{const value=configData.values[item.key];let control="";if(item.kind==="bool"){control='<input type="checkbox" data-key="'+esc(item.key)+'" '+(value?"checked":"")+'>'}else{const type=item.secret?"password":item.kind==="str"?"text":"number";const extra=item.kind==="int"?' step="1"':item.kind==="float"?' step="any"':"";control='<input data-key="'+esc(item.key)+'" type="'+type+'" value="'+(item.secret?"":esc(value))+'"'+extra+(item.min!==null&&item.min!==undefined?' min="'+item.min+'"':"")+(item.max!==null&&item.max!==undefined?' max="'+item.max+'"':"")+' placeholder="'+esc(item.placeholder|| (item.secret?"留空表示不修改":""))+'">'}return '<div class="field"><label>'+esc(item.label)+(item.secret&&configData.secrets_set.includes(item.key)?'（已保存）':"")+'</label>'+control+'<small>'+esc(item.help||"")+'</small></div>'}).join("")}
 function readFields(root){const values={};root.querySelectorAll("[data-key]").forEach(el=>{const key=el.dataset.key;const schema=configData.schema.find(x=>x.key===key);if(schema.secret&&!el.value)return;if(schema.kind==="bool")values[key]=el.checked;else if(schema.kind==="int")values[key]=Number.parseInt(el.value,10)||0;else if(schema.kind==="float")values[key]=Number(el.value)||0;else values[key]=el.value});return values}
-async function loadConfig(){configData=await api("/api/config");$("connection-fields").innerHTML=fieldsFor(["minio","pg"]);$("advanced-fields").innerHTML=fieldsFor(["run","transfer","web"]);$("disk-json").value=JSON.stringify({disks:configData.disks||[]},null,2);$("data-version").value=configData.tasks.data_version||"";$("task-json").value=JSON.stringify({data_version:configData.tasks.data_version,scenes:configData.tasks.scenes},null,2);$("db-path").textContent="SQLite 文件："+configData.paths.sqlite_db;$("connection-state").textContent="控制台已连接";$("connection-state").className="ok"}
-function renderStatus(d){statusData=d;const t=d.transfer_progress||{};const metrics=[["运行状态",d.downloader&&d.downloader.running?"下载中":"空闲"],["下载速度",((t.speed_bytes_per_second||0)/1048576).toFixed(2)+" MiB/s"],["已下载",((t.downloaded_bytes||0)/1073741824).toFixed(2)+" GiB"],["进度",(t.progress_percent||0).toFixed(1)+"%"],["预计剩余",t.eta_seconds===null||t.eta_seconds===undefined?"—":Math.round(t.eta_seconds/60)+" 分钟"]];$("metrics").innerHTML=metrics.map(x=>'<div class="metric">'+esc(x[0])+'<b>'+esc(x[1])+'</b></div>').join("");$("setup-issues").innerHTML=(d.setup_issues||[]).length?(d.setup_issues.map(x=>'<div class="bad">· '+esc(x.text)+'</div>').join("")):'<span class="ok">配置检查通过，可启动下载。</span>';$("disk-status").innerHTML=(d.disks||[]).map(x=>'<div class="notice">'+esc(x.name)+' · '+esc(x.path)+' · '+(x.mounted?"挂载正常":"未挂载")+' · 可用 '+(x.free/1073741824||0).toFixed(1)+' GiB</div>').join("")||"尚未配置磁盘";let rows=[];(d.scenes||[]).forEach(scene=>(scene.tasks||[]).forEach(task=>rows.push('<tr><td>'+esc(scene.scene)+'</td><td>'+esc(task.name)+'</td><td>'+task.downloaded+' / '+task.target+'</td><td>'+task.hours+' 小时</td></tr>')));$("task-status").innerHTML=rows.length?'<table><thead><tr><th>场景</th><th>任务</th><th>完成条数 / 目标</th><th>累计时长</th></tr></thead><tbody>'+rows.join("")+'</tbody></table>':"尚未配置任务"}
-async function refreshStatus(){try{renderStatus(await api("/api/status"))}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad"}}
+async function loadDiskMounts(){try{const d=await api("/api/config/disks/detect");diskMounts=d.mounts||[]}catch(e){diskMounts=[]}}
+function renderDisks(disks){const root=$("disk-list");root.innerHTML="";(disks||[]).forEach((d,i)=>{const card=document.createElement("div");card.className="disk-row";card.innerHTML='<div class="disk-actions"><b>磁盘 '+(i+1)+'</b><button type="button" class="btn danger" data-remove-disk="'+i+'">删除</button></div><div class="disk-grid"><div class="field"><label>磁盘名称</label><input data-disk-field="name" value="'+esc(d.name)+'" placeholder="例如 disk1"></div><div class="field"><label>实际挂载点</label><input data-disk-field="mountpoint" list="disk-mount-options" value="'+esc(d.mountpoint||"")+'" placeholder="选择或输入挂载点"></div><div class="field"><label>下载目录</label><input data-disk-field="path" value="'+esc(d.path)+'" placeholder="挂载点下的下载目录"></div></div>';root.appendChild(card)});let dl=document.getElementById("disk-mount-options");if(!dl){dl=document.createElement("datalist");dl.id="disk-mount-options";document.body.appendChild(dl)}dl.innerHTML=diskMounts.map(m=>'<option value="'+esc(m.mountpoint)+'">'+esc(m.device||"")+' · '+(m.free/1073741824).toFixed(1)+' GiB 可用</option>').join("");root.querySelectorAll("[data-remove-disk]").forEach(btn=>btn.onclick=()=>{const rows=readDisks();rows.splice(Number(btn.dataset.removeDisk),1);renderDisks(rows)})}
+function readDisks(){return Array.from($("disk-list").querySelectorAll(".disk-row")).map(row=>{const v={};row.querySelectorAll("[data-disk-field]").forEach(el=>v[el.dataset.diskField]=el.value.trim());return v})}
+function addDisk(){const rows=readDisks();rows.push({name:"disk"+(rows.length+1),mountpoint:"",path:""});renderDisks(rows)}
+async function refreshPlans(){try{const d=await api("/api/plans");const root=$("plan-list");root.innerHTML=(d.plans||[]).map(p=>'<div class="notice"><b>'+esc(p.name)+'</b> · '+p.task_count+' 个任务 · '+p.scene_count+' 个场景 · 更新 '+esc(p.updated_at)+'<div class="actions"><button class="btn primary" data-plan-apply="'+p.id+'">替换载入</button><button class="btn" data-plan-merge="'+p.id+'">追加载入</button><button class="btn" data-plan-export="'+p.id+'">导出</button><button class="btn danger" data-plan-delete="'+p.id+'">删除</button></div></div>').join("")||'<p class="hint">暂无已保存方案。</p>';root.querySelectorAll("[data-plan-apply]").forEach(b=>b.onclick=async()=>{if(!confirm("用此方案替换当前任务清单？"))return;try{await api("/api/plans/"+b.dataset.planApply+"/apply","POST",{mode:"replace"});message("plan-result","方案已载入；当前任务配置已保存到 SQLite",true);await loadConfig();await refreshPlans()}catch(e){message("plan-result",e.message,false)}});root.querySelectorAll("[data-plan-merge]").forEach(b=>b.onclick=async()=>{try{const d=await api("/api/plans/"+b.dataset.planMerge+"/apply","POST",{mode:"merge"});message("plan-result","已追加 "+d.added+" 个任务；重复或冲突任务已跳过",true);await loadConfig();await refreshPlans()}catch(e){message("plan-result",e.message,false)}});root.querySelectorAll("[data-plan-delete]").forEach(b=>b.onclick=async()=>{if(!confirm("删除这个任务方案？不会删除当前任务清单或已下载文件。"))return;try{await api("/api/plans/"+b.dataset.planDelete,"DELETE");await refreshPlans();message("plan-result","方案已删除",true)}catch(e){message("plan-result",e.message,false)}});root.querySelectorAll("[data-plan-export]").forEach(b=>b.onclick=()=>{location.href="/api/plans/"+b.dataset.planExport+"/export"})}catch(e){message("plan-result",e.message,false)}}
+async function savePlan(){const name=$("plan-name").value.trim();if(!name){message("plan-result","请填写方案名称",false);return}const payload={name:name,note:$("plan-note").value};try{await api("/api/plans","POST",payload);await refreshPlans();message("plan-result","当前任务清单已保存为方案",true)}catch(e){if(e.message.includes("已有同名方案")&&confirm("方案已存在，是否覆盖原方案？")){try{payload.overwrite=true;await api("/api/plans","POST",payload);await refreshPlans();message("plan-result","方案已覆盖保存",true)}catch(x){message("plan-result",x.message,false)}}else{message("plan-result",e.message,false)}}}
+async function loadConfig(){configData=await api("/api/config");$("connection-fields").innerHTML=fieldsFor(["minio","pg"]);$("advanced-fields").innerHTML=fieldsFor(["run","transfer","web"]);await loadDiskMounts();renderDisks(configData.disks||[]);$("data-version").value=configData.tasks.data_version||"";taskEditorData=JSON.parse(JSON.stringify({data_version:configData.tasks.data_version||"",scenes:configData.tasks.scenes||[]}));renderTaskEditor();$("db-path").textContent="SQLite 文件："+configData.paths.sqlite_db;$("connection-state").textContent="控制台已连接";$("connection-state").className="ok"}
+let taskEditorData={data_version:"",scenes:[]};
+function syncTaskJSON(value){$("task-json").value=JSON.stringify(value||taskEditorData,null,2)}
+function readTaskEditor(){return {data_version:$("data-version").value,scenes:taskEditorData.scenes.map(scene=>({scene:scene.scene,tasks:(scene.tasks||[]).map(task=>({name:task.name||"",dir:task.dir||"",count:Number(task.count||0),target_hours:Number(task.target_hours||0),aliases:Array.isArray(task.aliases)?task.aliases:[],tags:Array.isArray(task.tags)?task.tags:[]}))}))}}
+function renderTaskEditor(){
+ const host=$("task-editor");if(!host)return;
+ const scenes=taskEditorData.scenes||[];
+ host.innerHTML=scenes.length?scenes.map((scene,si)=>'<section class="task-scene"><div class="task-scene-head"><label>场景名称</label><input data-scene-name="'+si+'" value="'+esc(scene.scene||"")+'" placeholder="例如：家居"><span class="scene-count">'+(scene.tasks||[]).length+' 个任务</span><button class="task-mini remove" data-action="remove-scene" data-scene="'+si+'">删除场景</button></div><div class="task-table-wrap"><table class="task-table"><thead><tr><th>任务名称</th><th>目录名（可选）</th><th>目标条数</th><th>目标时长（小时）</th><th>别名（逗号分隔）</th><th>标签（逗号分隔）</th><th>排序 / 操作</th></tr></thead><tbody>'+((scene.tasks||[]).map((task,ti)=>'<tr><td><input class="task-name" data-task-field="name" data-scene="'+si+'" data-task="'+ti+'" value="'+esc(task.name||"")+'" placeholder="任务名称"></td><td><input class="task-dir" data-task-field="dir" data-scene="'+si+'" data-task="'+ti+'" value="'+esc(task.dir||"")+'" placeholder="默认使用任务名"></td><td><input type="number" min="0" step="1" data-task-field="count" data-scene="'+si+'" data-task="'+ti+'" value="'+Number(task.count||0)+'"></td><td><input type="number" min="0" step="0.1" data-task-field="target_hours" data-scene="'+si+'" data-task="'+ti+'" value="'+Number(task.target_hours||0)+'"></td><td><input data-task-field="aliases" data-scene="'+si+'" data-task="'+ti+'" value="'+esc((task.aliases||[]).join(", "))+'" placeholder="别名1, 别名2"></td><td><input data-task-field="tags" data-scene="'+si+'" data-task="'+ti+'" value="'+esc((task.tags||[]).join(", "))+'" placeholder="标签1, 标签2"></td><td class="task-actions"><button class="task-mini" data-action="up" data-scene="'+si+'" data-task="'+ti+'" title="上移" '+(ti===0?"disabled":"")+'>↑</button> <button class="task-mini" data-action="down" data-scene="'+si+'" data-task="'+ti+'" title="下移" '+(ti===(scene.tasks||[]).length-1?"disabled":"")+'>↓</button> <button class="task-mini remove" data-action="remove-task" data-scene="'+si+'" data-task="'+ti+'">删除</button></td></tr>').join(""))+'</tbody></table></div><div class="task-scene-foot"><span class="hint">任务名全局唯一；目标设为 0 表示不按该指标限制。</span><button class="btn" data-action="add-task" data-scene="'+si+'">＋ 添加任务</button></div></section>').join(""):'<div class="notice">还没有场景。点击“添加场景”开始配置任务。</div>';
+ syncTaskJSON(readTaskEditor());
+}
+function updateTaskField(input){
+ const si=Number(input.dataset.scene),ti=Number(input.dataset.task),field=input.dataset.taskField;
+ if(field==="scene-name"){taskEditorData.scenes[si].scene=input.value;return}
+ const task=taskEditorData.scenes[si]?.tasks?.[ti];if(!task)return;
+ if(field==="count"||field==="target_hours")task[field]=input.value===""?0:Number(input.value);
+ else if(field==="aliases"||field==="tags")task[field]=input.value.split(",").map(x=>x.trim()).filter(Boolean);
+ else task[field]=input.value;
+ syncTaskJSON(readTaskEditor());
+}
+$("task-editor").addEventListener("change",event=>{const input=event.target;if(input.dataset.sceneName!==undefined){taskEditorData.scenes[Number(input.dataset.sceneName)].scene=input.value;syncTaskJSON(readTaskEditor());return}if(input.dataset.taskField)updateTaskField(input)});
+$("task-editor").addEventListener("click",event=>{const button=event.target.closest("button[data-action]");if(!button)return;const si=Number(button.dataset.scene),ti=Number(button.dataset.task),action=button.dataset.action;const scenes=taskEditorData.scenes;
+ if(action==="add-task"){scenes[si].tasks.push({name:"",dir:"",count:0,target_hours:0,aliases:[],tags:[]})}
+ if(action==="remove-task"){if(!confirm("删除这个任务？"))return;scenes[si].tasks.splice(ti,1)}
+ if(action==="up"&&ti>0){const rows=scenes[si].tasks;[rows[ti-1],rows[ti]]=[rows[ti],rows[ti-1]]}
+ if(action==="down"&&ti<scenes[si].tasks.length-1){const rows=scenes[si].tasks;[rows[ti+1],rows[ti]]=[rows[ti],rows[ti+1]]}
+ if(action==="remove-scene"){if(!confirm("删除整个场景及其中的任务？"))return;scenes.splice(si,1)}
+ renderTaskEditor();
+});
+$("add-scene").onclick=()=>{taskEditorData.scenes.push({scene:"新场景",tasks:[]});renderTaskEditor();const inputs=$("task-editor").querySelectorAll("[data-scene-name]");if(inputs.length)inputs[inputs.length-1].focus()};
+$("apply-task-json").onclick=()=>{try{const value=JSON.parse($("task-json").value);if(!value||!Array.isArray(value.scenes))throw new Error("JSON 必须包含 scenes 数组");taskEditorData={data_version:value.data_version||"",scenes:value.scenes};$("data-version").value=value.data_version||$("data-version").value;renderTaskEditor();message("task-result","JSON 已应用到任务表格，保存后生效",true)}catch(e){message("task-result","JSON 格式错误："+e.message,false)}};
+function formatGiB(bytes){return (Math.max(0,Number(bytes)||0)/1073741824).toFixed(1)+" GiB"}
+function renderStatus(d){
+ statusData=d;const t=d.transfer_progress||{},running=!!(d.downloader&&d.downloader.running);
+ const speed=Math.max(0,Number(t.speed_bytes_per_second)||0),downloaded=Math.max(0,Number(t.downloaded_bytes)||0),expected=Math.max(0,Number(t.expected_bytes)||0),remaining=Math.max(0,Number(t.remaining_bytes)||0),percent=Math.max(0,Math.min(100,Number(t.progress_percent)||0));
+ const metrics=[["运行状态",running?"下载中":"空闲"],["下载速度",(speed/1048576).toFixed(2)+" MiB/s"],["已下载",formatGiB(downloaded)],["进度",percent.toFixed(1)+"%"],["预计剩余",t.eta_seconds===null||t.eta_seconds===undefined?"—":Math.round(Number(t.eta_seconds)/60)+" 分钟"]];
+ $("metrics").innerHTML=metrics.map(x=>'<div class="metric">'+esc(x[0])+'<b>'+esc(x[1])+'</b></div>').join("");
+ $("transfer-summary").textContent=running?(expected>0?percent.toFixed(1)+"% · "+(speed/1048576).toFixed(2)+" MiB/s":"传输中 · 等待对象大小统计"):"当前没有活动传输";
+ $("transfer-bar").style.width=(expected>0?percent:0)+"%";
+ $("transfer-downloaded").textContent="已传输 "+formatGiB(downloaded);
+ $("transfer-remaining").textContent=expected>0?"预计剩余 "+formatGiB(remaining):"待传输 —";
+ const stopPending=!!d.stop_requested;
+ $("run-control-state").textContent=stopPending?"正在安全停止":(running?"下载运行中":"当前空闲");
+ $("run-control-state").className="summary-chip "+(stopPending?"run-state-chip pending":running?"run-state-chip":"");
+ $("start-run").disabled=running;
+ $("pause-run").disabled=!running||stopPending;
+ $("force-run").disabled=!running;
+ $("pause-run").textContent=stopPending?"正在停止…":"安全暂停";
+ $("setup-issues").innerHTML=(d.setup_issues||[]).length?(d.setup_issues.map(x=>'<div class="bad">· '+esc(x.text)+'</div>').join("")):'<span class="ok">配置检查通过，可启动下载。</span>';
+ const disks=d.disks||[];let totalBytes=0,freeBytes=0;
+ $("disk-status").innerHTML=disks.map(x=>{
+  const total=Math.max(0,Number(x.total)||0),free=Math.max(0,Number(x.free)||0),used=Math.max(0,Number(x.used)||0),usedPct=total>0?Math.max(0,Math.min(100,used/total*100)):0;
+  totalBytes+=total;freeBytes+=free;
+  const fillClass=usedPct>=95?"critical":usedPct>=85?"warn":"";
+  return '<div class="disk-monitor"><div class="disk-monitor-top"><span class="disk-monitor-name">'+esc(x.name)+'</span><span class="disk-monitor-state '+(x.mounted&&x.exists?"good":"bad")+'">'+(x.mounted&&x.exists?"挂载正常":(!x.mounted?"未挂载":"目录不可用"))+'</span></div><div class="disk-monitor-path">'+esc(x.path)+'</div><div class="disk-monitor-track"><div class="disk-monitor-fill '+fillClass+'" style="width:'+usedPct.toFixed(1)+'%"></div></div><div class="disk-monitor-stats"><span>已用 '+formatGiB(used)+' / '+formatGiB(total)+'</span><strong>可用 '+formatGiB(free)+'</strong></div></div>';
+ }).join("")||'<div class="notice">尚未配置下载磁盘。</div>';
+ $("disk-total-summary").textContent=disks.length?("合计可用 "+formatGiB(freeBytes)):"尚无磁盘";
+ const active=d.running_episodes||[];
+ $("active-count").textContent=active.length+" 个活动任务";
+ $("active-downloads").innerHTML=active.length?'<div class="active-list">'+active.map(x=>{const partial=Math.max(0,Number(x.partial_bytes)||0),expected=Math.max(0,Number(x.expected_bytes)||0),pct=expected>0?Math.max(0,Math.min(100,partial/expected*100)):0;return '<div class="active-item"><div class="active-item-top"><div class="active-item-main"><div class="active-item-title">'+esc(x.task_name||"未知任务")+'</div><div class="active-item-meta">磁盘：'+esc(x.disk_name||"未分配")+' · Episode：'+esc(x.episode_id||"")+'</div></div><div class="active-item-size">'+formatGiB(partial)+'</div></div><div class="active-item-progress"><span style="width:'+pct.toFixed(1)+'%"></span></div><div class="active-item-bottom"><span>'+ (expected>0?(pct.toFixed(1)+"% · 目标 "+formatGiB(expected)):"目标容量未知")+'</span><span>开始：'+esc(x.started_at||"—")+'</span></div></div>'}).join("")+'</div>':'<div class="notice">当前没有正在下载的 Episode。</div>';
+ const summary=d.history_summary||{};
+ const result=d.last_run||{};
+ const resultLabel={finished:"已完成",paused:"已暂停",error:"运行失败"}[result.result]||"暂无记录";
+ $("last-run-state").textContent=resultLabel;
+ const latestRun=(d.run_history||[])[0]||{},latestStats=latestRun.episode_stats||{};const latestEpisodeSummary=latestRun.run_id?(" · Episode：成功 "+Number(latestStats.completed||0)+" / 失败 "+Number(latestStats.failed||0)+" / 暂停 "+Number(latestStats.paused||0)):"";$("last-run-detail").textContent=result.at?("最近运行："+result.at+" · 模式："+(result.mode==="duration"?"按时长":"按条数")+latestEpisodeSummary+(result.error?" · 错误："+result.error:"")):"暂无历史运行结果";
+ const summaryItems=[["完成记录",Number(summary.completed||0)+" 条"],["失败记录",Number(summary.failed||0)+" 条"],["暂停 / 待续传",Number(summary.paused||0)+ " / "+Number(summary.pending||0)],["完成数据容量",formatGiB(summary.completed_bytes||0)],["累计内容时长",(Number(summary.content_seconds||0)/3600).toFixed(1)+" 小时"]];
+ $("run-summary").innerHTML=summaryItems.map(x=>'<div class="metric">'+esc(x[0])+'<b>'+esc(x[1])+'</b></div>').join("");
+ const diskHistory=d.disk_history||[];
+ $("disk-history").innerHTML=diskHistory.length?'<table class="history-table"><thead><tr><th>磁盘</th><th>完成数量</th><th>容量</th><th>内容时长</th></tr></thead><tbody>'+diskHistory.map(x=>'<tr><td>'+esc(x.disk_name||"未分配")+'</td><td>'+Number(x.count||0)+'</td><td>'+formatGiB(x.bytes||0)+'</td><td>'+(Number(x.seconds||0)/3600).toFixed(1)+' 小时</td></tr>').join("")+'</tbody></table>':'<div class="notice">暂无按磁盘汇总的完成记录。</div>';
+ const runs=d.run_history||[];
+ $("run-history").innerHTML=runs.length?'<h3>最近运行记录</h3><table class="history-table"><thead><tr><th>开始时间</th><th>结果</th><th>耗时</th><th>完成数量</th><th>容量</th><th>内容时长</th><th>Episode 统计</th><th>任务明细</th><th>导出</th></tr></thead><tbody>'+runs.map(x=>{const tasks=(x.tasks||[]).slice().sort((a,b)=>Number(b.content_seconds||0)-Number(a.content_seconds||0));const details=tasks.length?'<details><summary>查看 '+tasks.length+' 个任务 · 按内容时长排序</summary><div class="muted">* 成功率 = 成功数量 ÷（成功数量 + 失败次数）；失败按下载尝试累计，重试可能使失败次数大于 Episode 数。</div><table class="history-table"><thead><tr><th>排名</th><th>任务</th><th>成功</th><th>失败</th><th>成功率*</th><th>容量</th><th>内容时长</th><th>等待时间</th><th>运行耗时</th><th>平均吞吐</th><th>Episode</th></tr></thead><tbody>'+tasks.map((t,index)=>{const success=Number(t.completed_count||0),failed=Number(t.failed_count||0),attempts=success+failed,successRate=attempts?(success*100/attempts).toFixed(1)+"%":"-";const episodeDetails='<details class="run-episode-details" data-run-id="'+esc(x.run_id)+'" data-task="'+esc(t.task_name)+'"><summary>Episode 明细</summary><div class="run-episode-results muted">展开后加载明细</div></details>';return '<tr><td>'+(index+1)+'</td><td>'+esc(t.task_name)+'</td><td>'+success+'</td><td>'+failed+'</td><td>'+successRate+'</td><td>'+formatGiB(t.completed_bytes||0)+'</td><td>'+(Number(t.content_seconds||0)/3600).toFixed(2)+' 小时</td><td>'+(Number(t.wait_seconds||0)/60).toFixed(1)+' 分钟</td><td>'+(Number(t.duration_seconds||0)/60).toFixed(1)+' 分钟</td><td>'+(Number(t.throughput_bytes_per_second||0)/1048576).toFixed(2)+' MiB/s</td><td>'+episodeDetails+'</td></tr>'}).join("")+'</tbody></table></details>':'<span class="muted">本次无新完成任务</span>';const stats=x.episode_stats||{},categories=stats.failure_categories||{},categoryText=Object.entries(categories).map(([k,n])=>({network:"网络",disk_space:"磁盘空间",not_found:"对象不存在",permission:"权限",integrity:"完整性",other:"其他"}[k]||k)+" "+n).join(" / ");const failedTotal=Number(stats.failed||0),categorySummary=Object.entries(categories).filter(([,n])=>Number(n)>0).map(([k,n])=>({network:"网络",disk_space:"磁盘空间",not_found:"对象不存在",permission:"权限",integrity:"完整性",other:"其他"}[k]||k)+" "+n+"（"+(failedTotal?(Number(n)*100/failedTotal).toFixed(1):"0.0")+"%）").join(" / ");const episodeSummary='成功 '+Number(stats.completed||0)+' · 失败 '+failedTotal+' · 暂停 '+Number(stats.paused||0)+(categorySummary?'（'+categorySummary+'）':'');const diskSummary=(x.disk_stats||[]).map(d=>{const done=Number(d.completed||0),bad=Number(d.failed||0),attempts=done+bad,rate=attempts?(done*100/attempts).toFixed(1)+"%":"-",elapsed=Number(d.duration_seconds||0),throughput=Number(d.throughput_bytes_per_second||0);return (d.disk_name||"未分配")+': 成功 '+done+' / 失败 '+bad+' / 成功率 '+rate+' / '+formatGiB(d.completed_bytes||0)+' / 耗时 '+(elapsed/60).toFixed(1)+' 分钟 / 平均 '+(throughput/1048576).toFixed(2)+' MiB/s'}).join('；');return '<tr><td>'+esc(x.started_at||"")+'</td><td>'+esc(({running:"运行中",finished:"已完成",paused:"已暂停",error:"失败",interrupted:"异常中断"}[x.result]||x.result))+'</td><td>'+((Number(x.duration_seconds)||0)/60).toFixed(1)+' 分钟</td><td>'+Number(x.completed_count||0)+'</td><td>'+formatGiB(x.completed_bytes||0)+'</td><td>'+(Number(x.content_seconds||0)/3600).toFixed(2)+' 小时</td><td>'+esc(episodeSummary)+(diskSummary?'<div class="muted">磁盘：'+esc(diskSummary)+'</div>':'')+'</td><td>'+details+'</td><td><button type="button" class="btn secondary" onclick="downloadRunCSV(\''+esc(x.run_id)+'\')">导出 CSV</button></td></tr>'}).join("")+'</tbody></table>':'<div class="notice">暂无运行历史。</div>';
+ const failures=d.recent_failures||[];
+ $("run-history").querySelectorAll(".run-episode-details").forEach(el=>{el.addEventListener("toggle",()=>{if(el.open&&!el.dataset.loaded)loadRunEpisodeDetails(el)}, {once:true})});
+ $("recent-failures").innerHTML=failures.length?'<div class="failure-list"><strong>最近失败记录（最多 8 条）</strong>'+failures.map(x=>'<div class="failure-item">'+esc(x.task_name||"未知任务")+' · '+esc(x.episode_id||"")+' · '+esc(x.error||"未提供错误详情")+'</div>').join("")+'</div>':'<div class="notice">没有失败记录。</div>';
+ const durationMode=$("download-mode").value==="duration";let rows=[];
+ (d.scenes||[]).forEach(scene=>(scene.tasks||[]).forEach(task=>{
+  const progress=durationMode?(Number(task.hours||0).toFixed(2)+" / "+Number(task.target_hours||0).toFixed(2)+" 小时"):(task.downloaded+" / "+task.target+" 条");
+  rows.push('<tr><td>'+esc(scene.scene)+'</td><td>'+esc(task.name)+'</td><td>'+progress+'</td><td>'+Number(task.hours||0).toFixed(2)+' 小时</td></tr>');
+ }));
+ $("task-status").innerHTML=rows.length?'<table><thead><tr><th>场景</th><th>任务</th><th>'+(durationMode?"累计时长 / 目标":"完成条数 / 目标")+'</th><th>累计时长</th></tr></thead><tbody>'+rows.join("")+'</tbody></table>':"尚未配置任务";
+}
+async function refreshStatus(){try{const range=$("run-history-range")?.value||"30";renderStatus(await api("/api/status?history_days="+encodeURIComponent(range)))}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad"}}
 async function refreshLogs(){try{const d=await api("/api/logs?offset="+logOffset);if(d.reset){$("logs").textContent=d.text||""}else if(d.text){$("logs").textContent+=($("logs").textContent?"\n":"")+d.text}$("logs").scrollTop=$("logs").scrollHeight;logOffset=d.offset||logOffset}catch(e){$("logs").textContent=e.message}}
 async function testConnection(target){try{const root=target==="minio"?$("connection-fields"):$("connection-fields");const d=await api("/api/config/test","POST",{target:target,values:readFields(root)});message("connection-result",d.message,d.ok)}catch(e){message("connection-result",e.message,false)}}
+$("run-history-range")?.addEventListener("change",refreshStatus);
 document.querySelectorAll(".nav button").forEach(btn=>btn.addEventListener("click",()=>{document.querySelectorAll(".nav button").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".panel").forEach(x=>x.classList.remove("active"));btn.classList.add("active");$(btn.dataset.tab).classList.add("active");if(btn.dataset.tab==="records")refreshLogs()}));
 $("save-connection").onclick=async()=>{try{await api("/api/config/settings","PUT",{values:readFields($("connection-fields"))});message("connection-result","连接配置已保存到 SQLite",true);await loadConfig()}catch(e){message("connection-result",e.message,false)}};
 $("test-minio").onclick=()=>testConnection("minio");$("test-pg").onclick=()=>testConnection("pg");
 $("save-advanced").onclick=async()=>{try{await api("/api/config/settings","PUT",{values:readFields($("advanced-fields"))});alert("运行参数已保存到 SQLite");await loadConfig()}catch(e){alert(e.message)}};
-$("check-disks").onclick=async()=>{try{const value=JSON.parse($("disk-json").value);const d=await api("/api/config/disks/check","POST",value);message("disk-result",JSON.stringify(d.results,null,2),d.results.every(x=>x.ok))}catch(e){message("disk-result",e.message,false)}};
-$("save-disks").onclick=async()=>{try{const value=JSON.parse($("disk-json").value);await api("/api/config/disks","PUT",value);message("disk-result","磁盘配置已保存到 SQLite",true);await loadConfig();await refreshStatus()}catch(e){message("disk-result",e.message,false)}};
-$("save-tasks").onclick=async()=>{try{const value=JSON.parse($("task-json").value);value.data_version=$("data-version").value;await api("/api/config/tasks","PUT",value);message("task-result","任务配置已保存到 SQLite",true);await loadConfig()}catch(e){message("task-result",e.message,false)}};
+$("detect-disks").onclick=async()=>{await loadDiskMounts();renderDisks(readDisks());message("disk-result","已重新检测到 "+diskMounts.length+" 个挂载点",true)};$("add-disk").onclick=addDisk;
+$("check-disks").onclick=async()=>{try{const d=await api("/api/config/disks/check","POST",{disks:readDisks()});message("disk-result",d.results.map(x=>x.name+": "+(x.ok?"正常":"异常")+"；"+(x.notes||[]).map(n=>n.text).join("；")+(x.ok?"；可用空间 "+(x.free/1073741824).toFixed(1)+" GiB":"")).join("\n"),d.results.every(x=>x.ok))}catch(e){message("disk-result",e.message,false)}};
+$("save-disks").onclick=async()=>{try{await api("/api/config/disks","PUT",{disks:readDisks()});message("disk-result","磁盘配置已保存到 SQLite",true);await loadConfig();await refreshStatus()}catch(e){message("disk-result",e.message,false)}};
+$("save-tasks").onclick=async()=>{try{const value=readTaskEditor();value.data_version=$("data-version").value;syncTaskJSON(value);await api("/api/config/tasks","PUT",value);message("task-result","任务配置已保存到 SQLite",true);await loadConfig()}catch(e){message("task-result",e.message,false)}};
+$("refresh-plans").onclick=refreshPlans;$("save-plan").onclick=savePlan;
+$("import-plan").onclick=async()=>{const file=$("plan-import-file").files[0];if(!file){message("plan-result","请先选择导出的方案 JSON 文件",false);return}try{const doc=JSON.parse(await file.text());const result=await api("/api/plans/import","POST",doc);$("plan-import-file").value="";await refreshPlans();message("plan-result","方案导入成功："+result.name,true)}catch(e){message("plan-result","导入失败："+e.message,false)}};
 $("reset-tasks").onclick=async()=>{if(!confirm("恢复内置默认任务清单？当前任务清单将被替换。"))return;try{await api("/api/config/tasks/reset","POST",{});message("task-result","已恢复默认任务",true);await loadConfig()}catch(e){message("task-result",e.message,false)}};
-$("start-run").onclick=async()=>{try{const d=await api("/api/run","POST",{mode:"download"});message("setup-issues","下载进程已启动，PID "+d.pid,true);await refreshStatus()}catch(e){message("setup-issues",e.message,false)}};
+$("start-run").onclick=async()=>{try{const d=await api("/api/run","POST",{mode:$("download-mode").value});message("setup-issues","下载进程已启动，PID "+d.pid,true);await refreshStatus()}catch(e){message("setup-issues",e.message,false)}};
 $("pause-run").onclick=async()=>{try{await api("/api/stop","POST",{});message("setup-issues","已发送安全暂停请求",true)}catch(e){message("setup-issues",e.message,false)}};
 $("force-run").onclick=async()=>{if(!confirm("强制结束下载进程？临时文件保留，下次可续传。"))return;try{await api("/api/stop","POST",{force:true});message("setup-issues","已发送强制停止",true)}catch(e){message("setup-issues",e.message,false)}};
 $("refresh").onclick=refreshStatus;$("refresh-logs").onclick=refreshLogs;
 $("set-token").onclick=async()=>{const token=$("access-token").value;if(token.length<12){message("token-result","口令至少 12 个字符",false);return}try{const d=await api("/api/auth/token","PUT",{action:"set",token:token});sessionStorage.setItem("minio_download_token",token);$("access-token").value="";message("token-result","访问口令已保存。启用非本机监听前需重启程序。",true)}catch(e){message("token-result",e.message,false)}};
-(async()=>{try{await loadConfig();await refreshStatus();await refreshLogs();refreshTimer=setInterval(()=>{refreshStatus();refreshLogs()},5000)}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad";$("setup-issues").textContent="初始化失败："+e.message}})();
+(async()=>{try{await loadConfig();await refreshPlans();await refreshStatus();await refreshLogs();refreshTimer=setInterval(()=>{refreshStatus();refreshLogs()},5000)}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad";$("setup-issues").textContent="初始化失败："+e.message}})();
 </script></body></html>`;
 
 type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time}
@@ -279,12 +581,15 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("POST /api/config/test",api.configTest)
  mux.HandleFunc("PUT /api/config/tasks",api.configTasks)
  mux.HandleFunc("POST /api/config/tasks/reset",api.configTasksReset)
+ mux.HandleFunc("GET /api/config/disks/detect",api.configDisksDetect)
  mux.HandleFunc("PUT /api/config/disks",api.configDisks)
  mux.HandleFunc("POST /api/config/disks/check",api.configDisksCheck)
  mux.HandleFunc("GET /api/config",api.config)
  mux.HandleFunc("GET /api/status",api.status)
  mux.HandleFunc("POST /api/run",api.run)
  mux.HandleFunc("GET /api/episodes",api.episodes)
+ mux.HandleFunc("GET /api/runs/{id}/episodes",api.runEpisodes)
+ mux.HandleFunc("GET /api/runs/{id}/export.csv",api.exportRunCSV)
  mux.HandleFunc("GET /api/logs",api.logs)
  mux.HandleFunc("POST /api/stop",api.stop)
  handler:=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
@@ -411,10 +716,36 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
  runningEpisodes:=[]map[string]any{};runningBytes:=int64(0);expectedBytes:=int64(0)
  if running{rr,e:=a.db.Query("SELECT episode_id,task_name,disk_name,started_at,expected_bytes,partial_path FROM downloads WHERE status='running' ORDER BY updated_at DESC");if e==nil{for rr.Next(){var id,taskName string;var diskName,started,partial sql.NullString;var expected sql.NullInt64;if rr.Scan(&id,&taskName,&diskName,&started,&expected,&partial)==nil{partialBytes:=int64(0);if partial.Valid{partialBytes,_=directorySizeBytes(partial.String)};runningBytes+=partialBytes;if expected.Valid&&expected.Int64>0{expectedBytes+=expected.Int64};if len(runningEpisodes)<24{runningEpisodes=append(runningEpisodes,map[string]any{"episode_id":id,"task_name":taskName,"disk_name":diskName.String,"started_at":started.String,"expected_bytes":expected.Int64,"partial_bytes":partialBytes})}}};rr.Close()}}
  sampledAt:=time.Now();speedBps,etaSeconds,progressPercent:=a.updateTransferSample(sampledAt,runningBytes,expectedBytes)
+ historySummary:=map[string]any{"completed":int64(0),"failed":int64(0),"paused":int64(0),"pending":int64(0),"completed_bytes":int64(0),"content_seconds":float64(0)}
+ statusRows,summaryErr:=a.db.Query("SELECT status,COUNT(*) FROM downloads GROUP BY status")
+ if summaryErr==nil{for statusRows.Next(){var status string;var count int64;if statusRows.Scan(&status,&count)==nil{switch status{case "failed":historySummary["failed"]=count;case "paused":historySummary["paused"]=count;case "pending":historySummary["pending"]=count}}};statusRows.Close()}
+ diskTotals:=map[string]map[string]any{}
+ ledgerRows,ledgerErr:=a.db.Query("SELECT COALESCE(disk_name,''),file_size,content_time,target_path FROM downloaded_episodes")
+ if ledgerErr==nil{for ledgerRows.Next(){var name string;var size sql.NullInt64;var seconds sql.NullFloat64;var target sql.NullString;if ledgerRows.Scan(&name,&size,&seconds,&target)!=nil{continue};if !target.Valid||!a.completedPath(target.String){continue};historySummary["completed"]=historySummary["completed"].(int64)+1;historySummary["completed_bytes"]=historySummary["completed_bytes"].(int64)+size.Int64;historySummary["content_seconds"]=historySummary["content_seconds"].(float64)+seconds.Float64;item:=diskTotals[name];if item==nil{item=map[string]any{"disk_name":name,"count":int64(0),"bytes":int64(0),"seconds":float64(0)};diskTotals[name]=item};item["count"]=item["count"].(int64)+1;item["bytes"]=item["bytes"].(int64)+size.Int64;item["seconds"]=item["seconds"].(float64)+seconds.Float64}};ledgerRows.Close()}
+ diskNames:=make([]string,0,len(diskTotals));for name:=range diskTotals{diskNames=append(diskNames,name)};sort.Strings(diskNames)
+ diskHistory:=make([]map[string]any,0,len(diskNames));for _,name:=range diskNames{diskHistory=append(diskHistory,diskTotals[name])}
+ historyDays:=strings.TrimSpace(r.URL.Query().Get("history_days"));if historyDays!="7"&&historyDays!="30"&&historyDays!="90"&&historyDays!="365"&&historyDays!="all"{historyDays="30"}
+ historyModifier:="-"+historyDays+" days";runHistory:=[]map[string]any{}
+ historyRows,historyErr:=a.db.Query("SELECT run_id,started_at,finished_at,duration_seconds,mode,result,completed_count,completed_bytes,content_seconds,COALESCE(error,'') FROM run_history WHERE (?='all' OR julianday(started_at)>=julianday('now',?)) ORDER BY started_at DESC LIMIT 50",historyDays,historyModifier)
+ if historyErr==nil{for historyRows.Next(){var id,started,finished,mode,result,detail string;var elapsed,contentSeconds float64;var count,bytes int64;if historyRows.Scan(&id,&started,&finished,&elapsed,&mode,&result,&count,&bytes,&contentSeconds,&detail)==nil{if result=="running"{if parsed,e:=time.Parse(time.RFC3339Nano,started);e==nil{elapsed=time.Since(parsed).Seconds()}};runHistory=append(runHistory,map[string]any{"run_id":id,"started_at":started,"finished_at":finished,"duration_seconds":elapsed,"mode":mode,"result":result,"completed_count":count,"completed_bytes":bytes,"content_seconds":contentSeconds,"error":detail})}};historyRows.Close()}
+ for _,run:=range runHistory{
+  tasks:=[]map[string]any{};taskRows,taskErr:=a.db.Query("SELECT task_name,completed_count,failed_count,completed_bytes,content_seconds,wait_seconds,duration_seconds FROM run_task_history WHERE run_id=? ORDER BY task_name",run["run_id"]);if taskErr==nil{for taskRows.Next(){var name string;var count,failed,bytes int64;var seconds,waitSeconds,durationSeconds float64;if taskRows.Scan(&name,&count,&failed,&bytes,&seconds,&waitSeconds,&durationSeconds)==nil{attempts:=count+failed;rate:=float64(0);if attempts>0{rate=float64(count)/float64(attempts)*100};throughput:=float64(0);if durationSeconds>0{throughput=float64(bytes)/durationSeconds};tasks=append(tasks,map[string]any{"task_name":name,"completed_count":count,"failed_count":failed,"success_rate":math.Round(rate*10)/10,"completed_bytes":bytes,"content_seconds":seconds,"wait_seconds":waitSeconds,"duration_seconds":durationSeconds,"throughput_bytes_per_second":throughput})}};taskRows.Close()};run["tasks"]=tasks
+  episodeStats:=map[string]any{"total":int64(0),"completed":int64(0),"failed":int64(0),"paused":int64(0),"failure_categories":map[string]int64{}}
+  categoryStats:=map[string]int64{};episodeRows,episodeErr:=a.db.Query("SELECT status,COALESCE(failure_category,''),COUNT(*) FROM run_episode_history WHERE run_id=? GROUP BY status,failure_category",run["run_id"])
+  if episodeErr==nil{for episodeRows.Next(){var state,category string;var count int64;if episodeRows.Scan(&state,&category,&count)==nil{episodeStats["total"]=episodeStats["total"].(int64)+count;switch state{case "completed":episodeStats["completed"]=episodeStats["completed"].(int64)+count;case "failed":episodeStats["failed"]=episodeStats["failed"].(int64)+count;if category!=""{categoryStats[category]+=count};case "paused":episodeStats["paused"]=episodeStats["paused"].(int64)+count}}};episodeRows.Close()}
+  episodeStats["failure_categories"]=categoryStats;run["episode_stats"]=episodeStats
+  diskStats:=[]map[string]any{};diskRows,diskErr:=a.db.Query("SELECT COALESCE(disk_name,''),SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),SUM(CASE WHEN status='paused' THEN 1 ELSE 0 END),SUM(CASE WHEN status='completed' THEN completed_bytes ELSE 0 END),SUM(CASE WHEN status='completed' THEN content_seconds ELSE 0 END) FROM run_episode_history WHERE run_id=? GROUP BY COALESCE(disk_name,'') ORDER BY disk_name",run["run_id"])
+  if diskErr==nil{for diskRows.Next(){var name string;var completed,failed,paused,bytes int64;var seconds float64;if diskRows.Scan(&name,&completed,&failed,&paused,&bytes,&seconds)==nil{diskStats=append(diskStats,map[string]any{"disk_name":name,"completed":completed,"failed":failed,"paused":paused,"completed_bytes":bytes,"content_seconds":seconds})}};diskRows.Close()}
+  diskTimingRows,diskTimingErr:=a.db.Query("SELECT disk_name,duration_seconds,completed_bytes FROM run_disk_history WHERE run_id=?",run["run_id"]);if diskTimingErr==nil{timing:=map[string]map[string]any{};for diskTimingRows.Next(){var name string;var elapsed float64;var bytes int64;if diskTimingRows.Scan(&name,&elapsed,&bytes)==nil{rate:=float64(0);if elapsed>0{rate=float64(bytes)/elapsed};timing[name]=map[string]any{"duration_seconds":elapsed,"throughput_bytes_per_second":rate}}};diskTimingRows.Close();for _,item:=range diskStats{if v:=timing[item["disk_name"].(string)];v!=nil{item["duration_seconds"]=v["duration_seconds"];item["throughput_bytes_per_second"]=v["throughput_bytes_per_second"]}}}
+  run["disk_stats"]=diskStats
+ }
+ recentFailures:=[]map[string]any{}
+ failedRows,failedErr:=a.db.Query("SELECT episode_id,task_name,COALESCE(error,''),updated_at FROM downloads WHERE status='failed' ORDER BY updated_at DESC LIMIT 8")
+ if failedErr==nil{for failedRows.Next(){var id,taskName,detail,updated string;if failedRows.Scan(&id,&taskName,&detail,&updated)==nil{recentFailures=append(recentFailures,map[string]any{"episode_id":id,"task_name":taskName,"error":detail,"updated_at":updated})}};failedRows.Close()}
  issues:=[]map[string]string{};if a.cfg.Endpoint==""||a.cfg.AccessKey==""||a.cfg.SecretKey==""||a.cfg.Bucket==""{issues=append(issues,map[string]string{"page":"connection","text":"请在连接配置中填写完整的 MinIO 地址、密钥和 Bucket"})};if a.cfg.PGHost==""||a.cfg.PGDB==""||a.cfg.PGUser==""||a.cfg.PGPassword==""{issues=append(issues,map[string]string{"page":"connection","text":"请在连接配置中填写完整的 PostgreSQL 连接信息"})};if len(a.cfg.Disks)==0{issues=append(issues,map[string]string{"page":"disks","text":"尚未配置目标磁盘"})};if len(a.cfg.Tasks)==0{issues=append(issues,map[string]string{"page":"tasks","text":"尚未配置下载任务"})}
  endpoint:=a.cfg.Endpoint;if u,e:=url.Parse(endpoint);e==nil&&u.Host!=""{endpoint=u.Scheme+"://"+u.Host}
  settings:=map[string]any{"min_free_gb":a.cfg.MinFreeGB,"writes_per_disk":a.cfg.Workers,"require_mcap":a.cfg.RequireMCAP,"mcap_pattern":a.cfg.MCAPPattern,"default_rounds":a.cfg.DefaultRounds}
- writeJSON(w,map[string]any{"version":"go-dev","data_version":a.cfg.DataVersion,"downloader":state,"stop_requested":running&&isStopRequested(control["stop_requested"]),"setup_issues":issues,"minio":map[string]any{"endpoint":endpoint,"bucket":a.cfg.Bucket},"settings":settings,"last_run":last,"stale_records":staleRecords,"running_episodes":runningEpisodes,"transfer_progress":map[string]any{"downloaded_bytes":runningBytes,"expected_bytes":expectedBytes,"remaining_bytes":maxInt64(expectedBytes-runningBytes,0),"speed_bytes_per_second":math.Round(speedBps),"eta_seconds":etaSeconds,"progress_percent":progressPercent},"disks":disks,"scenes":scenes})
+ writeJSON(w,map[string]any{"version":"go-dev","data_version":a.cfg.DataVersion,"downloader":state,"stop_requested":running&&isStopRequested(control["stop_requested"]),"setup_issues":issues,"minio":map[string]any{"endpoint":endpoint,"bucket":a.cfg.Bucket},"settings":settings,"last_run":last,"history_summary":historySummary,"disk_history":diskHistory,"run_history":runHistory,"recent_failures":recentFailures,"stale_records":staleRecords,"running_episodes":runningEpisodes,"transfer_progress":map[string]any{"downloaded_bytes":runningBytes,"expected_bytes":expectedBytes,"remaining_bytes":maxInt64(expectedBytes-runningBytes,0),"speed_bytes_per_second":math.Round(speedBps),"eta_seconds":etaSeconds,"progress_percent":progressPercent},"disks":disks,"scenes":scenes})
 }
 func webConfigSchema() []map[string]any {
  return []map[string]any{
@@ -453,6 +784,7 @@ func webConfigSchema() []map[string]any {
 type planTask struct {
  Name string `json:"name"`
  Count int `json:"count"`
+ Hours float64 `json:"target_hours"`
  Aliases []string `json:"aliases"`
  Dir string `json:"dir"`
  Tags []string `json:"tags"`
@@ -471,7 +803,7 @@ func currentPlanPayload(c Config) planPayload {
  for _,t:=range c.Tasks {
   i,ok:=index[t.Scene];if !ok{i=len(out.Scenes);index[t.Scene]=i;out.Scenes=append(out.Scenes,planScene{Scene:t.Scene,Tasks:[]planTask{}})}
   aliases:=append([]string{},t.Aliases...);tags:=append([]string{},t.Tags...)
-  out.Scenes[i].Tasks=append(out.Scenes[i].Tasks,planTask{Name:t.Name,Count:t.TargetCount,Aliases:aliases,Dir:t.Dir,Tags:tags})
+  out.Scenes[i].Tasks=append(out.Scenes[i].Tasks,planTask{Name:t.Name,Count:t.TargetCount,Hours:t.TargetHours,Aliases:aliases,Dir:t.Dir,Tags:tags})
  }
  return out
 }
@@ -493,6 +825,7 @@ func validatePlanPayload(raw json.RawMessage)(planPayload,error){
    if seenTasks[t.Name]{return p,fmt.Errorf("任务名重复：%q（任务名必须全局唯一）",t.Name)}
    seenTasks[t.Name]=true
    if t.Count<0{return p,fmt.Errorf("任务 %q 的目标条数必须是非负整数，当前为 %d",t.Name,t.Count)}
+   if t.Hours<0||math.IsNaN(t.Hours)||math.IsInf(t.Hours,0){return p,fmt.Errorf("任务 %q 的目标时长必须是有效的非负数字",t.Name)}
    t.Dir=strings.TrimSpace(t.Dir);dirName:=t.Dir;if dirName==""{dirName=t.Name}
    dirKey:=scene.Scene+"\x00"+dirName;if owner,ok:=dirOwners[dirKey];ok{return p,fmt.Errorf("场景 %q 下目录名 %q 被任务 %q 和 %q 同时使用",scene.Scene,t.Dir,owner,t.Name)};dirOwners[dirKey]=t.Name
    if t.Aliases==nil{t.Aliases=[]string{}};if t.Tags==nil{t.Tags=[]string{}}
@@ -603,7 +936,7 @@ func persistPlanPayload(db *sql.DB,p planPayload)error{
   res,e:=tx.Exec("INSERT INTO scenes(position,name) VALUES(?,?)",si,scene.Scene);if e!=nil{return e};sceneID,e:=res.LastInsertId();if e!=nil{return e}
   for ti,t:=range scene.Tasks{
    tags,_:=json.Marshal(t.Tags)
-   res,e=tx.Exec("INSERT INTO tasks(scene_id,position,name,target_count,directory,tags) VALUES(?,?,?,?,?,?)",sceneID,ti,t.Name,t.Count,t.Dir,string(tags));if e!=nil{return e};taskID,e:=res.LastInsertId();if e!=nil{return e}
+   res,e=tx.Exec("INSERT INTO tasks(scene_id,position,name,target_count,target_hours,directory,tags) VALUES(?,?,?,?,?,?,?)",sceneID,ti,t.Name,t.Count,t.Hours,t.Dir,string(tags));if e!=nil{return e};taskID,e:=res.LastInsertId();if e!=nil{return e}
    for ai,alias:=range t.Aliases{if _,e=tx.Exec("INSERT INTO task_aliases(task_id,position,alias) VALUES(?,?,?)",taskID,ai,alias);e!=nil{return e}}
   }
  }
@@ -644,7 +977,7 @@ func(a *WebAPI)planApply(w http.ResponseWriter,r *http.Request){
  if _,err=validatePlanPayload(json.RawMessage(mustJSON(result)));err!=nil{writeJSONStatus(w,400,map[string]any{"error":err.Error()});return}
  if body.Mode=="replace"||len(added)>0{
   if err=persistPlanPayload(db,result);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"应用方案失败："+err.Error()});return}
-  tasks:=[]Task{};for _,scene:=range result.Scenes{for _,t:=range scene.Tasks{tasks=append(tasks,Task{Scene:scene.Scene,Name:t.Name,TargetCount:t.Count,Aliases:append([]string{},t.Aliases...),Dir:t.Dir,Tags:append([]string{},t.Tags...)})}};a.cfg.Tasks=tasks;a.cfg.DataVersion=result.DataVersion
+  tasks:=[]Task{};for _,scene:=range result.Scenes{for _,t:=range scene.Tasks{tasks=append(tasks,Task{Scene:scene.Scene,Name:t.Name,TargetCount:t.Count,TargetHours:t.Hours,Aliases:append([]string{},t.Aliases...),Dir:t.Dir,Tags:append([]string{},t.Tags...)})}};a.cfg.Tasks=tasks;a.cfg.DataVersion=result.DataVersion
  }
  total:=0;for _,scene:=range result.Scenes{total+=len(scene.Tasks)}
  writeJSON(w,map[string]any{"ok":true,"mode":body.Mode,"added":len(added),"skipped":skipped,"total_tasks":total,"running":func()bool{_,running,_:=a.activeDownloader();return running}()})
@@ -780,7 +1113,7 @@ func(a *WebAPI)configTasksReset(w http.ResponseWriter,r *http.Request){
  db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
  if err=persistPlanPayload(db,payload);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"恢复默认任务失败："+err.Error()});return}
  a.cfg.Tasks=[]Task{}
- for _,scene:=range payload.Scenes{for _,task:=range scene.Tasks{a.cfg.Tasks=append(a.cfg.Tasks,Task{Scene:scene.Scene,Name:task.Name,TargetCount:task.Count,Aliases:append([]string{},task.Aliases...),Dir:task.Dir,Tags:append([]string{},task.Tags...)})}}
+ for _,scene:=range payload.Scenes{for _,task:=range scene.Tasks{a.cfg.Tasks=append(a.cfg.Tasks,Task{Scene:scene.Scene,Name:task.Name,TargetCount:task.Count,TargetHours:task.Hours,Aliases:append([]string{},task.Aliases...),Dir:task.Dir,Tags:append([]string{},task.Tags...)})}}
  a.cfg.DataVersion=payload.DataVersion
  writeJSON(w,map[string]any{"ok":true})
 }
@@ -792,7 +1125,7 @@ func(a *WebAPI)configTasks(w http.ResponseWriter,r *http.Request){
  db,err:=a.openPlanDB();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":err.Error()});return};defer db.Close()
  if err=persistPlanPayload(db,p);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"保存任务配置失败："+err.Error()});return}
  tasks:=[]Task{}
- for _,scene:=range p.Scenes{for _,t:=range scene.Tasks{tasks=append(tasks,Task{Scene:scene.Scene,Name:t.Name,TargetCount:t.Count,Aliases:append([]string{},t.Aliases...),Dir:t.Dir,Tags:append([]string{},t.Tags...)})}}
+ for _,scene:=range p.Scenes{for _,t:=range scene.Tasks{tasks=append(tasks,Task{Scene:scene.Scene,Name:t.Name,TargetCount:t.Count,TargetHours:t.Hours,Aliases:append([]string{},t.Aliases...),Dir:t.Dir,Tags:append([]string{},t.Tags...)})}}
  a.cfg.Tasks=tasks;a.cfg.DataVersion=p.DataVersion
  _,running,_:=a.activeDownloader()
  writeJSON(w,map[string]any{"ok":true,"running":running})
@@ -816,6 +1149,13 @@ func probeWritable(path string)error{
  f,err:=os.CreateTemp(path,".minio-downloader-check-*");if err!=nil{return err}
  name:=f.Name();if _,err=f.Write([]byte("ok"));err!=nil{f.Close();os.Remove(name);return err}
  if err=f.Close();err!=nil{os.Remove(name);return err};return os.Remove(name)
+}
+func(a *WebAPI)configDisksDetect(w http.ResponseWriter,r *http.Request){
+ parts,err:=disk.Partitions(false);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取磁盘挂载信息失败："+err.Error()});return}
+ mounts:=[]map[string]any{};seen:=map[string]bool{}
+ for _,p:=range parts{mount:=strings.TrimSpace(p.Mountpoint);if mount==""||seen[mount]{continue};seen[mount]=true;item:=map[string]any{"mountpoint":mount,"device":p.Device,"fstype":p.Fstype,"free":uint64(0),"total":uint64(0)};if u,e:=disk.Usage(mount);e==nil{item["free"]=u.Free;item["total"]=u.Total};mounts=append(mounts,item)}
+ sort.Slice(mounts,func(i,j int)bool{return fmt.Sprint(mounts[i]["mountpoint"])<fmt.Sprint(mounts[j]["mountpoint"])})
+ writeJSON(w,map[string]any{"mounts":mounts})
 }
 func(a *WebAPI)configDisksCheck(w http.ResponseWriter,r *http.Request){
  var body struct{Disks []DiskConfig `json:"disks"`}
@@ -842,6 +1182,7 @@ func(a *WebAPI)configDisks(w http.ResponseWriter,r *http.Request){
  var body struct{Disks []DiskConfig `json:"disks"`}
  if err:=json.NewDecoder(io.LimitReader(r.Body,1<<20)).Decode(&body);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
  if body.Disks==nil{writeJSONStatus(w,400,map[string]any{"error":"请求内容不是有效的 JSON"});return}
+ if len(body.Disks)==0{writeJSONStatus(w,400,map[string]any{"error":"至少需要配置一块下载磁盘"});return}
  seen:=map[string]bool{};for i:=range body.Disks{
   d:=&body.Disks[i];d.Name=strings.TrimSpace(d.Name);d.Path=strings.TrimSpace(d.Path);d.Mountpoint=strings.TrimSpace(d.Mountpoint)
   if d.Name==""||d.Path==""{writeJSONStatus(w,400,map[string]any{"error":fmt.Sprintf("第 %d 块磁盘：名称和路径都不能为空",i+1)});return}
@@ -890,7 +1231,7 @@ func(a *WebAPI)config(w http.ResponseWriter,r *http.Request) {
   aliases:=task.Aliases;if aliases==nil{aliases=[]string{}}
   tags:=task.Tags;if tags==nil{tags=[]string{}}
   items:=scenes[i]["tasks"].([]map[string]any)
-  items=append(items,map[string]any{"name":task.Name,"count":task.TargetCount,"aliases":aliases,"dir":task.Dir,"tags":tags})
+  items=append(items,map[string]any{"name":task.Name,"count":task.TargetCount,"target_hours":task.TargetHours,"aliases":aliases,"dir":task.Dir,"tags":tags})
   scenes[i]["tasks"]=items
  }
  _,running,_:=a.activeDownloader()
@@ -950,16 +1291,17 @@ func(a *App)unregisterProcess(){if a.db!=nil&&a.processCreated>0{_,_=a.db.Exec("
 func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
  var body struct{Mode string `json:"mode"`;MaxRounds int `json:"max_rounds"`;RecheckMissing bool `json:"recheck_missing"`}
  if err:=json.NewDecoder(io.LimitReader(r.Body,4096)).Decode(&body);err!=nil&&err!=io.EOF{writeJSONStatus(w,400,map[string]any{"error":"请求 JSON 无效"});return}
- if body.Mode==""{body.Mode="download"};if body.Mode!="download"{writeJSONStatus(w,400,map[string]any{"error":"当前 Go Web API 只支持 download 模式"});return}
+ if body.Mode==""{body.Mode=a.mode};if body.Mode!="count"&&body.Mode!="duration"{writeJSONStatus(w,400,map[string]any{"error":"mode 只能是 count 或 duration"});return}
  if body.MaxRounds==0{body.MaxRounds=a.cfg.DefaultRounds;if body.MaxRounds<=0{body.MaxRounds=1}};if body.MaxRounds<1||body.MaxRounds>50{writeJSONStatus(w,400,map[string]any{"error":"补齐轮数范围 1–50"});return}
  validatedConfig:=a.cfg
- if err:=validatedConfig.normalize(a.mode);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"配置未完成："+err.Error()});return}
+ validatedConfig.Mode=body.Mode
+ if err:=validatedConfig.normalize(body.Mode);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"配置未完成："+err.Error()});return}
  a.runMu.Lock();defer a.runMu.Unlock()
  if pid,running,_:=a.activeDownloader();running{writeJSONStatus(w,409,map[string]any{"error":fmt.Sprintf("下载器已在运行（PID %d）",pid)});return}
  executable,err:=os.Executable();if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"定位下载器程序失败: "+err.Error()});return}
  if err:=clearStopRequestDB(a.cfg.StateDB);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"清理旧暂停请求失败: "+err.Error()});return}
  dbName,err:=filepath.Abs(a.cfg.StateDB);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"解析 SQLite 路径失败: "+err.Error()});return}
- args:=[]string{"--worker","--db",dbName,"--mode",a.mode,"--max-rounds",strconv.Itoa(body.MaxRounds),"--preserve-stop-request"};if body.RecheckMissing{args=append(args,"--recheck-missing")}
+ args:=[]string{"--worker","--db",dbName,"--mode",body.Mode,"--max-rounds",strconv.Itoa(body.MaxRounds),"--preserve-stop-request"};if body.RecheckMissing{args=append(args,"--recheck-missing")}
  cmd:=exec.Command(executable,args...);configureDetached(cmd);cmd.Stdout=io.Discard;cmd.Stderr=io.Discard;cmd.Stdin=nil
  if err=cmd.Start();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"启动下载器失败: "+err.Error()});return}
  go func(){_=cmd.Wait()}();created:=float64(0);if proc,e:=process.NewProcess(int32(cmd.Process.Pid));e==nil{if ms,e:=proc.CreateTime();e==nil{created=float64(ms)/1000}};a.setChildProcess(int32(cmd.Process.Pid),created)
@@ -981,6 +1323,66 @@ func(a *WebAPI)episodes(w http.ResponseWriter,r *http.Request){
  episodes:=[]map[string]any{};for rows.Next(){var id,status string;var errText,parent,updated sql.NullString;if rows.Scan(&id,&status,&errText,&parent,&updated)==nil{episodes=append(episodes,map[string]any{"episode_id":id,"status":status,"error":errText.String,"parent_key":parent.String,"updated_at":updated.String})}}
  writeJSON(w,map[string]any{"episodes":episodes})
 }
+func(a *WebAPI)runEpisodes(w http.ResponseWriter,r *http.Request){
+ runID:=strings.TrimSpace(r.PathValue("id"));if runID==""{writeJSONStatus(w,400,map[string]any{"error":"run_id 不能为空"});return}
+ limit,err:=strconv.Atoi(r.URL.Query().Get("limit"));if err!=nil||limit<=0{limit=100};if limit>200{limit=200}
+ offset,err:=strconv.Atoi(r.URL.Query().Get("offset"));if err!=nil||offset<0{offset=0}
+ task:=strings.TrimSpace(r.URL.Query().Get("task"));status:=strings.TrimSpace(r.URL.Query().Get("status"));category:=strings.TrimSpace(r.URL.Query().Get("category"))
+ allowedCategories:=map[string]bool{"network":true,"disk_space":true,"not_found":true,"permission":true,"integrity":true,"other":true,"paused":true}
+ if category!=""&&!allowedCategories[category]{writeJSONStatus(w,400,map[string]any{"error":"不支持的失败分类"});return}
+ clauses:=[]string{"run_id=?"};args:=[]any{runID};if task!=""{clauses=append(clauses,"task_name=?");args=append(args,task)};if status!=""{clauses=append(clauses,"status=?");args=append(args,status)};if category!=""{clauses=append(clauses,"failure_category=?");args=append(args,category)}
+ where:=strings.Join(clauses," AND ");var total int
+ if err:=a.db.QueryRow("SELECT COUNT(*) FROM run_episode_history WHERE "+where,args...).Scan(&total);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取运行 Episode 数量失败"});return}
+ args=append(args,limit,offset);rows,err:=a.db.Query("SELECT episode_id,task_name,status,COALESCE(error,''),COALESCE(failure_category,''),COALESCE(disk_name,''),completed_bytes,content_seconds,updated_at FROM run_episode_history WHERE "+where+" ORDER BY updated_at DESC,episode_id LIMIT ? OFFSET ?",args...)
+ if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取运行 Episode 明细失败"});return};defer rows.Close()
+ items:=[]map[string]any{};for rows.Next(){var id,name,state,detail,category,diskName,updated string;var bytes int64;var seconds float64;if rows.Scan(&id,&name,&state,&detail,&category,&diskName,&bytes,&seconds,&updated)==nil{items=append(items,map[string]any{"episode_id":id,"task_name":name,"status":state,"error":detail,"failure_category":category,"disk_name":diskName,"completed_bytes":bytes,"content_seconds":seconds,"updated_at":updated})}}
+ if err:=rows.Err();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取运行 Episode 明细失败"});return};if err:=rows.Close();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"关闭运行 Episode 明细查询失败"});return}
+ categoryCounts:=map[string]int{}
+ categoryRows,categoryErr:=a.db.Query("SELECT COALESCE(failure_category,''),COUNT(*) FROM run_episode_history WHERE "+where+" AND status='failed' GROUP BY failure_category",args[:len(args)-2]...)
+ if categoryErr==nil{for categoryRows.Next(){var category string;var count int;if categoryRows.Scan(&category,&count)==nil{categoryCounts[category]=count}};categoryRows.Close()}
+ writeJSON(w,map[string]any{"run_id":runID,"total":total,"limit":limit,"offset":offset,"episodes":items,"failure_categories":categoryCounts})
+}
+
+func csvSafeCell(value string) string {
+ if value=="" { return value }
+ switch value[0] { case '=', '+', '-', '@', '\t', '\r': return "'"+value }
+ return value
+}
+func(a *WebAPI)exportRunCSV(w http.ResponseWriter,r *http.Request){
+ runID:=strings.TrimSpace(r.PathValue("id"));if runID==""{http.Error(w,"run_id 不能为空",http.StatusBadRequest);return}
+ task:=strings.TrimSpace(r.URL.Query().Get("task"));status:=strings.TrimSpace(r.URL.Query().Get("status"));category:=strings.TrimSpace(r.URL.Query().Get("category"))
+ allowedCategories:=map[string]bool{"network":true,"disk_space":true,"not_found":true,"permission":true,"integrity":true,"other":true,"paused":true}
+ if category!=""&&!allowedCategories[category]{http.Error(w,"不支持的失败分类",http.StatusBadRequest);return}
+ if status!=""&&status!="completed"&&status!="failed"&&status!="paused"{http.Error(w,"不支持的 Episode 状态",http.StatusBadRequest);return}
+ taskRecords:=[][]string{}
+ taskQuery:="SELECT task_name,completed_count,failed_count,completed_bytes,content_seconds,wait_seconds,duration_seconds FROM run_task_history WHERE run_id=?";taskArgs:=[]any{runID}
+ if task!=""{taskQuery+=" AND task_name=?";taskArgs=append(taskArgs,task)}
+ taskRows,err:=a.db.Query(taskQuery+" ORDER BY task_name",taskArgs...);if err!=nil{http.Error(w,"读取运行任务统计失败",http.StatusInternalServerError);return}
+ for taskRows.Next(){var name string;var success,failed,bytes int64;var seconds,waitSeconds,durationSeconds float64
+  if err=taskRows.Scan(&name,&success,&failed,&bytes,&seconds,&waitSeconds,&durationSeconds);err!=nil{taskRows.Close();http.Error(w,"读取运行任务统计失败",http.StatusInternalServerError);return}
+  attempts:=success+failed;rate:="";if attempts>0{rate=strconv.FormatFloat(float64(success)*100/float64(attempts),'f',1,64)+"%"}
+  throughput:=float64(0);if durationSeconds>0{throughput=float64(bytes)/durationSeconds};taskRecords=append(taskRecords,[]string{"task_summary",runID,name,"","","","",strconv.FormatInt(success,10),strconv.FormatInt(failed,10),rate,strconv.FormatInt(bytes,10),strconv.FormatFloat(seconds,'f',2,64),strconv.FormatFloat(waitSeconds,'f',2,64),strconv.FormatFloat(durationSeconds,'f',2,64),strconv.FormatFloat(throughput,'f',2,64),"",""})
+ }
+ if err=taskRows.Err();err!=nil{taskRows.Close();http.Error(w,"读取运行任务统计失败",http.StatusInternalServerError);return};if err=taskRows.Close();err!=nil{http.Error(w,"关闭运行任务统计查询失败",http.StatusInternalServerError);return}
+ clauses:=[]string{"run_id=?"};args:=[]any{runID}
+ if task!=""{clauses=append(clauses,"task_name=?");args=append(args,task)}
+ if status!=""{clauses=append(clauses,"status=?");args=append(args,status)}
+ if category!=""{clauses=append(clauses,"failure_category=?");args=append(args,category)}
+ query:="SELECT episode_id,task_name,status,COALESCE(failure_category,''),COALESCE(disk_name,''),completed_bytes,content_seconds,COALESCE(error,''),updated_at FROM run_episode_history WHERE "+strings.Join(clauses," AND ")+" ORDER BY updated_at,episode_id"
+ rows,err:=a.db.Query(query,args...);if err!=nil{http.Error(w,"读取运行 Episode 明细失败",http.StatusInternalServerError);return};defer rows.Close()
+ safeID:=strings.Map(func(ch rune)rune{if ch>='a'&&ch<='z'||ch>='A'&&ch<='Z'||ch>='0'&&ch<='9'||ch=='-'||ch=='_'{return ch};return -1},runID);if safeID==""{safeID="run"}
+ w.Header().Set("Content-Type","text/csv; charset=utf-8");w.Header().Set("Content-Disposition",fmt.Sprintf("attachment; filename=\"run-%s-episodes.csv\"",safeID))
+ _,_=w.Write([]byte{0xef,0xbb,0xbf});writer:=csv.NewWriter(w)
+ if err=writer.Write([]string{"记录类型","运行 ID","任务","Episode ID","状态","失败分类","磁盘","成功数量","失败尝试数","成功率","完成字节","内容秒数","等待秒数","运行秒数","平均字节每秒","错误详情","更新时间"});err!=nil{return}
+ for _,record:=range taskRecords{for i:=range record{record[i]=csvSafeCell(record[i])};if err=writer.Write(record);err!=nil{return}}
+ for rows.Next(){var id,name,state,category,diskName,detail,updated string;var bytes int64;var seconds float64
+  if err=rows.Scan(&id,&name,&state,&category,&diskName,&bytes,&seconds,&detail,&updated);err!=nil{return}
+  record:=[]string{"episode",runID,name,id,state,category,diskName,"","","",strconv.FormatInt(bytes,10),strconv.FormatFloat(seconds,'f',2,64),"","","",detail,updated};for i:=range record{record[i]=csvSafeCell(record[i])}
+  if err=writer.Write(record);err!=nil{return}
+ }
+ if err=rows.Err();err!=nil{return};writer.Flush()
+}
+
 func(a *WebAPI)logs(w http.ResponseWriter,r *http.Request){
  offset,err:=strconv.ParseInt(r.URL.Query().Get("offset"),10,64);initial:=err!=nil||offset<=0
  if initial{offset=0}
@@ -995,8 +1397,7 @@ func(a *WebAPI)logs(w http.ResponseWriter,r *http.Request){
 
 func loadConfigDB(c *Config,runMode string)error{
  if strings.TrimSpace(c.ConfigDB)==""{return nil}
- if runMode!="count"{return errors.New("config_db 当前只支持 count 模式；duration 模式请使用独立 JSON 任务目标")}
- db,err:=sql.Open("sqlite",c.ConfigDB);if err!=nil{return err};defer db.Close();db.SetMaxOpenConns(1)
+  db,err:=sql.Open("sqlite",c.ConfigDB);if err!=nil{return err};defer db.Close();db.SetMaxOpenConns(1)
  settings:=map[string]string{}
  rows,err:=db.Query("SELECT key,value FROM settings");if err!=nil{return err}
  for rows.Next(){var key,value string;if err=rows.Scan(&key,&value);err!=nil{rows.Close();return err};settings[key]=value};if err=rows.Err();err!=nil{rows.Close();return err};if err=rows.Close();err!=nil{return err}
@@ -1014,10 +1415,10 @@ func loadConfigDB(c *Config,runMode string)error{
  // Read and close aliases before opening taskRows. The database is intentionally
  // limited to one connection; keeping taskRows open here would block Query below.
  aliases:=map[int64][]string{};aliasRows,err:=db.Query("SELECT task_id,alias FROM task_aliases ORDER BY task_id,position");if err!=nil{return err};for aliasRows.Next(){var id int64;var alias string;if err=aliasRows.Scan(&id,&alias);err!=nil{aliasRows.Close();return err};aliases[id]=append(aliases[id],alias)};if err=aliasRows.Err();err!=nil{aliasRows.Close();return err};if err=aliasRows.Close();err!=nil{return err}
- taskRows,err:=db.Query("SELECT s.name,t.name,t.target_count,t.directory,t.id,t.tags FROM tasks t JOIN scenes s ON s.id=t.scene_id ORDER BY s.position,t.position");if err!=nil{return err}
- tasks:=[]Task{};for taskRows.Next(){var t Task;var id int64;var tags string;if err=taskRows.Scan(&t.Scene,&t.Name,&t.TargetCount,&t.Dir,&id,&tags);err!=nil{taskRows.Close();return err};t.Aliases=aliases[id];if tags!=""{_ = json.Unmarshal([]byte(tags),&t.Tags)};tasks=append(tasks,t)};if err=taskRows.Err();err!=nil{taskRows.Close();return err};if err=taskRows.Close();err!=nil{return err};c.Tasks=tasks
+ taskRows,err:=db.Query("SELECT s.name,t.name,t.target_count,t.target_hours,t.directory,t.id,t.tags FROM tasks t JOIN scenes s ON s.id=t.scene_id ORDER BY s.position,t.position");if err!=nil{return err}
+ tasks:=[]Task{};for taskRows.Next(){var t Task;var id int64;var tags string;if err=taskRows.Scan(&t.Scene,&t.Name,&t.TargetCount,&t.TargetHours,&t.Dir,&id,&tags);err!=nil{taskRows.Close();return err};t.Aliases=aliases[id];if tags!=""{_ = json.Unmarshal([]byte(tags),&t.Tags)};tasks=append(tasks,t)};if err=taskRows.Err();err!=nil{taskRows.Close();return err};if err=taskRows.Close();err!=nil{return err};c.Tasks=tasks
  diskRows,err:=db.Query("SELECT name,path,mountpoint FROM disks ORDER BY position");if err!=nil{return err};disks:=[]DiskConfig{};for diskRows.Next(){var d DiskConfig;if err=diskRows.Scan(&d.Name,&d.Path,&d.Mountpoint);err!=nil{diskRows.Close();return err};disks=append(disks,d)};if err=diskRows.Err();err!=nil{diskRows.Close();return err};if err=diskRows.Close();err!=nil{return err};c.Disks=disks
- c.Mode="count";c.fromConfigDB=true;log.Printf("已从 SQLite 配置库加载配置: %s（任务 %d 个，磁盘 %d 块）",c.ConfigDB,len(c.Tasks),len(c.Disks));return nil
+ c.fromConfigDB=true;log.Printf("已从 SQLite 配置库加载配置: %s（任务 %d 个，磁盘 %d 块）",c.ConfigDB,len(c.Tasks),len(c.Disks));return nil
 }
 func(c *Config)normalize(m string)error{
  if c.Mode!=""&&c.Mode!=m{return fmt.Errorf("配置文件 mode=%s 与命令行 --mode=%s 不一致",c.Mode,m)}
@@ -1089,11 +1490,15 @@ func requestStop(c Config) error {
  return writeStopRequest(db)
 }
 func(a *App)saveLastRun(result string,runErr error){
- payload:=map[string]any{"result":result,"at":controlTimestamp(),"mode":a.mode}
- if runErr!=nil{payload["error"]=runErr.Error()}
+ finished:=time.Now().UTC();finishedAt:=finished.Format(time.RFC3339Nano);startedAt:=a.runStartedAt.UTC().Format(time.RFC3339Nano);elapsed:=finished.Sub(a.runStartedAt).Seconds();if a.runStartedAt.IsZero(){a.runStartedAt=finished;startedAt=finishedAt;elapsed=0}
+ var completedCount,completedBytes int64;var contentSeconds float64
+ if a.runID!=""{_=a.db.QueryRow("SELECT COALESCE(SUM(completed_count),0),COALESCE(SUM(completed_bytes),0),COALESCE(SUM(content_seconds),0) FROM run_task_history WHERE run_id=?",a.runID).Scan(&completedCount,&completedBytes,&contentSeconds)}
+ payload:=map[string]any{"result":result,"at":finishedAt,"started_at":startedAt,"duration_seconds":math.Round(elapsed*100)/100,"mode":a.mode,"completed_count":completedCount,"completed_bytes":completedBytes,"content_seconds":contentSeconds}
+ errorText:="";if runErr!=nil{errorText=runErr.Error();payload["error"]=errorText}
  raw,err:=json.Marshal(payload);if err!=nil{log.Printf("保存上次运行结果失败: %v",err);return}
- _,err=a.db.Exec("INSERT INTO control(key,value,updated_at) VALUES('last_run',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",string(raw),controlTimestamp())
+ _,err=a.db.Exec("INSERT INTO control(key,value,updated_at) VALUES('last_run',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",string(raw),finishedAt)
  if err!=nil{log.Printf("保存上次运行结果失败: %v",err)}
+ if a.runID!=""{_,err=a.db.Exec("INSERT INTO run_history(run_id,started_at,finished_at,duration_seconds,mode,result,completed_count,completed_bytes,content_seconds,error) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET finished_at=excluded.finished_at,duration_seconds=excluded.duration_seconds,result=excluded.result,completed_count=excluded.completed_count,completed_bytes=excluded.completed_bytes,content_seconds=excluded.content_seconds,error=excluded.error",a.runID,startedAt,finishedAt,elapsed,a.mode,result,completedCount,completedBytes,contentSeconds,nullable(errorText));if err!=nil{log.Printf("保存运行历史失败: %v",err)}}
 }
 func(a *App)clearStopRequest()error{
  _,err:=a.db.Exec("DELETE FROM control WHERE key='stop_requested'")
@@ -1145,15 +1550,18 @@ func(a *App)open()error{
  ok,e:=mc.BucketExists(ctx,a.cfg.Bucket);if e!=nil{return e};if !ok{return fmt.Errorf("MinIO bucket 不存在: %s",a.cfg.Bucket)}
  a.db,e=sql.Open("sqlite",a.cfg.StateDB);if e!=nil{return e};a.db.SetMaxOpenConns(1)
  _,e=a.db.Exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA busy_timeout=30000;"+
- "CREATE TABLE IF NOT EXISTS downloads(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,parent_key TEXT,disk_name TEXT,target_path TEXT,partial_path TEXT,expected_bytes INTEGER,status TEXT NOT NULL DEFAULT 'pending',error TEXT,updated_at TEXT NOT NULL);"+
+ "CREATE TABLE IF NOT EXISTS downloads(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,parent_key TEXT,disk_name TEXT,target_path TEXT,partial_path TEXT,expected_bytes INTEGER,status TEXT NOT NULL DEFAULT 'pending',error TEXT,updated_at TEXT NOT NULL,started_at TEXT,completed_at TEXT);"+
  "CREATE INDEX IF NOT EXISTS idx_download_task_status ON downloads(task_name,status);"+
  "CREATE TABLE IF NOT EXISTS task_disk_assignments(task_name TEXT NOT NULL,disk_name TEXT NOT NULL,last_used_at TEXT NOT NULL,PRIMARY KEY(task_name,disk_name));"+
  "CREATE TABLE IF NOT EXISTS downloaded_episodes(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,source_task_name TEXT,job_id INTEGER,sn_code TEXT,parent_key TEXT,disk_name TEXT,target_path TEXT,file_size INTEGER,content_time REAL,create_time TEXT,downloaded_at TEXT NOT NULL);"+
  "CREATE INDEX IF NOT EXISTS idx_downloaded_task ON downloaded_episodes(task_name);"+
- "CREATE TABLE IF NOT EXISTS control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL);")
+ "CREATE TABLE IF NOT EXISTS control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL);"+
+ "CREATE TABLE IF NOT EXISTS run_history(run_id TEXT PRIMARY KEY,started_at TEXT NOT NULL,finished_at TEXT NOT NULL,duration_seconds REAL NOT NULL,mode TEXT NOT NULL,result TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,error TEXT);"+
+  "CREATE TABLE IF NOT EXISTS run_task_history(run_id TEXT NOT NULL,task_name TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,failed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,wait_seconds REAL NOT NULL DEFAULT 0,duration_seconds REAL NOT NULL DEFAULT 0,PRIMARY KEY(run_id,task_name));CREATE TABLE IF NOT EXISTS run_disk_history(run_id TEXT NOT NULL,disk_name TEXT NOT NULL,duration_seconds REAL NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(run_id,disk_name));"+
+  "CREATE TABLE IF NOT EXISTS run_episode_history(run_id TEXT NOT NULL,episode_id TEXT NOT NULL,task_name TEXT NOT NULL,status TEXT NOT NULL,error TEXT,disk_name TEXT,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,failure_category TEXT NOT NULL DEFAULT '',PRIMARY KEY(run_id,episode_id));"+
+  "CREATE INDEX IF NOT EXISTS idx_run_episode_lookup ON run_episode_history(run_id,task_name,status,updated_at);"+
+ "CREATE INDEX IF NOT EXISTS idx_run_history_started ON run_history(started_at);")
  if e==nil{
-  if e=ensureColumn(a.db,"downloads","started_at","TEXT");e!=nil{return e}
-  if e=ensureColumn(a.db,"downloads","completed_at","TEXT");e!=nil{return e}
   if _,e=a.db.Exec("CREATE TABLE IF NOT EXISTS runtime_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,message TEXT NOT NULL); CREATE TABLE IF NOT EXISTS process_state(id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,created REAL NOT NULL,mode TEXT NOT NULL,updated_at TEXT NOT NULL)");e!=nil{return e}
   log.Printf("MinIO=%s bucket=%s；PostgreSQL=%s:%d/%s；SQLite=%s",a.cfg.Endpoint,a.cfg.Bucket,a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.StateDB)
  };return e
@@ -1187,6 +1595,15 @@ func (a *App) record(e Episode, d DiskConfig, final string) error {
 	return recordWithExec(a.db, e, d, final)
 }
 
+func (a *App) recordAndSetForRun(e Episode,d DiskConfig,final string)error{
+ if err:=a.recordAndSet(e,d,final);err!=nil{return err}
+ if a.runID==""{return nil}
+ now:=time.Now().UTC().Format(time.RFC3339Nano)
+ if _,err:=a.db.Exec("INSERT INTO run_task_history(run_id,task_name,completed_count,completed_bytes,content_seconds) VALUES(?,?,1,?,?) ON CONFLICT(run_id,task_name) DO UPDATE SET completed_count=completed_count+1,completed_bytes=completed_bytes+excluded.completed_bytes,content_seconds=content_seconds+excluded.content_seconds",a.runID,e.Task,e.Size,e.Duration);err!=nil{return fmt.Errorf("保存本次任务统计失败: %w",err)}
+ if _,err:=a.db.Exec("INSERT INTO run_episode_history(run_id,episode_id,task_name,status,disk_name,completed_bytes,content_seconds,updated_at) VALUES(?,?,?,'completed',?,?,?,?) ON CONFLICT(run_id,episode_id) DO UPDATE SET task_name=excluded.task_name,status=excluded.status,error=NULL,disk_name=excluded.disk_name,completed_bytes=excluded.completed_bytes,content_seconds=excluded.content_seconds,updated_at=excluded.updated_at",a.runID,e.ID,e.Task,d.Name,e.Size,e.Duration,now);err!=nil{return fmt.Errorf("保存本次 Episode 明细失败: %w",err)}
+ return nil
+}
+
 func (a *App) recordAndSet(e Episode, d DiskConfig, final string) error {
 	tx, err := a.db.Begin()
 	if err != nil {
@@ -1205,14 +1622,6 @@ func (a *App) recordAndSet(e Episode, d DiskConfig, final string) error {
 	return nil
 }
 func nullableTime(ok bool,v string)any{if ok{return v};return nil}
-func ensureColumn(db *sql.DB,table,column,typ string)error{
- rows,err:=db.Query("PRAGMA table_info("+table+")");if err!=nil{return err}
- found:=false
- for rows.Next(){var cid,notnull,pk int;var name,kind string;var def sql.NullString;if err=rows.Scan(&cid,&name,&kind,&notnull,&def,&pk);err!=nil{rows.Close();return err};if name==column{found=true}}
- if err=rows.Err();err!=nil{rows.Close();return err};if err=rows.Close();err!=nil{return err}
- if !found{_,err=db.Exec("ALTER TABLE "+table+" ADD COLUMN "+column+" "+typ)}
- return err
-}
 func nullable(s string)any{if s==""{return nil};return s}
 func completedEpisodeDir(dir string,requireMCAP bool,mcapPattern string)bool{
  info,err:=os.Lstat(dir)
@@ -1430,7 +1839,7 @@ func(a *App)run(all []Episode,nround int)error{
   if e:=a.downloadSelected(selected);e!=nil{return e};log.Printf("第 %d 轮结束",r)
  };return nil
 }
-type batch struct{t Task;d DiskConfig;rows []Episode}
+type batch struct{t Task;d DiskConfig;rows []Episode;queuedAt time.Time}
 func findExistingTaskDisk(version string,t Task,disks []DiskConfig,rows []Episode,requireMCAP bool,mcapPattern string)(string,error){
  found:=""
  for _,ep:=range rows{
@@ -1615,12 +2024,12 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
   }
   reservedBytes[d.Name]+=estimated
   if err:=a.assign(task.Name,d.Name);err!=nil{return fmt.Errorf("保存任务磁盘分配失败 %s: %w",task.Name,err)}
-  byDisk[d.Name]=append(byDisk[d.Name],batch{task,*d,rows})
+  byDisk[d.Name]=append(byDisk[d.Name],batch{t:task,d:*d,rows:rows,queuedAt:time.Now()})
  }
  var wg sync.WaitGroup;errs:=make(chan error,len(byDisk))
- for _,batches:=range byDisk{
-  batches:=batches;wg.Add(1)
-  go func(){defer wg.Done();for _,b:=range batches{if a.ctx.Err()!=nil{return};if err:=a.downloadTask(b);err!=nil{errs<-err;return}}}()
+ for diskName,batches:=range byDisk{
+  diskName,batches:=diskName,batches;wg.Add(1)
+  go func(){started:=time.Now();defer wg.Done();defer func(){if err:=a.recordRunDiskTiming(diskName,time.Since(started).Seconds());err!=nil{log.Printf("保存磁盘运行统计失败 %s: %v",diskName,err)}}();for _,b:=range batches{if a.ctx.Err()!=nil{return};if err:=a.downloadTask(b);err!=nil{errs<-err;return}}}()
  }
  wg.Wait();close(errs)
  for err:=range errs{if err!=nil{return err}}
@@ -1630,7 +2039,21 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
 func acquireSemaphore(ctx context.Context,sem chan struct{})bool{
  select{case sem<-struct{}{}:return true;case <-ctx.Done():return false}
 }
+func(a *App)recordRunTaskTiming(taskName string,waitSeconds,durationSeconds float64)error{
+ if a.runID==""{return nil}
+ _,err:=a.db.Exec("INSERT INTO run_task_history(run_id,task_name,wait_seconds,duration_seconds) VALUES(?,?,?,?) ON CONFLICT(run_id,task_name) DO UPDATE SET wait_seconds=run_task_history.wait_seconds+excluded.wait_seconds,duration_seconds=run_task_history.duration_seconds+excluded.duration_seconds",a.runID,taskName,waitSeconds,durationSeconds)
+ return err
+}
+func(a *App)recordRunDiskTiming(diskName string,durationSeconds float64)error{
+ if a.runID==""{return nil}
+ var bytes int64
+ if err:=a.db.QueryRow("SELECT COALESCE(SUM(completed_bytes),0) FROM run_episode_history WHERE run_id=? AND disk_name=? AND status='completed'",a.runID,diskName).Scan(&bytes);err!=nil{return err}
+ _,err:=a.db.Exec("INSERT INTO run_disk_history(run_id,disk_name,duration_seconds,completed_bytes) VALUES(?,?,?,?) ON CONFLICT(run_id,disk_name) DO UPDATE SET duration_seconds=run_disk_history.duration_seconds+excluded.duration_seconds,completed_bytes=MAX(run_disk_history.completed_bytes,excluded.completed_bytes)",a.runID,diskName,durationSeconds,bytes)
+ return err
+}
 func(a *App)downloadTask(b batch)error{
+ started:=time.Now();waitSeconds:=0.0;if !b.queuedAt.IsZero(){waitSeconds=math.Max(0,started.Sub(b.queuedAt).Seconds())}
+ defer func(){if err:=a.recordRunTaskTiming(b.t.Name,waitSeconds,time.Since(started).Seconds());err!=nil{log.Printf("保存任务耗时统计失败 %s: %v",b.t.Name,err)}}()
  sem:=make(chan struct{},a.cfg.Workers);var wg sync.WaitGroup;var mu sync.Mutex;var first error
  var stopStarting atomic.Bool
  for _,ep:=range b.rows{
@@ -1830,7 +2253,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  if a.ctx.Err()!=nil{return a.fail(e,d,final,partial,a.ctx.Err())}
  if completedObjects.Load()==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
  if err:=replaceEpisodeDirectory(partial,final);err!=nil{return a.fail(e,d,final,partial,err)};if *a.cfg.Fsync{syncDirectory(filepath.Dir(final))}
- return a.recordAndSet(e,d,final)
+ return a.recordAndSetForRun(e,d,final)
 }
 func sweepPartial(root,parent string,objects []minio.ObjectInfo)error{
  info,err:=os.Lstat(root);if err!=nil{return err};if info.Mode()&os.ModeSymlink!=0||!info.IsDir(){return fmt.Errorf("暂存路径不是普通目录: %s",root)}
@@ -2101,9 +2524,28 @@ func sameObjectVersion(expected,current minio.ObjectInfo)bool{
 func isMD5ETag(etag string)bool{v:=strings.Trim(etag,"\"");if len(v)!=32||strings.Contains(v,"-"){return false};_,err:=hex.DecodeString(v);return err==nil}
 func fileMD5(name string)(string,error){f,err:=os.Open(name);if err!=nil{return "",err};defer f.Close();h:=md5.New();if _,err=io.Copy(h,f);err!=nil{return "",err};return hex.EncodeToString(h.Sum(nil)),nil}
 func(a *App)fail(e Episode,d DiskConfig,final,partial string,err error)error{
- if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded){_=a.set(e,d,final,partial,"paused","已暂停，保留暂存文件供下次续传");return nil}
- _=a.set(e,d,final,partial,"failed",err.Error());log.Printf("下载失败 %s: %v",e.ID,err);return err
+ if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded){pauseText:="已暂停，保留暂存文件供下次续传";_=a.set(e,d,final,partial,"paused",pauseText);if a.runID!=""{now:=time.Now().UTC().Format(time.RFC3339Nano);if _,detailErr:=a.db.Exec("INSERT INTO run_episode_history(run_id,episode_id,task_name,status,error,updated_at,failure_category) VALUES(?,?,?,'paused',?,?, 'paused') ON CONFLICT(run_id,episode_id) DO UPDATE SET task_name=excluded.task_name,status=excluded.status,error=excluded.error,updated_at=excluded.updated_at,failure_category=excluded.failure_category",a.runID,e.ID,e.Task,pauseText,now);detailErr!=nil{log.Printf("保存本次 Episode 暂停明细失败: %v",detailErr)}};return nil}
+ _=a.set(e,d,final,partial,"failed",err.Error());if a.runID!=""{now:=time.Now().UTC().Format(time.RFC3339Nano);_,statsErr:=a.db.Exec("INSERT INTO run_task_history(run_id,task_name,failed_count) VALUES(?,?,1) ON CONFLICT(run_id,task_name) DO UPDATE SET failed_count=failed_count+1",a.runID,e.Task);if statsErr!=nil{log.Printf("保存本次任务失败统计失败: %v",statsErr)};_,detailErr:=a.db.Exec("INSERT INTO run_episode_history(run_id,episode_id,task_name,status,error,updated_at,failure_category) VALUES(?,?,?,'failed',?,?,?) ON CONFLICT(run_id,episode_id) DO UPDATE SET task_name=excluded.task_name,status=excluded.status,error=excluded.error,updated_at=excluded.updated_at,failure_category=excluded.failure_category",a.runID,e.ID,e.Task,err.Error(),now,classifyFailure(err));if detailErr!=nil{log.Printf("保存本次 Episode 失败明细失败: %v",detailErr)}};log.Printf("下载失败 %s: %v",e.ID,err);return err
 }
+func classifyFailure(err error) string {
+ if err == nil { return "" }
+ message := strings.ToLower(err.Error())
+ switch {
+ case strings.Contains(message, "no space left"), strings.Contains(message, "disk full"), strings.Contains(message, "not enough space"), strings.Contains(message, "insufficient space"):
+  return "disk_space"
+ case strings.Contains(message, "permission denied"), strings.Contains(message, "access denied"), strings.Contains(message, "status code: 403"), strings.Contains(message, "http 403"):
+  return "permission"
+ case strings.Contains(message, "nosuchkey"), strings.Contains(message, "no such key"), strings.Contains(message, "does not exist"), strings.Contains(message, "not found"), strings.Contains(message, "status code: 404"), strings.Contains(message, "http 404"):
+  return "not_found"
+ case strings.Contains(message, "checksum"), strings.Contains(message, "hash mismatch"), strings.Contains(message, "size mismatch"), strings.Contains(message, "corrupt"), strings.Contains(message, "unexpected eof"):
+  return "integrity"
+ case strings.Contains(message, "timeout"), strings.Contains(message, "connection reset"), strings.Contains(message, "connection refused"), strings.Contains(message, "i/o timeout"), strings.Contains(message, "no such host"), strings.Contains(message, "tls"), strings.Contains(message, "broken pipe"), strings.Contains(message, "network"):
+  return "network"
+ default:
+  return "other"
+ }
+}
+
 func (a *App) markCleanupPending(episodeID string) error {
  tx, err := a.db.Begin()
  if err != nil {
