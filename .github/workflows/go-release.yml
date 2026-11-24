@@ -4,6 +4,8 @@ on:
   push:
     branches: ["main", "feature/go-downloader", "feature/sqlite-web-first-run", "feature/plan-diff-resolution"]
     tags: ["go-v*", "v*"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
