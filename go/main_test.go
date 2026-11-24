@@ -1910,4 +1910,10 @@ func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
  invalidReq:=httptest.NewRequest("GET","/api/runs/run-1/episodes?category=unknown",nil);invalidReq.SetPathValue("id","run-1")
  invalidResponse:=httptest.NewRecorder();api.runEpisodes(invalidResponse,invalidReq)
  if invalidResponse.Code!=http.StatusBadRequest{t.Fatalf("invalid category should return 400, got %d",invalidResponse.Code)}
+ exportReq:=httptest.NewRequest("GET","/api/runs/run-1/export.csv?task=scene-task&status=failed&category=other",nil);exportReq.SetPathValue("id","run-1")
+ exportResponse:=httptest.NewRecorder();api.exportRunCSV(exportResponse,exportReq)
+ if exportResponse.Code!=http.StatusOK{t.Fatalf("CSV export status=%d body=%s",exportResponse.Code,exportResponse.Body.String())}
+ if !strings.Contains(exportResponse.Header().Get("Content-Type"),"text/csv")||!strings.Contains(exportResponse.Header().Get("Content-Disposition"),"run-run-1-episodes.csv"){t.Fatalf("unexpected CSV headers: %#v",exportResponse.Header())}
+ csvBody:=exportResponse.Body.String();if !strings.Contains(csvBody,"episode-2")||strings.Contains(csvBody,"episode-1")||!strings.Contains(csvBody,"simulated failure"){t.Fatalf("CSV export did not honor filters: %q",csvBody)}
+ if csvSafeCell("=HYPERLINK(1)")!="'=HYPERLINK(1)"||csvSafeCell("normal")!="normal"{t.Fatal("CSV formula injection protection failed")}
 }
