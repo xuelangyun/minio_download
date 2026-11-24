@@ -408,25 +408,26 @@ input[type=file]{max-width:260px;color:var(--muted);font-size:12px}
 <script>
 let configData=null,statusData=null,logOffset=0,refreshTimer=null,diskMounts=[];
 const $=id=>document.getElementById(id);
-async function loadRunEpisodeDetails(el,offset){
+async function loadRunEpisodeDetails(el,offset,filters){
  const root=el.querySelector(".run-episode-results");if(!root)return;
- offset=Number(offset||0);root.dataset.loading="1";
- if(offset===0)root.textContent="正在读取...";
+ offset=Number(offset||0);filters=filters||{status:"",category:""};
+ root.dataset.loading="1";
+ if(offset===0)root.innerHTML='<div class="run-episode-filters"><label>状态 <select class="run-filter-status"><option value="">全部</option><option value="completed">成功</option><option value="failed">失败</option><option value="paused">暂停</option></select></label><label>失败分类 <select class="run-filter-category"><option value="">全部</option><option value="network">网络</option><option value="disk_space">磁盘空间</option><option value="not_found">对象不存在</option><option value="permission">权限</option><option value="integrity">完整性</option><option value="other">其他</option></select></label><button type="button" class="btn secondary run-filter-apply">筛选</button></div><div class="muted run-episode-count"></div><div class="muted run-failure-summary"></div><table class="history-table"><thead><tr><th>Episode ID</th><th>状态</th><th>失败分类</th><th>磁盘</th><th>容量</th><th>内容时长</th><th>错误</th></tr></thead><tbody></tbody></table><button type="button" class="btn secondary run-episode-more">加载更多</button>';
+ if(offset===0){root.querySelector(".run-filter-status").value=filters.status;root.querySelector(".run-filter-category").value=filters.category;root.querySelector(".run-filter-apply").onclick=()=>loadRunEpisodeDetails(el,0,{status:root.querySelector(".run-filter-status").value,category:root.querySelector(".run-filter-category").value})}
  try{
   const q=new URLSearchParams({task:el.dataset.task,limit:"100",offset:String(offset)});
+  if(filters.status)q.set("status",filters.status);if(filters.category)q.set("category",filters.category);
   const data=await api("/api/runs/"+encodeURIComponent(el.dataset.runId)+"/episodes?"+q.toString());
   const items=data.episodes||[],total=Number(data.total||0);
-  if(offset===0)root.innerHTML='<div class="muted run-episode-count"></div><div class="muted run-failure-summary"></div><table class="history-table"><thead><tr><th>Episode ID</th><th>状态</th><th>失败分类</th><th>磁盘</th><th>容量</th><th>内容时长</th><th>错误</th></tr></thead><tbody></tbody></table><button type="button" class="btn secondary run-episode-more">加载更多</button>';
   const count=root.querySelector(".run-episode-count"),summary=root.querySelector(".run-failure-summary"),body=root.querySelector("tbody"),more=root.querySelector(".run-episode-more");
   const categoryNames={network:"网络",disk_space:"磁盘空间",not_found:"对象不存在",permission:"权限",integrity:"完整性",other:"其他"};
   const categoryItems=Object.entries(data.failure_categories||{}).filter(([,n])=>Number(n)>0).map(([k,n])=>(categoryNames[k]||k)+" "+n+" 次");
   summary.textContent=categoryItems.length?"失败原因："+categoryItems.join(" / "):"暂无失败记录";
   body.insertAdjacentHTML("beforeend",items.map(v=>'<tr><td>'+esc(v.episode_id)+'</td><td>'+esc(({completed:"成功",failed:"失败",paused:"已暂停"}[v.status]||v.status))+'</td><td>'+esc(({network:"网络",disk_space:"磁盘空间",not_found:"对象不存在",permission:"权限",integrity:"完整性",other:"其他",paused:"暂停"}[v.failure_category]||"-"))+'</td><td>'+esc(v.disk_name||"-")+'</td><td>'+formatGiB(v.completed_bytes||0)+'</td><td>'+(Number(v.content_seconds||0)/60).toFixed(1)+' 分钟</td><td>'+esc(v.error||"-")+'</td></tr>').join(""));
-  const loaded=offset+items.length;count.textContent='共 '+total+' 条，已加载 '+loaded+' 条';
-  more.hidden=loaded>=total;more.textContent='加载更多';more.onclick=()=>loadRunEpisodeDetails(el,loaded);
-  if(!total)root.innerHTML='<div class="notice">该任务本次运行没有 Episode 明细。</div>';
-  el.dataset.loaded="1";
- }catch(err){root.textContent="读取失败："+err.message;el.dataset.loaded="";el.addEventListener("toggle",()=>{if(el.open&&!el.dataset.loaded)loadRunEpisodeDetails(el,0)},{once:true})}
+  const loaded=offset+items.length;count.textContent='共 '+total+' 条，已加载 '+loaded+' 条';more.hidden=loaded>=total;more.textContent='加载更多';more.onclick=()=>loadRunEpisodeDetails(el,loaded,filters);
+  if(!total){root.querySelector("table").hidden=true;more.hidden=true;count.textContent="共 0 条 Episode"}
+  el.dataset.loaded="1";el.dataset.filters=JSON.stringify(filters);
+ }catch(err){root.querySelector(".run-episode-count").textContent="读取失败："+err.message}
  finally{delete root.dataset.loading}
 }
 async function api(path,method,body){const headers={"Content-Type":"application/json"};const token=sessionStorage.getItem("minio_download_token");if(token)headers.Authorization="Bearer "+token;const response=await fetch(path,{method:method||"GET",headers,body:body===undefined?undefined:JSON.stringify(body)});const data=await response.json().catch(()=>({error:"服务器返回内容不是 JSON"}));if(!response.ok)throw new Error(data.error||("HTTP "+response.status));return data}
@@ -509,7 +510,7 @@ function renderStatus(d){
  const diskHistory=d.disk_history||[];
  $("disk-history").innerHTML=diskHistory.length?'<table class="history-table"><thead><tr><th>磁盘</th><th>完成数量</th><th>容量</th><th>内容时长</th></tr></thead><tbody>'+diskHistory.map(x=>'<tr><td>'+esc(x.disk_name||"未分配")+'</td><td>'+Number(x.count||0)+'</td><td>'+formatGiB(x.bytes||0)+'</td><td>'+(Number(x.seconds||0)/3600).toFixed(1)+' 小时</td></tr>').join("")+'</tbody></table>':'<div class="notice">暂无按磁盘汇总的完成记录。</div>';
  const runs=d.run_history||[];
- $("run-history").innerHTML=runs.length?'<h3>最近运行记录</h3><table class="history-table"><thead><tr><th>开始时间</th><th>结果</th><th>耗时</th><th>完成数量</th><th>容量</th><th>内容时长</th><th>任务明细</th></tr></thead><tbody>'+runs.map(x=>{const tasks=x.tasks||[];const details=tasks.length?'<details><summary>查看 '+tasks.length+' 个任务</summary><table class="history-table"><thead><tr><th>任务</th><th>成功</th><th>失败</th><th>容量</th><th>内容时长</th><th>Episode</th></tr></thead><tbody>'+tasks.map(t=>{const episodeDetails='<details class="run-episode-details" data-run-id="'+esc(x.run_id)+'" data-task="'+esc(t.task_name)+'"><summary>Episode 明细</summary><div class="run-episode-results muted">展开后加载明细</div></details>';return '<tr><td>'+esc(t.task_name)+'</td><td>'+Number(t.completed_count||0)+'</td><td>'+Number(t.failed_count||0)+'</td><td>'+formatGiB(t.completed_bytes||0)+'</td><td>'+(Number(t.content_seconds||0)/3600).toFixed(2)+' 小时</td><td>'+episodeDetails+'</td></tr>'}).join("")+'</tbody></table></details>':'<span class="muted">本次无新完成任务</span>';return '<tr><td>'+esc(x.started_at||"")+'</td><td>'+esc(({running:"运行中",finished:"已完成",paused:"已暂停",error:"失败",interrupted:"异常中断"}[x.result]||x.result))+'</td><td>'+((Number(x.duration_seconds)||0)/60).toFixed(1)+' 分钟</td><td>'+Number(x.completed_count||0)+'</td><td>'+formatGiB(x.completed_bytes||0)+'</td><td>'+(Number(x.content_seconds||0)/3600).toFixed(2)+' 小时</td><td>'+details+'</td></tr>'}).join("")+'</tbody></table>':'<div class="notice">暂无运行历史。</div>';
+ $("run-history").innerHTML=runs.length?'<h3>最近运行记录</h3><table class="history-table"><thead><tr><th>开始时间</th><th>结果</th><th>耗时</th><th>完成数量</th><th>容量</th><th>内容时长</th><th>任务明细</th></tr></thead><tbody>'+runs.map(x=>{const tasks=x.tasks||[];const details=tasks.length?'<details><summary>查看 '+tasks.length+' 个任务</summary><table class="history-table"><thead><tr><th>任务</th><th>成功</th><th>失败</th><th>成功率</th><th>容量</th><th>内容时长</th><th>Episode</th></tr></thead><tbody>'+tasks.map(t=>{const success=Number(t.completed_count||0),failed=Number(t.failed_count||0),attempts=success+failed,successRate=attempts?(success*100/attempts).toFixed(1)+"%":"-";const episodeDetails='<details class="run-episode-details" data-run-id="'+esc(x.run_id)+'" data-task="'+esc(t.task_name)+'"><summary>Episode 明细</summary><div class="run-episode-results muted">展开后加载明细</div></details>';return '<tr><td>'+esc(t.task_name)+'</td><td>'+success+'</td><td>'+failed+'</td><td>'+successRate+'</td><td>'+formatGiB(t.completed_bytes||0)+'</td><td>'+(Number(t.content_seconds||0)/3600).toFixed(2)+' 小时</td><td>'+episodeDetails+'</td></tr>'}).join("")+'</tbody></table></details>':'<span class="muted">本次无新完成任务</span>';return '<tr><td>'+esc(x.started_at||"")+'</td><td>'+esc(({running:"运行中",finished:"已完成",paused:"已暂停",error:"失败",interrupted:"异常中断"}[x.result]||x.result))+'</td><td>'+((Number(x.duration_seconds)||0)/60).toFixed(1)+' 分钟</td><td>'+Number(x.completed_count||0)+'</td><td>'+formatGiB(x.completed_bytes||0)+'</td><td>'+(Number(x.content_seconds||0)/3600).toFixed(2)+' 小时</td><td>'+details+'</td></tr>'}).join("")+'</tbody></table>':'<div class="notice">暂无运行历史。</div>';
  const failures=d.recent_failures||[];
  $("run-history").querySelectorAll(".run-episode-details").forEach(el=>{el.addEventListener("toggle",()=>{if(el.open&&!el.dataset.loaded)loadRunEpisodeDetails(el)}, {once:true})});
  $("recent-failures").innerHTML=failures.length?'<div class="failure-list"><strong>最近失败记录（最多 8 条）</strong>'+failures.map(x=>'<div class="failure-item">'+esc(x.task_name||"未知任务")+' · '+esc(x.episode_id||"")+' · '+esc(x.error||"未提供错误详情")+'</div>').join("")+'</div>':'<div class="notice">没有失败记录。</div>';
@@ -1303,8 +1304,10 @@ func(a *WebAPI)runEpisodes(w http.ResponseWriter,r *http.Request){
  runID:=strings.TrimSpace(r.PathValue("id"));if runID==""{writeJSONStatus(w,400,map[string]any{"error":"run_id 不能为空"});return}
  limit,err:=strconv.Atoi(r.URL.Query().Get("limit"));if err!=nil||limit<=0{limit=100};if limit>200{limit=200}
  offset,err:=strconv.Atoi(r.URL.Query().Get("offset"));if err!=nil||offset<0{offset=0}
- task:=strings.TrimSpace(r.URL.Query().Get("task"));status:=strings.TrimSpace(r.URL.Query().Get("status"))
- clauses:=[]string{"run_id=?"};args:=[]any{runID};if task!=""{clauses=append(clauses,"task_name=?");args=append(args,task)};if status!=""{clauses=append(clauses,"status=?");args=append(args,status)}
+ task:=strings.TrimSpace(r.URL.Query().Get("task"));status:=strings.TrimSpace(r.URL.Query().Get("status"));category:=strings.TrimSpace(r.URL.Query().Get("category"))
+ allowedCategories:=map[string]bool{"network":true,"disk_space":true,"not_found":true,"permission":true,"integrity":true,"other":true,"paused":true}
+ if category!=""&&!allowedCategories[category]{writeJSONStatus(w,400,map[string]any{"error":"不支持的失败分类"});return}
+ clauses:=[]string{"run_id=?"};args:=[]any{runID};if task!=""{clauses=append(clauses,"task_name=?");args=append(args,task)};if status!=""{clauses=append(clauses,"status=?");args=append(args,status)};if category!=""{clauses=append(clauses,"failure_category=?");args=append(args,category)}
  where:=strings.Join(clauses," AND ");var total int
  if err:=a.db.QueryRow("SELECT COUNT(*) FROM run_episode_history WHERE "+where,args...).Scan(&total);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取运行 Episode 数量失败"});return}
  args=append(args,limit,offset);rows,err:=a.db.Query("SELECT episode_id,task_name,status,COALESCE(error,''),COALESCE(failure_category,''),COALESCE(disk_name,''),completed_bytes,content_seconds,updated_at FROM run_episode_history WHERE "+where+" ORDER BY updated_at DESC,episode_id LIMIT ? OFFSET ?",args...)
