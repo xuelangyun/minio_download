@@ -822,7 +822,7 @@ func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
 	statements := []string{
 		"CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL)",
 		"CREATE TABLE scenes(id INTEGER PRIMARY KEY,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE)",
-		"CREATE TABLE tasks(id INTEGER PRIMARY KEY,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE,target_count INTEGER NOT NULL,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]')",
+		"CREATE TABLE tasks(id INTEGER PRIMARY KEY,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL UNIQUE,target_count INTEGER NOT NULL,target_hours REAL NOT NULL DEFAULT 0,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]')",
 		"CREATE TABLE task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL,PRIMARY KEY(task_id,alias))",
 		"CREATE TABLE disks(name TEXT PRIMARY KEY,position INTEGER NOT NULL,path TEXT NOT NULL,mountpoint TEXT NOT NULL)",
 	}
@@ -970,6 +970,9 @@ func TestWebStatusReturnsConfiguredTasksAndProgress(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "episode-1")
 	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "task_info.json"), []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	db, err := sql.Open("sqlite", filepath.Join(root, "state.db"))
