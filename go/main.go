@@ -459,7 +459,10 @@ function resolvePlanConflicts(conflicts){
   conflicts.forEach(c=>{
    const row=document.createElement("div");row.style.cssText="display:grid;grid-template-columns:minmax(0,1fr) 190px;gap:12px;align-items:center;padding:12px 0;border-top:1px solid var(--border,#e5e7eb)";
    const info=document.createElement("div");const name=document.createElement("strong");name.textContent=c.name;info.appendChild(name);
-   const detail=document.createElement("div");detail.style.cssText="font-size:12px;opacity:.75;margin-top:4px";detail.textContent="当前场景："+c.oldScene+"；方案场景："+c.newScene;info.appendChild(detail);
+   const detail=document.createElement("div");detail.style.cssText="font-size:12px;opacity:.8;margin-top:4px;line-height:1.6";
+   const labels={count:"目标条数",hours:"目标时长",dir:"目录",aliases:"别名",tags:"标签"};
+   const keys=new Set([...Object.keys(c.old||{}),...Object.keys(c.next||{})]);const changes=[...keys].filter(k=>JSON.stringify(c.old?.[k])!==JSON.stringify(c.next?.[k])).map(k=>(labels[k]||k)+"："+(c.old?.[k]===undefined?"（未设置）":JSON.stringify(c.old[k]))+" → "+(c.next?.[k]===undefined?"（未设置）":JSON.stringify(c.next[k])));
+   detail.textContent="场景："+c.oldScene+" → "+c.newScene+"；差异："+(changes.join("；")||"任务字段有变化");info.appendChild(detail);
    const select=document.createElement("select");select.style.cssText="width:100%;padding:9px;border:1px solid var(--border,#cbd5e1);border-radius:8px;background:var(--input,#fff);color:inherit";
    [["keep","保留当前配置"],["replace","使用方案配置"],["skip","跳过此任务"]].forEach(([v,label])=>{const o=document.createElement("option");o.value=v;o.textContent=label;select.appendChild(o)});
    row.append(info,select);panel.appendChild(row);rows.push({name:c.name,select});
