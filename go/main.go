@@ -416,8 +416,11 @@ async function loadRunEpisodeDetails(el,offset){
   const q=new URLSearchParams({task:el.dataset.task,limit:"100",offset:String(offset)});
   const data=await api("/api/runs/"+encodeURIComponent(el.dataset.runId)+"/episodes?"+q.toString());
   const items=data.episodes||[],total=Number(data.total||0);
-  if(offset===0)root.innerHTML='<div class="muted run-episode-count"></div><table class="history-table"><thead><tr><th>Episode ID</th><th>状态</th><th>失败分类</th><th>磁盘</th><th>容量</th><th>内容时长</th><th>错误</th></tr></thead><tbody></tbody></table><button type="button" class="btn secondary run-episode-more">加载更多</button>';
-  const count=root.querySelector(".run-episode-count"),body=root.querySelector("tbody"),more=root.querySelector(".run-episode-more");
+  if(offset===0)root.innerHTML='<div class="muted run-episode-count"></div><div class="muted run-failure-summary"></div><table class="history-table"><thead><tr><th>Episode ID</th><th>状态</th><th>失败分类</th><th>磁盘</th><th>容量</th><th>内容时长</th><th>错误</th></tr></thead><tbody></tbody></table><button type="button" class="btn secondary run-episode-more">加载更多</button>';
+  const count=root.querySelector(".run-episode-count"),summary=root.querySelector(".run-failure-summary"),body=root.querySelector("tbody"),more=root.querySelector(".run-episode-more");
+  const categoryNames={network:"网络",disk_space:"磁盘空间",not_found:"对象不存在",permission:"权限",integrity:"完整性",other:"其他"};
+  const categoryItems=Object.entries(data.failure_categories||{}).filter(([,n])=>Number(n)>0).map(([k,n])=>(categoryNames[k]||k)+" "+n+" 次");
+  summary.textContent=categoryItems.length?"失败原因："+categoryItems.join(" / "):"暂无失败记录";
   body.insertAdjacentHTML("beforeend",items.map(v=>'<tr><td>'+esc(v.episode_id)+'</td><td>'+esc(({completed:"成功",failed:"失败",paused:"已暂停"}[v.status]||v.status))+'</td><td>'+esc(({network:"网络",disk_space:"磁盘空间",not_found:"对象不存在",permission:"权限",integrity:"完整性",other:"其他",paused:"暂停"}[v.failure_category]||"-"))+'</td><td>'+esc(v.disk_name||"-")+'</td><td>'+formatGiB(v.completed_bytes||0)+'</td><td>'+(Number(v.content_seconds||0)/60).toFixed(1)+' 分钟</td><td>'+esc(v.error||"-")+'</td></tr>').join(""));
   const loaded=offset+items.length;count.textContent='共 '+total+' 条，已加载 '+loaded+' 条';
   more.hidden=loaded>=total;more.textContent='加载更多';more.onclick=()=>loadRunEpisodeDetails(el,loaded);
