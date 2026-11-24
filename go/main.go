@@ -891,7 +891,7 @@ async function connectStatusEvents(){
   }
  }
 }
-async function refreshLogs(){"if(logsRequestInFlight)return;logsRequestInFlight=true;try{const d=await api("/api/logs?offset="+logOffset);if(d.reset){$("logs").textContent=d.text||""}else if(d.text){$("logs").textContent+=($("logs").textContent?"\n":"")+d.text}$("logs").scrollTop=$("logs").scrollHeight;logOffset=d.offset||logOffset}catch(e){$("logs").textContent=e.message}finally{logsRequestInFlight=false}}
+async function refreshLogs(){if(logsRequestInFlight)return;logsRequestInFlight=true;try{const d=await api("/api/logs?offset="+logOffset);if(d.reset){$("logs").textContent=d.text||""}else if(d.text){$("logs").textContent+=($("logs").textContent?"\n":"")+d.text}$("logs").scrollTop=$("logs").scrollHeight;logOffset=d.offset||logOffset}catch(e){$("logs").textContent=e.message}finally{logsRequestInFlight=false}}
 async function testConnection(target){try{const root=target==="minio"?$("connection-fields"):$("connection-fields");const d=await api("/api/config/test","POST",{target:target,values:readFields(root)});message("connection-result",d.message,d.ok)}catch(e){message("connection-result",e.message,false)}}
 $("run-history-range")?.addEventListener("change",refreshStatus);
 document.querySelectorAll(".nav button").forEach(btn=>btn.addEventListener("click",()=>{document.querySelectorAll(".nav button").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".panel").forEach(x=>x.classList.remove("active"));btn.classList.add("active");$(btn.dataset.tab).classList.add("active");if(btn.dataset.tab==="records"){closeStatusEvents();refreshLogs()}else if(btn.dataset.tab==="dashboard"){refreshStatus();connectStatusEvents()}}));
