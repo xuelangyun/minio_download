@@ -175,7 +175,7 @@ func initializeSQLiteDatabase(name string)error{
   "CREATE TABLE IF NOT EXISTS runtime_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,message TEXT NOT NULL);"+
   "CREATE TABLE IF NOT EXISTS run_history(run_id TEXT PRIMARY KEY,started_at TEXT NOT NULL,finished_at TEXT NOT NULL,duration_seconds REAL NOT NULL,mode TEXT NOT NULL,result TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,error TEXT);"+
   "CREATE TABLE IF NOT EXISTS run_task_history(run_id TEXT NOT NULL,task_name TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,failed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,PRIMARY KEY(run_id,task_name));"+
-  "CREATE TABLE IF NOT EXISTS run_episode_history(run_id TEXT NOT NULL,episode_id TEXT NOT NULL,task_name TEXT NOT NULL,status TEXT NOT NULL,error TEXT,disk_name TEXT,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(run_id,episode_id));"+
+  "CREATE TABLE IF NOT EXISTS run_episode_history(run_id TEXT NOT NULL,episode_id TEXT NOT NULL,task_name TEXT NOT NULL,status TEXT NOT NULL,error TEXT,disk_name TEXT,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,failure_category TEXT NOT NULL DEFAULT '',PRIMARY KEY(run_id,episode_id));"+
   "CREATE INDEX IF NOT EXISTS idx_run_episode_lookup ON run_episode_history(run_id,task_name,status,updated_at);"+
   "CREATE INDEX IF NOT EXISTS idx_run_history_started ON run_history(started_at);"+
   "CREATE TABLE IF NOT EXISTS process_state(id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,created REAL NOT NULL,mode TEXT NOT NULL,updated_at TEXT NOT NULL);"+
@@ -1304,9 +1304,9 @@ func(a *WebAPI)runEpisodes(w http.ResponseWriter,r *http.Request){
  clauses:=[]string{"run_id=?"};args:=[]any{runID};if task!=""{clauses=append(clauses,"task_name=?");args=append(args,task)};if status!=""{clauses=append(clauses,"status=?");args=append(args,status)}
  where:=strings.Join(clauses," AND ");var total int
  if err:=a.db.QueryRow("SELECT COUNT(*) FROM run_episode_history WHERE "+where,args...).Scan(&total);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取运行 Episode 数量失败"});return}
- args=append(args,limit,offset);rows,err:=a.db.Query("SELECT episode_id,task_name,status,COALESCE(error,''),COALESCE(disk_name,''),completed_bytes,content_seconds,updated_at FROM run_episode_history WHERE "+where+" ORDER BY updated_at DESC,episode_id LIMIT ? OFFSET ?",args...)
+ args=append(args,limit,offset);rows,err:=a.db.Query("SELECT episode_id,task_name,status,COALESCE(error,''),COALESCE(failure_category,''),COALESCE(disk_name,''),completed_bytes,content_seconds,updated_at FROM run_episode_history WHERE "+where+" ORDER BY updated_at DESC,episode_id LIMIT ? OFFSET ?",args...)
  if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取运行 Episode 明细失败"});return};defer rows.Close()
- items:=[]map[string]any{};for rows.Next(){var id,name,state,detail,diskName,updated string;var bytes int64;var seconds float64;if rows.Scan(&id,&name,&state,&detail,&diskName,&bytes,&seconds,&updated)==nil{items=append(items,map[string]any{"episode_id":id,"task_name":name,"status":state,"error":detail,"disk_name":diskName,"completed_bytes":bytes,"content_seconds":seconds,"updated_at":updated})}}
+ items:=[]map[string]any{};for rows.Next(){var id,name,state,detail,category,diskName,updated string;var bytes int64;var seconds float64;if rows.Scan(&id,&name,&state,&detail,&category,&diskName,&bytes,&seconds,&updated)==nil{items=append(items,map[string]any{"episode_id":id,"task_name":name,"status":state,"error":detail,"failure_category":category,"disk_name":diskName,"completed_bytes":bytes,"content_seconds":seconds,"updated_at":updated})}}
  if err:=rows.Err();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取运行 Episode 明细失败"});return}
  writeJSON(w,map[string]any{"run_id":runID,"total":total,"limit":limit,"offset":offset,"episodes":items})
 }
@@ -1485,7 +1485,7 @@ func(a *App)open()error{
  "CREATE TABLE IF NOT EXISTS control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL);"+
  "CREATE TABLE IF NOT EXISTS run_history(run_id TEXT PRIMARY KEY,started_at TEXT NOT NULL,finished_at TEXT NOT NULL,duration_seconds REAL NOT NULL,mode TEXT NOT NULL,result TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,error TEXT);"+
   "CREATE TABLE IF NOT EXISTS run_task_history(run_id TEXT NOT NULL,task_name TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,failed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,PRIMARY KEY(run_id,task_name));"+
-  "CREATE TABLE IF NOT EXISTS run_episode_history(run_id TEXT NOT NULL,episode_id TEXT NOT NULL,task_name TEXT NOT NULL,status TEXT NOT NULL,error TEXT,disk_name TEXT,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(run_id,episode_id));"+
+  "CREATE TABLE IF NOT EXISTS run_episode_history(run_id TEXT NOT NULL,episode_id TEXT NOT NULL,task_name TEXT NOT NULL,status TEXT NOT NULL,error TEXT,disk_name TEXT,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,failure_category TEXT NOT NULL DEFAULT '',PRIMARY KEY(run_id,episode_id));"+
   "CREATE INDEX IF NOT EXISTS idx_run_episode_lookup ON run_episode_history(run_id,task_name,status,updated_at);"+
  "CREATE INDEX IF NOT EXISTS idx_run_history_started ON run_history(started_at);")
  if e==nil{
@@ -2437,9 +2437,28 @@ func sameObjectVersion(expected,current minio.ObjectInfo)bool{
 func isMD5ETag(etag string)bool{v:=strings.Trim(etag,"\"");if len(v)!=32||strings.Contains(v,"-"){return false};_,err:=hex.DecodeString(v);return err==nil}
 func fileMD5(name string)(string,error){f,err:=os.Open(name);if err!=nil{return "",err};defer f.Close();h:=md5.New();if _,err=io.Copy(h,f);err!=nil{return "",err};return hex.EncodeToString(h.Sum(nil)),nil}
 func(a *App)fail(e Episode,d DiskConfig,final,partial string,err error)error{
- if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded){pauseText:="已暂停，保留暂存文件供下次续传";_=a.set(e,d,final,partial,"paused",pauseText);if a.runID!=""{now:=time.Now().UTC().Format(time.RFC3339Nano);if _,detailErr:=a.db.Exec("INSERT INTO run_episode_history(run_id,episode_id,task_name,status,error,updated_at) VALUES(?,?,?,'paused',?,?) ON CONFLICT(run_id,episode_id) DO UPDATE SET task_name=excluded.task_name,status=excluded.status,error=excluded.error,updated_at=excluded.updated_at",a.runID,e.ID,e.Task,pauseText,now);detailErr!=nil{log.Printf("保存本次 Episode 暂停明细失败: %v",detailErr)}};return nil}
- _=a.set(e,d,final,partial,"failed",err.Error());if a.runID!=""{now:=time.Now().UTC().Format(time.RFC3339Nano);_,statsErr:=a.db.Exec("INSERT INTO run_task_history(run_id,task_name,failed_count) VALUES(?,?,1) ON CONFLICT(run_id,task_name) DO UPDATE SET failed_count=failed_count+1",a.runID,e.Task);if statsErr!=nil{log.Printf("保存本次任务失败统计失败: %v",statsErr)};_,detailErr:=a.db.Exec("INSERT INTO run_episode_history(run_id,episode_id,task_name,status,error,updated_at) VALUES(?,?,?,'failed',?,?) ON CONFLICT(run_id,episode_id) DO UPDATE SET task_name=excluded.task_name,status=excluded.status,error=excluded.error,updated_at=excluded.updated_at",a.runID,e.ID,e.Task,err.Error(),now);if detailErr!=nil{log.Printf("保存本次 Episode 失败明细失败: %v",detailErr)}};log.Printf("下载失败 %s: %v",e.ID,err);return err
+ if errors.Is(err,context.Canceled)||errors.Is(err,context.DeadlineExceeded){pauseText:="已暂停，保留暂存文件供下次续传";_=a.set(e,d,final,partial,"paused",pauseText);if a.runID!=""{now:=time.Now().UTC().Format(time.RFC3339Nano);if _,detailErr:=a.db.Exec("INSERT INTO run_episode_history(run_id,episode_id,task_name,status,error,updated_at,failure_category) VALUES(?,?,?,'paused',?,?, 'paused') ON CONFLICT(run_id,episode_id) DO UPDATE SET task_name=excluded.task_name,status=excluded.status,error=excluded.error,updated_at=excluded.updated_at,failure_category=excluded.failure_category",a.runID,e.ID,e.Task,pauseText,now);detailErr!=nil{log.Printf("保存本次 Episode 暂停明细失败: %v",detailErr)}};return nil}
+ _=a.set(e,d,final,partial,"failed",err.Error());if a.runID!=""{now:=time.Now().UTC().Format(time.RFC3339Nano);_,statsErr:=a.db.Exec("INSERT INTO run_task_history(run_id,task_name,failed_count) VALUES(?,?,1) ON CONFLICT(run_id,task_name) DO UPDATE SET failed_count=failed_count+1",a.runID,e.Task);if statsErr!=nil{log.Printf("保存本次任务失败统计失败: %v",statsErr)};_,detailErr:=a.db.Exec("INSERT INTO run_episode_history(run_id,episode_id,task_name,status,error,updated_at,failure_category) VALUES(?,?,?,'failed',?,?,?) ON CONFLICT(run_id,episode_id) DO UPDATE SET task_name=excluded.task_name,status=excluded.status,error=excluded.error,updated_at=excluded.updated_at,failure_category=excluded.failure_category",a.runID,e.ID,e.Task,err.Error(),now,classifyFailure(err));if detailErr!=nil{log.Printf("保存本次 Episode 失败明细失败: %v",detailErr)}};log.Printf("下载失败 %s: %v",e.ID,err);return err
 }
+func classifyFailure(err error) string {
+ if err == nil { return "" }
+ message := strings.ToLower(err.Error())
+ switch {
+ case strings.Contains(message, "no space left"), strings.Contains(message, "disk full"), strings.Contains(message, "not enough space"), strings.Contains(message, "insufficient space"):
+  return "disk_space"
+ case strings.Contains(message, "permission denied"), strings.Contains(message, "access denied"), strings.Contains(message, "status code: 403"), strings.Contains(message, "http 403"):
+  return "permission"
+ case strings.Contains(message, "nosuchkey"), strings.Contains(message, "no such key"), strings.Contains(message, "not found"), strings.Contains(message, "status code: 404"), strings.Contains(message, "http 404"):
+  return "not_found"
+ case strings.Contains(message, "checksum"), strings.Contains(message, "hash mismatch"), strings.Contains(message, "size mismatch"), strings.Contains(message, "corrupt"), strings.Contains(message, "unexpected eof"):
+  return "integrity"
+ case strings.Contains(message, "timeout"), strings.Contains(message, "connection reset"), strings.Contains(message, "connection refused"), strings.Contains(message, "no such host"), strings.Contains(message, "tls"), strings.Contains(message, "broken pipe"), strings.Contains(message, "network"):
+  return "network"
+ default:
+  return "other"
+ }
+}
+
 func (a *App) markCleanupPending(episodeID string) error {
  tx, err := a.db.Begin()
  if err != nil {
