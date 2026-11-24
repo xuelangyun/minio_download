@@ -26,8 +26,8 @@ Linux：
 网页操作顺序：
 
 1. 在“连接配置”填写 MinIO Endpoint、Access Key、Secret Key、Bucket，以及 PostgreSQL 连接信息；保存并分别测试连接。
-2. 在“磁盘配置”填写下载目录与实际挂载点，先检查磁盘再保存。
-3. 在“任务配置”检查内置任务清单、数据版本目录和每个任务的目标条数，按需修改。
+2. 在“磁盘配置”通过图形界面添加磁盘，选择系统检测到的挂载点并设置下载目录；先检查磁盘再保存。
+3. 在“任务配置”检查任务清单、数据版本目录、目标条数和目标时长（小时）；可将当前任务保存为方案，之后替换载入或追加载入重复使用。
 4. 在“运行参数”调整磁盘预留空间、并发、校验和重试参数。
 5. 返回“运行状态”，点击“开始下载”；日志和运行状态直接从 SQLite 读取。
 
@@ -51,7 +51,7 @@ Web 页面也提供开始、暂停和强制停止操作。强制停止后保留�
 ## 功能
 
 - PostgreSQL 查询 episode，按当前任务名和历史别名归并。
-- 按累计视频时长（小时）或 episode 条数选择下载。
+- 按累计视频时长（小时）或 episode 条数选择下载；目标时长与目标条数均保存在 SQLite 任务配置中。
 - 质量状态过滤、创建时间优先、episode_id / parent_key 去重。
 - 使用 MinIO Go SDK，不调用 mc。
 - 检查 task_info.json 与可选的 *.SYNC.mcap。
@@ -80,11 +80,11 @@ Web 页面也提供开始、暂停和强制停止操作。强制停止后保留�
 
 ## Go Web API 当前范围
 
-`--web` 可启动独立 HTTP 服务，提供配置快照 `GET /api/config`、设置项批量更新 `PUT /api/config/settings`、MinIO / PostgreSQL 连接测试 `POST /api/config/test`、任务配置更新 / 默认任务重置 `PUT /api/config/tasks`、`POST /api/config/tasks/reset`、磁盘配置更新 / 检查 `PUT /api/config/disks`、`POST /api/config/disks/check`、任务方案管理 `GET|POST /api/plans`、`GET|PUT|DELETE /api/plans/{id}`、`POST /api/plans/{id}/apply`、`GET /api/plans/{id}/export`、`POST /api/plans/import`，访问口令设置 / 轮换 / 清除 `PUT /api/auth/token`，以及状态 `GET /api/status`、`GET /api/episodes?task=任务名`、`GET /api/logs?offset=N`、`POST /api/run` 启动下载、安全暂停 `POST /api/stop` 和无需口令的 `GET /healthz`。`GET /api/config` 返回设置 schema、分组、任务 / 标签、磁盘、配置路径和运行状态；Secret Key / PostgreSQL 密码始终返回空串，并通过 `secrets_set` 标记是否已保存。`/api/run` 当前只接受 `mode=download`，支持 `max_rounds`（1–50）和 `recheck_missing`；命令行 `--max-rounds` 未指定时使用配置库 `run.default_rounds`，`--web-host` / `--web-port` 可覆盖配置库 `web.host` / `web.port`；Web 会以独立进程组启动下载器，关闭 Web 不会连带终止下载。暂停请求必须使用 `Content-Type: application/json`，请求体 `{}`；Web 支持安全暂停与强制结束：安全暂停保留临时文件供续传；强制结束会终止下载器进程树，当前文件的临时数据保留，下次运行按 Range 续传。状态接口返回任务标签、历史完成进度、磁盘空间/挂载状态、磁盘任务分配、运行中的 episode、汇总下载字节、近似速度、ETA、进度百分比和上次运行结果。速度基于两次轮询间暂存目录字节增量估算，并非网卡级精确吞吐。日志接口按 offset 增量读取完整行。Web API 默认只监听 `127.0.0.1:8765`；未设置本 Go 控制台访问口令时拒绝非本机监听。SQLite 中配置了 PBKDF2 口令后，API 请求必须使用 `Authorization: Bearer <口令>`；5 分钟内连续 8 次错误口令会锁定该来源 60 秒。写请求必须使用 `Content-Type: application/json`，并校验同源 `Origin`。
+`--web` 可启动独立 HTTP 服务，提供配置快照 `GET /api/config`、设置项批量更新 `PUT /api/config/settings`、MinIO / PostgreSQL 连接测试 `POST /api/config/test`、任务配置更新 / 默认任务重置 `PUT /api/config/tasks`、`POST /api/config/tasks/reset`、磁盘挂载点检测 `GET /api/config/disks/detect`、磁盘配置更新 / 检查 `PUT /api/config/disks`、`POST /api/config/disks/check`、任务方案管理 `GET|POST /api/plans`、`GET|PUT|DELETE /api/plans/{id}`、`POST /api/plans/{id}/apply`、`GET /api/plans/{id}/export`、`POST /api/plans/import`，访问口令设置 / 轮换 / 清除 `PUT /api/auth/token`，以及状态 `GET /api/status`、`GET /api/episodes?task=任务名`、`GET /api/logs?offset=N`、`POST /api/run` 启动下载、安全暂停 `POST /api/stop` 和无需口令的 `GET /healthz`。`GET /api/config` 返回设置 schema、分组、任务 / 标签、磁盘、配置路径和运行状态；Secret Key / PostgreSQL 密码始终返回空串，并通过 `secrets_set` 标记是否已保存。`/api/run` 接受 `mode=count` 或 `mode=duration`，支持 `max_rounds`（1–50）和 `recheck_missing`；命令行 `--max-rounds` 未指定时使用配置库 `run.default_rounds`，`--web-host` / `--web-port` 可覆盖配置库 `web.host` / `web.port`；Web 会以独立进程组启动下载器，关闭 Web 不会连带终止下载。暂停请求必须使用 `Content-Type: application/json`，请求体 `{}`；Web 支持安全暂停与强制结束：安全暂停保留临时文件供续传；强制结束会终止下载器进程树，当前文件的临时数据保留，下次运行按 Range 续传。状态接口返回任务标签、历史完成进度、磁盘空间/挂载状态、磁盘任务分配、运行中的 episode、汇总下载字节、近似速度、ETA、进度百分比和上次运行结果。速度基于两次轮询间暂存目录字节增量估算，并非网卡级精确吞吐。日志接口按 offset 增量读取完整行。Web API 默认只监听 `127.0.0.1:8765`；未设置本 Go 控制台访问口令时拒绝非本机监听。SQLite 中配置了 PBKDF2 口令后，API 请求必须使用 `Authorization: Bearer <口令>`；5 分钟内连续 8 次错误口令会锁定该来源 60 秒。写请求必须使用 `Content-Type: application/json`，并校验同源 `Origin`。
 
 ## 当前限制
 
-目前 Go Web 提供完整的首次配置页面、状态与日志页面、配置查询与保存、任务和磁盘配置更新、MinIO / PostgreSQL 连接测试、任务方案 API（CRUD、应用、JSON 导入 / 导出）及访问口令设置 / 轮换 / 清除。`PUT /api/auth/token` 使用 `{ "action":"set", "token":"至少 12 字节的新口令" }` 设置或轮换口令，使用 `{ "action":"clear" }` 清除；口令只以 PBKDF2-SHA256 摘要保存，不返回明文。该接口仍受当前 API 鉴权保护：已设置口令时必须先携带旧口令完成认证；未设置口令时仅允许本机访问。清除后，非本机监听的既有服务会拒绝远程 API 请求；重启时若仍无口令则禁止绑定非本机地址。磁盘检查目前覆盖挂载状态、路径包含关系、可写性与可用空间；未挂载时不会向其上级系统目录写探测文件。
+目前 Go Web 提供完整的首次配置页面、状态与日志页面、配置查询与保存、图形化磁盘配置及挂载点检测、MinIO / PostgreSQL 连接测试、任务目标时长设置、任务方案页面（保存、覆盖、替换 / 追加载入、导出）及访问口令设置 / 轮换 / 清除。`PUT /api/auth/token` 使用 `{ "action":"set", "token":"至少 12 字节的新口令" }` 设置或轮换口令，使用 `{ "action":"clear" }` 清除；口令只以 PBKDF2-SHA256 摘要保存，不返回明文。该接口仍受当前 API 鉴权保护：已设置口令时必须先携带旧口令完成认证；未设置口令时仅允许本机访问。清除后，非本机监听的既有服务会拒绝远程 API 请求；重启时若仍无口令则禁止绑定非本机地址。磁盘检查目前覆盖挂载状态、路径包含关系、可写性与可用空间；未挂载时不会向其上级系统目录写探测文件。
 
 - 磁盘间同一文件系统检测：Linux 通过内核设备号识别，能够识别 bind mount / 设备别名；Windows 使用系统分区表中的卷设备标识，拒绝重复挂载同一卷。
 - 任务方案的高级差异预览和冲突逐项交互处理。
