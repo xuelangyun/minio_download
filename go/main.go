@@ -1308,7 +1308,10 @@ func(a *WebAPI)runEpisodes(w http.ResponseWriter,r *http.Request){
  if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取运行 Episode 明细失败"});return};defer rows.Close()
  items:=[]map[string]any{};for rows.Next(){var id,name,state,detail,category,diskName,updated string;var bytes int64;var seconds float64;if rows.Scan(&id,&name,&state,&detail,&category,&diskName,&bytes,&seconds,&updated)==nil{items=append(items,map[string]any{"episode_id":id,"task_name":name,"status":state,"error":detail,"failure_category":category,"disk_name":diskName,"completed_bytes":bytes,"content_seconds":seconds,"updated_at":updated})}}
  if err:=rows.Err();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取运行 Episode 明细失败"});return}
- writeJSON(w,map[string]any{"run_id":runID,"total":total,"limit":limit,"offset":offset,"episodes":items})
+ categoryCounts:=map[string]int{}
+ categoryRows,categoryErr:=a.db.Query("SELECT COALESCE(failure_category,''),COUNT(*) FROM run_episode_history WHERE "+where+" AND status='failed' GROUP BY failure_category",args[:len(args)-2]...)
+ if categoryErr==nil{for categoryRows.Next(){var category string;var count int;if categoryRows.Scan(&category,&count)==nil{categoryCounts[category]=count}};categoryRows.Close()}
+ writeJSON(w,map[string]any{"run_id":runID,"total":total,"limit":limit,"offset":offset,"episodes":items,"failure_categories":categoryCounts})
 }
 func(a *WebAPI)logs(w http.ResponseWriter,r *http.Request){
  offset,err:=strconv.ParseInt(r.URL.Query().Get("offset"),10,64);initial:=err!=nil||offset<=0
