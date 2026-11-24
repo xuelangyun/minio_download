@@ -1310,7 +1310,7 @@ func(a *WebAPI)runEpisodes(w http.ResponseWriter,r *http.Request){
  args=append(args,limit,offset);rows,err:=a.db.Query("SELECT episode_id,task_name,status,COALESCE(error,''),COALESCE(failure_category,''),COALESCE(disk_name,''),completed_bytes,content_seconds,updated_at FROM run_episode_history WHERE "+where+" ORDER BY updated_at DESC,episode_id LIMIT ? OFFSET ?",args...)
  if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取运行 Episode 明细失败"});return};defer rows.Close()
  items:=[]map[string]any{};for rows.Next(){var id,name,state,detail,category,diskName,updated string;var bytes int64;var seconds float64;if rows.Scan(&id,&name,&state,&detail,&category,&diskName,&bytes,&seconds,&updated)==nil{items=append(items,map[string]any{"episode_id":id,"task_name":name,"status":state,"error":detail,"failure_category":category,"disk_name":diskName,"completed_bytes":bytes,"content_seconds":seconds,"updated_at":updated})}}
- if err:=rows.Err();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取运行 Episode 明细失败"});return}
+ if err:=rows.Err();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"读取运行 Episode 明细失败"});return};if err:=rows.Close();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"关闭运行 Episode 明细查询失败"});return}
  categoryCounts:=map[string]int{}
  categoryRows,categoryErr:=a.db.Query("SELECT COALESCE(failure_category,''),COUNT(*) FROM run_episode_history WHERE "+where+" AND status='failed' GROUP BY failure_category",args[:len(args)-2]...)
  if categoryErr==nil{for categoryRows.Next(){var category string;var count int;if categoryRows.Scan(&category,&count)==nil{categoryCounts[category]=count}};categoryRows.Close()}
@@ -2454,11 +2454,11 @@ func classifyFailure(err error) string {
   return "disk_space"
  case strings.Contains(message, "permission denied"), strings.Contains(message, "access denied"), strings.Contains(message, "status code: 403"), strings.Contains(message, "http 403"):
   return "permission"
- case strings.Contains(message, "nosuchkey"), strings.Contains(message, "no such key"), strings.Contains(message, "not found"), strings.Contains(message, "status code: 404"), strings.Contains(message, "http 404"):
+ case strings.Contains(message, "nosuchkey"), strings.Contains(message, "no such key"), strings.Contains(message, "does not exist"), strings.Contains(message, "not found"), strings.Contains(message, "status code: 404"), strings.Contains(message, "http 404"):
   return "not_found"
  case strings.Contains(message, "checksum"), strings.Contains(message, "hash mismatch"), strings.Contains(message, "size mismatch"), strings.Contains(message, "corrupt"), strings.Contains(message, "unexpected eof"):
   return "integrity"
- case strings.Contains(message, "timeout"), strings.Contains(message, "connection reset"), strings.Contains(message, "connection refused"), strings.Contains(message, "no such host"), strings.Contains(message, "tls"), strings.Contains(message, "broken pipe"), strings.Contains(message, "network"):
+ case strings.Contains(message, "timeout"), strings.Contains(message, "connection reset"), strings.Contains(message, "connection refused"), strings.Contains(message, "i/o timeout"), strings.Contains(message, "no such host"), strings.Contains(message, "tls"), strings.Contains(message, "broken pipe"), strings.Contains(message, "network"):
   return "network"
  default:
   return "other"
