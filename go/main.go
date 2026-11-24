@@ -1355,13 +1355,13 @@ func(a *WebAPI)exportRunCSV(w http.ResponseWriter,r *http.Request){
  if category!=""&&!allowedCategories[category]{http.Error(w,"不支持的失败分类",http.StatusBadRequest);return}
  if status!=""&&status!="completed"&&status!="failed"&&status!="paused"{http.Error(w,"不支持的 Episode 状态",http.StatusBadRequest);return}
  taskRecords:=[][]string{}
- taskQuery:="SELECT task_name,completed_count,failed_count,completed_bytes,content_seconds FROM run_task_history WHERE run_id=?";taskArgs:=[]any{runID}
+ taskQuery:="SELECT task_name,completed_count,failed_count,completed_bytes,content_seconds,wait_seconds,duration_seconds FROM run_task_history WHERE run_id=?";taskArgs:=[]any{runID}
  if task!=""{taskQuery+=" AND task_name=?";taskArgs=append(taskArgs,task)}
  taskRows,err:=a.db.Query(taskQuery+" ORDER BY task_name",taskArgs...);if err!=nil{http.Error(w,"读取运行任务统计失败",http.StatusInternalServerError);return}
- for taskRows.Next(){var name string;var success,failed,bytes int64;var seconds float64
-  if err=taskRows.Scan(&name,&success,&failed,&bytes,&seconds);err!=nil{taskRows.Close();http.Error(w,"读取运行任务统计失败",http.StatusInternalServerError);return}
+ for taskRows.Next(){var name string;var success,failed,bytes int64;var seconds,waitSeconds,durationSeconds float64
+  if err=taskRows.Scan(&name,&success,&failed,&bytes,&seconds,&waitSeconds,&durationSeconds);err!=nil{taskRows.Close();http.Error(w,"读取运行任务统计失败",http.StatusInternalServerError);return}
   attempts:=success+failed;rate:="";if attempts>0{rate=strconv.FormatFloat(float64(success)*100/float64(attempts),'f',1,64)+"%"}
-  taskRecords=append(taskRecords,[]string{"task_summary",runID,name,"","","","",strconv.FormatInt(success,10),strconv.FormatInt(failed,10),rate,strconv.FormatInt(bytes,10),strconv.FormatFloat(seconds,'f',2,64),"",""})
+  throughput:=float64(0);if durationSeconds>0{throughput=float64(bytes)/durationSeconds};taskRecords=append(taskRecords,[]string{"task_summary",runID,name,"","","","",strconv.FormatInt(success,10),strconv.FormatInt(failed,10),rate,strconv.FormatInt(bytes,10),strconv.FormatFloat(seconds,'f',2,64),strconv.FormatFloat(waitSeconds,'f',2,64),strconv.FormatFloat(durationSeconds,'f',2,64),strconv.FormatFloat(throughput,'f',2,64),"",""})
  }
  if err=taskRows.Err();err!=nil{taskRows.Close();http.Error(w,"读取运行任务统计失败",http.StatusInternalServerError);return};if err=taskRows.Close();err!=nil{http.Error(w,"关闭运行任务统计查询失败",http.StatusInternalServerError);return}
  clauses:=[]string{"run_id=?"};args:=[]any{runID}
@@ -1373,11 +1373,11 @@ func(a *WebAPI)exportRunCSV(w http.ResponseWriter,r *http.Request){
  safeID:=strings.Map(func(ch rune)rune{if ch>='a'&&ch<='z'||ch>='A'&&ch<='Z'||ch>='0'&&ch<='9'||ch=='-'||ch=='_'{return ch};return -1},runID);if safeID==""{safeID="run"}
  w.Header().Set("Content-Type","text/csv; charset=utf-8");w.Header().Set("Content-Disposition",fmt.Sprintf("attachment; filename=\"run-%s-episodes.csv\"",safeID))
  _,_=w.Write([]byte{0xef,0xbb,0xbf});writer:=csv.NewWriter(w)
- if err=writer.Write([]string{"记录类型","运行 ID","任务","Episode ID","状态","失败分类","磁盘","成功数量","失败尝试数","成功率","完成字节","内容秒数","错误详情","更新时间"});err!=nil{return}
+ if err=writer.Write([]string{"记录类型","运行 ID","任务","Episode ID","状态","失败分类","磁盘","成功数量","失败尝试数","成功率","完成字节","内容秒数","等待秒数","运行秒数","平均字节每秒","错误详情","更新时间"});err!=nil{return}
  for _,record:=range taskRecords{for i:=range record{record[i]=csvSafeCell(record[i])};if err=writer.Write(record);err!=nil{return}}
  for rows.Next(){var id,name,state,category,diskName,detail,updated string;var bytes int64;var seconds float64
   if err=rows.Scan(&id,&name,&state,&category,&diskName,&bytes,&seconds,&detail,&updated);err!=nil{return}
-  record:=[]string{"episode",runID,name,id,state,category,diskName,"","","",strconv.FormatInt(bytes,10),strconv.FormatFloat(seconds,'f',2,64),detail,updated};for i:=range record{record[i]=csvSafeCell(record[i])}
+  record:=[]string{"episode",runID,name,id,state,category,diskName,"","","",strconv.FormatInt(bytes,10),strconv.FormatFloat(seconds,'f',2,64),"","","",detail,updated};for i:=range record{record[i]=csvSafeCell(record[i])}
   if err=writer.Write(record);err!=nil{return}
  }
  if err=rows.Err();err!=nil{return};writer.Flush()
