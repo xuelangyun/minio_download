@@ -1,0 +1,27 @@
+name: Create v0.0.3 tag
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/create-v0.0.3-tag.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  create-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create tag at the CI-verified commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: 1686299aa4f8f965105965ce407289782c7df1c2
+        run: |
+          if gh api repos/xuelangyun/minio_download/git/ref/tags/v0.0.3 >/dev/null 2>&1; then
+            echo "v0.0.3 already exists; refusing to overwrite it"
+            exit 1
+          fi
+          gh api --method POST repos/xuelangyun/minio_download/git/refs \
+            -f ref=refs/tags/v0.0.3 \
+            -f sha="$TARGET_SHA"
