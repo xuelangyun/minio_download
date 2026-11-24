@@ -10,6 +10,7 @@ import (
  "crypto/md5"
  "database/sql"
  "encoding/json"
+ "encoding/csv"
  "os/exec"
  "errors"
  "flag"
@@ -578,6 +579,7 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("POST /api/run",api.run)
  mux.HandleFunc("GET /api/episodes",api.episodes)
  mux.HandleFunc("GET /api/runs/{id}/episodes",api.runEpisodes)
+ mux.HandleFunc("GET /api/runs/{id}/export.csv",api.exportRunCSV)
  mux.HandleFunc("GET /api/logs",api.logs)
  mux.HandleFunc("POST /api/stop",api.stop)
  handler:=http.HandlerFunc(func(w http.ResponseWriter,r *http.Request){
@@ -1325,6 +1327,37 @@ func(a *WebAPI)runEpisodes(w http.ResponseWriter,r *http.Request){
  if categoryErr==nil{for categoryRows.Next(){var category string;var count int;if categoryRows.Scan(&category,&count)==nil{categoryCounts[category]=count}};categoryRows.Close()}
  writeJSON(w,map[string]any{"run_id":runID,"total":total,"limit":limit,"offset":offset,"episodes":items,"failure_categories":categoryCounts})
 }
+
+func csvSafeCell(value string) string {
+ if value=="" { return value }
+ switch value[0] { case '=', '+', '-', '@', '\t', '\r': return "'"+value }
+ return value
+}
+func(a *WebAPI)exportRunCSV(w http.ResponseWriter,r *http.Request){
+ runID:=strings.TrimSpace(r.PathValue("id"));if runID==""{http.Error(w,"run_id 不能为空",http.StatusBadRequest);return}
+ task:=strings.TrimSpace(r.URL.Query().Get("task"));status:=strings.TrimSpace(r.URL.Query().Get("status"));category:=strings.TrimSpace(r.URL.Query().Get("category"))
+ allowedCategories:=map[string]bool{"network":true,"disk_space":true,"not_found":true,"permission":true,"integrity":true,"other":true,"paused":true}
+ if category!=""&&!allowedCategories[category]{http.Error(w,"不支持的失败分类",http.StatusBadRequest);return}
+ if status!=""&&status!="completed"&&status!="failed"&&status!="paused"{http.Error(w,"不支持的 Episode 状态",http.StatusBadRequest);return}
+ clauses:=[]string{"run_id=?"};args:=[]any{runID}
+ if task!=""{clauses=append(clauses,"task_name=?");args=append(args,task)}
+ if status!=""{clauses=append(clauses,"status=?");args=append(args,status)}
+ if category!=""{clauses=append(clauses,"failure_category=?");args=append(args,category)}
+ query:="SELECT episode_id,task_name,status,COALESCE(failure_category,''),COALESCE(disk_name,''),completed_bytes,content_seconds,COALESCE(error,''),updated_at FROM run_episode_history WHERE "+strings.Join(clauses," AND ")+" ORDER BY updated_at,episode_id"
+ rows,err:=a.db.Query(query,args...);if err!=nil{http.Error(w,"读取运行 Episode 明细失败",http.StatusInternalServerError);return};defer rows.Close()
+ safeID:=strings.Map(func(ch rune)rune{if ch>='a'&&ch<='z'||ch>='A'&&ch<='Z'||ch>='0'&&ch<='9'||ch=='-'||ch=='_'{return ch};return -1},runID);if safeID==""{safeID="run"}
+ w.Header().Set("Content-Type","text/csv; charset=utf-8");w.Header().Set("Content-Disposition",fmt.Sprintf("attachment; filename=\"run-%s-episodes.csv\"",safeID))
+ w.Write([]byte{0xef,0xbb,0xbf})
+ writer:=csv.NewWriter(w)
+ if err=writer.Write([]string{"Episode ID","任务","状态","失败分类","磁盘","完成字节","内容秒数","错误详情","更新时间"});err!=nil{return}
+ for rows.Next(){var id,name,state,category,diskName,detail,updated string;var bytes int64;var seconds float64
+  if err=rows.Scan(&id,&name,&state,&category,&diskName,&bytes,&seconds,&detail,&updated);err!=nil{http.Error(w,"读取运行 Episode 明细失败",http.StatusInternalServerError);return}
+  record:=[]string{id,name,state,category,diskName,strconv.FormatInt(bytes,10),strconv.FormatFloat(seconds,'f',2,64),detail,updated};for i:=range record{record[i]=csvSafeCell(record[i])}
+  if err=writer.Write(record);err!=nil{return}
+ }
+ if err=rows.Err();err!=nil{return};writer.Flush()
+}
+
 func(a *WebAPI)logs(w http.ResponseWriter,r *http.Request){
  offset,err:=strconv.ParseInt(r.URL.Query().Get("offset"),10,64);initial:=err!=nil||offset<=0
  if initial{offset=0}
