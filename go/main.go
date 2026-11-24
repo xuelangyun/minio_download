@@ -2682,7 +2682,6 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
   if status!="ok"{_=os.RemoveAll(partial);_=a.set(e,d,final,"",status,detail);return nil}
  }
  _=a.set(e,d,final,partial,"running","")
- a.beginLiveEpisode(e,d,partial);defer a.endLiveEpisode(e.ID)
  objects:=make([]minio.ObjectInfo,0)
  for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:true}){
   if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)}
@@ -2690,6 +2689,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
   objects=append(objects,obj)
  }
  if err:=sweepPartial(partial,e.ParentKey,objects);err!=nil{return a.fail(e,d,final,partial,err)}
+ a.beginLiveEpisode(e,d,partial);defer a.endLiveEpisode(e.ID)
  sem:=make(chan struct{},a.cfg.FileWorkers);var wg sync.WaitGroup;var completedObjects atomic.Int64;var mu sync.Mutex;var first error
  // Serialize the admission check with the first capacity failure so workers
  // that have not reserved space yet cannot start additional object downloads.
