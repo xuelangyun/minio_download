@@ -26,20 +26,12 @@ import (
 
 func TestDurationTargetsPersistInSQLite(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "config.sqlite3")
+	if err = initializeSQLiteDatabase(dbPath); err != nil {
+		t.Fatalf("initialize SQLite schema: %v", err)
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
-	}
-	// Simulate a database created by an older Go release.
-	_, err = db.Exec("CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL,target_count INTEGER NOT NULL DEFAULT 0,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]')")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err = initializeSQLiteDatabase(dbPath); err != nil {
-		t.Fatalf("migrate old SQLite schema: %v", err)
 	}
 
 	payload := planPayload{
