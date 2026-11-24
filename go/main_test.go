@@ -1923,7 +1923,7 @@ func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
  exportResponse:=httptest.NewRecorder();api.exportRunCSV(exportResponse,exportReq)
  if exportResponse.Code!=http.StatusOK{t.Fatalf("CSV export status=%d body=%s",exportResponse.Code,exportResponse.Body.String())}
  if !strings.Contains(exportResponse.Header().Get("Content-Type"),"text/csv")||!strings.Contains(exportResponse.Header().Get("Content-Disposition"),"run-run-1-episodes.csv"){t.Fatalf("unexpected CSV headers: %#v",exportResponse.Header())}
- csvBody:=exportResponse.Body.String();if !strings.Contains(csvBody,"episode-2")||strings.Contains(csvBody,"episode-1")||!strings.Contains(csvBody,"simulated failure")||!strings.Contains(csvBody,"task_summary")||!strings.Contains(csvBody,"50.0%"){t.Fatalf("CSV export did not include filtered Episode rows and task summary: %q",csvBody)}
+ csvBody:=exportResponse.Body.String();if !strings.Contains(csvBody,"episode-2")||strings.Contains(csvBody,"episode-1")||!strings.Contains(csvBody,"simulated failure")||!strings.Contains(csvBody,"task_summary")||!strings.Contains(csvBody,"50.0%")||!strings.Contains(csvBody,"等待秒数")||!strings.Contains(csvBody,"平均字节每秒"){t.Fatalf("CSV export did not include filtered Episode rows and task summary: %q",csvBody)}
  if csvSafeCell("=HYPERLINK(1)")!="'=HYPERLINK(1)"||csvSafeCell("normal")!="normal"{t.Fatal("CSV formula injection protection failed")}
 }
 
