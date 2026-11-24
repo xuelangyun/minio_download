@@ -23,6 +23,75 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
+
+func TestDurationTargetsPersistInSQLite(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "config.sqlite3")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a database created by an older Go release.
+	_, err = db.Exec("CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,scene_id INTEGER NOT NULL,position INTEGER NOT NULL,name TEXT NOT NULL,target_count INTEGER NOT NULL DEFAULT 0,directory TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = initializeSQLiteDatabase(dbPath); err != nil {
+		t.Fatalf("migrate old SQLite schema: %v", err)
+	}
+
+	payload := planPayload{
+		DataVersion: "test-version",
+		Scenes: []planScene{{
+			Scene: "test-scene",
+			Tasks: []planTask{{Name: "duration-task", Count: 12, Hours: 3.75}},
+		}},
+	}
+	if _, err = validatePlanPayload(json.RawMessage(mustJSON(payload))); err != nil {
+		t.Fatalf("validate plan: %v", err)
+	}
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = persistPlanPayload(db, payload); err != nil {
+		db.Close()
+		t.Fatalf("persist plan: %v", err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{ConfigDB: dbPath}
+	if err = loadConfigDB(&cfg, "duration"); err != nil {
+		t.Fatalf("load duration config: %v", err)
+	}
+	if len(cfg.Tasks) != 1 {
+		t.Fatalf("expected one task, got %d", len(cfg.Tasks))
+	}
+	if got := cfg.Tasks[0].TargetHours; got != 3.75 {
+		t.Fatalf("target hours did not survive SQLite round trip: got %v, want 3.75", got)
+	}
+	if got := cfg.Tasks[0].TargetCount; got != 12 {
+		t.Fatalf("target count changed during SQLite round trip: got %d, want 12", got)
+	}
+}
+
+func TestValidatePlanRejectsNegativeDurationTarget(t *testing.T) {
+	payload := planPayload{
+		DataVersion: "test-version",
+		Scenes: []planScene{{
+			Scene: "test-scene",
+			Tasks: []planTask{{Name: "bad-duration", Hours: -0.5}},
+		}},
+	}
+	if _, err := validatePlanPayload(json.RawMessage(mustJSON(payload))); err == nil {
+		t.Fatal("expected negative target_hours to be rejected")
+	}
+}
+
 func TestSafeComponent(t *testing.T) {
 	for _, in := range []string{"", ".", "..", "a/b", "a:b", "name. "} {
 		got := safe(in)
