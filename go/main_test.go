@@ -1845,9 +1845,24 @@ func TestSaveLastRunPersistsPerRunStatistics(t *testing.T) {
  completedAt:=time.Now().UTC().Format(time.RFC3339Nano)
  if _,err=db.Exec("INSERT INTO downloads(episode_id,task_name,expected_bytes,status,completed_at,updated_at) VALUES('ep-1','task',4096,'completed',?,?)",completedAt,completedAt);err!=nil{t.Fatal(err)}
  if _,err=db.Exec("INSERT INTO downloaded_episodes(episode_id,task_name,file_size,content_time,downloaded_at) VALUES('ep-1','task',4096,120,?)",completedAt);err!=nil{t.Fatal(err)}
+ if _,err=db.Exec("INSERT INTO run_task_history(run_id,task_name,completed_count,completed_bytes,content_seconds) VALUES('test-run-1','task',1,4096,120)");err!=nil{t.Fatal(err)}
  app:=&App{db:db,mode:"duration",runID:"test-run-1",runStartedAt:started}
  app.saveLastRun("finished",nil)
  var result string;var count,bytes int64;var seconds,elapsed float64
  if err=db.QueryRow("SELECT result,completed_count,completed_bytes,content_seconds,duration_seconds FROM run_history WHERE run_id='test-run-1'").Scan(&result,&count,&bytes,&seconds,&elapsed);err!=nil{t.Fatal(err)}
  if result!="finished"||count!=1||bytes!=4096||seconds!=120||elapsed<=0{t.Fatalf("unexpected run history: result=%s count=%d bytes=%d seconds=%v elapsed=%v",result,count,bytes,seconds,elapsed)}
+}
+
+func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
+ dbPath:=filepath.Join(t.TempDir(),"task-run.sqlite3")
+ if err:=initializeSQLiteDatabase(dbPath);err!=nil{t.Fatal(err)}
+ db,err:=sql.Open("sqlite",dbPath);if err!=nil{t.Fatal(err)};defer db.Close();db.SetMaxOpenConns(1)
+ app:=&App{db:db,runID:"run-1"}
+ episode:=Episode{ID:"episode-1",Task:"scene-task",Size:8192,Duration:90,ParentKey:"parent"}
+ if err:=app.recordAndSetForRun(episode,DiskConfig{Name:"disk-a"},"/tmp/task/episode-1");err!=nil{t.Fatal(err)}
+ var count,bytes int64;var seconds float64
+ if err=db.QueryRow("SELECT completed_count,completed_bytes,content_seconds FROM run_task_history WHERE run_id='run-1' AND task_name='scene-task'").Scan(&count,&bytes,&seconds);err!=nil{t.Fatal(err)}
+ if count!=1||bytes!=8192||seconds!=90{t.Fatalf("unexpected task stats: count=%d bytes=%d seconds=%v",count,bytes,seconds)}
+ var status string
+ if err=db.QueryRow("SELECT status FROM downloads WHERE episode_id='episode-1'").Scan(&status);err!=nil||status!="completed"{t.Fatalf("download status=%q err=%v",status,err)}
 }
