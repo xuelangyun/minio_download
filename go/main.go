@@ -2027,8 +2027,8 @@ func(a *App)downloadSelected(sel map[string][]Episode)error{
   byDisk[d.Name]=append(byDisk[d.Name],batch{t:task,d:*d,rows:rows,queuedAt:time.Now()})
  }
  var wg sync.WaitGroup;errs:=make(chan error,len(byDisk))
- for _,batches:=range byDisk{
-  batches:=batches;wg.Add(1)
+ for diskName,batches:=range byDisk{
+  diskName,batches:=diskName,batches;wg.Add(1)
   go func(){started:=time.Now();defer wg.Done();defer func(){if err:=a.recordRunDiskTiming(diskName,started,time.Since(started).Seconds());err!=nil{log.Printf("保存磁盘运行统计失败 %s: %v",diskName,err)}}();for _,b:=range batches{if a.ctx.Err()!=nil{return};if err:=a.downloadTask(b);err!=nil{errs<-err;return}}}()
  }
  wg.Wait();close(errs)
