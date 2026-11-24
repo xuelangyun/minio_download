@@ -1352,6 +1352,14 @@ func TestWebPlanApplyReplaceAndMerge(t *testing.T) {
 	if len(api.cfg.Tasks) != 2 || api.cfg.Tasks[0].Name != "文件整理" || api.cfg.Tasks[0].TargetCount != 99 {
 		t.Fatalf("explicit replace resolution was not applied: %#v", api.cfg.Tasks)
 	}
+
+	// Explicit skip must preserve the current task without overwriting it.
+	skipReq := httptest.NewRequest(http.MethodPost, "/api/plans/"+mergeID+"/apply", strings.NewReader(`{"mode":"merge","resolutions":{"文件整理":"skip"}}`))
+	skipReq.SetPathValue("id", mergeID)
+	skipped := httptest.NewRecorder()
+	api.planApply(skipped, skipReq)
+	if skipped.Code != http.StatusOK { t.Fatalf("skip resolution failed: %d %s", skipped.Code, skipped.Body.String()) }
+	if len(api.cfg.Tasks) != 2 || api.cfg.Tasks[0].TargetCount != 99 { t.Fatalf("skip resolution changed current task: %#v", api.cfg.Tasks) }
 }
 
 func TestValidatePlanPayloadAllowsEmptyDataVersion(t *testing.T) {
