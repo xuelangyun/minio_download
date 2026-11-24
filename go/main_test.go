@@ -915,7 +915,7 @@ func TestLoadConfigDBImportsPythonCountConfiguration(t *testing.T) {
 	}
 }
 
-func TestLoadConfigDBRejectsDurationMode(t *testing.T) {
+func TestLoadConfigDBRejectsDatabaseWithoutSchema(t *testing.T) {
 	cfg := Config{ConfigDB: filepath.Join(t.TempDir(), "config.sqlite3")}
 	if err := loadConfigDB(&cfg, "duration"); err == nil {
 		t.Fatal("duration mode must not silently replace hour targets with count targets")
