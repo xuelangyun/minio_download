@@ -1379,8 +1379,8 @@ func requestStop(c Config) error {
 func(a *App)saveLastRun(result string,runErr error){
  finished:=time.Now().UTC();finishedAt:=finished.Format(time.RFC3339Nano);startedAt:=a.runStartedAt.UTC().Format(time.RFC3339Nano);elapsed:=finished.Sub(a.runStartedAt).Seconds();if a.runStartedAt.IsZero(){a.runStartedAt=finished;startedAt=finishedAt;elapsed=0}
  var completedCount,completedBytes int64;var contentSeconds float64
- _=a.db.QueryRow("SELECT COUNT(*),COALESCE(SUM(expected_bytes),0) FROM downloads WHERE status='completed' AND completed_at>=? AND completed_at<=?",startedAt,finishedAt).Scan(&completedCount,&completedBytes)
- _=a.db.QueryRow("SELECT COALESCE(SUM(content_time),0) FROM downloaded_episodes WHERE downloaded_at>=? AND downloaded_at<=?",startedAt,finishedAt).Scan(&contentSeconds)
+ _=a.db.QueryRow("SELECT COUNT(*),COALESCE(SUM(expected_bytes),0) FROM downloads WHERE status='completed' AND julianday(completed_at)>=julianday(?) AND julianday(completed_at)<=julianday(?)",startedAt,finishedAt).Scan(&completedCount,&completedBytes)
+ _=a.db.QueryRow("SELECT COALESCE(SUM(content_time),0) FROM downloaded_episodes WHERE julianday(downloaded_at)>=julianday(?) AND julianday(downloaded_at)<=julianday(?)",startedAt,finishedAt).Scan(&contentSeconds)
  payload:=map[string]any{"result":result,"at":finishedAt,"started_at":startedAt,"duration_seconds":math.Round(elapsed*100)/100,"mode":a.mode,"completed_count":completedCount,"completed_bytes":completedBytes,"content_seconds":contentSeconds}
  errorText:="";if runErr!=nil{errorText=runErr.Error();payload["error"]=errorText}
  raw,err:=json.Marshal(payload);if err!=nil{log.Printf("保存上次运行结果失败: %v",err);return}
