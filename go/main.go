@@ -1,6 +1,7 @@
 package main
 
 import (
+ "bufio"
  "context"
  "crypto/tls"
  "crypto/hmac"
@@ -56,7 +57,29 @@ type Config struct {
  Disks []DiskConfig `json:"disks"`; Tasks []Task `json:"tasks"`
 }
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
-type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool; spaceMu sync.Mutex; spaceInFlight map[string]uint64; processCreated float64; runID string; runStartedAt time.Time }
+type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool; spaceMu sync.Mutex; spaceInFlight map[string]uint64; liveMu sync.RWMutex; liveEpisodes map[string]liveEpisode; processCreated float64; runID string; runStartedAt time.Time }
+
+type liveEpisode struct {
+ EpisodeID string `json:"episode_id"`
+ TaskName string `json:"task_name"`
+ DiskName string `json:"disk_name"`
+ StartedAt string `json:"started_at"`
+ ExpectedBytes int64 `json:"expected_bytes"`
+ PartialBytes int64 `json:"partial_bytes"`
+}
+type liveTransferProgress struct {
+ DownloadedBytes int64 `json:"downloaded_bytes"`
+ ExpectedBytes int64 `json:"expected_bytes"`
+ RemainingBytes int64 `json:"remaining_bytes"`
+ SpeedBytesPerSecond float64 `json:"speed_bytes_per_second"`
+ ETASeconds *int64 `json:"eta_seconds"`
+ ProgressPercent float64 `json:"progress_percent"`
+}
+type liveStatusSnapshot struct {
+ Running bool `json:"running"`
+ RunningEpisodes []liveEpisode `json:"running_episodes"`
+ TransferProgress liveTransferProgress `json:"transfer_progress"`
+}
 //go:embed config.count.example.json
 var defaultCountConfigJSON []byte
 
@@ -128,11 +151,12 @@ func main(){
  effectiveRounds:=c.DefaultRounds;if *rounds>0{effectiveRounds=*rounds};if effectiveRounds<1||effectiveRounds>50{log.Fatal("--max-rounds / run.default_rounds 必须在 1 到 50 之间")}
  baseCtx,stop:=signal.NotifyContext(context.Background(),os.Interrupt);defer stop()
  ctx,cancel:=context.WithCancel(baseCtx);defer cancel()
- a:=&App{cfg:c,ctx:ctx,cancel:cancel,mode:*mode,recheck:*recheck,validated:map[string]bool{},spaceInFlight:map[string]uint64{}}
+ a:=&App{cfg:c,ctx:ctx,cancel:cancel,mode:*mode,recheck:*recheck,validated:map[string]bool{},spaceInFlight:map[string]uint64{},liveEpisodes:map[string]liveEpisode{}}
  if !*preserveStopRequest{if err=clearStopRequestDB(c.StateDB);err!=nil{log.Fatalf("清理旧暂停请求失败: %v",err)}}
  if err=a.open();err!=nil{log.Fatal(err)};defer a.db.Close()
  if err=a.registerProcess();err!=nil{log.Fatal(err)};defer a.unregisterProcess()
  watcherDone:=a.startStopWatcher();defer func(){cancel();<-watcherDone}()
+ if stopReporter:=a.startLiveStatusReporter(os.Getenv("MINIO_DOWNLOAD_STATUS_RELAY"),os.Getenv("MINIO_DOWNLOAD_STATUS_RELAY_TOKEN"));stopReporter!=nil{defer stopReporter()}
  if err=validateDiskSet(a.cfg.Disks);err!=nil{log.Fatal(err)}
  if *dry{
   if !*cleanup{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
@@ -149,6 +173,88 @@ func main(){
  if ctx.Err()!=nil{log.Print("已安全暂停，临时文件已保留供下次续传");a.saveLastRun("paused",nil)}else{log.Printf("执行结束 Go=%s/%s",runtime.GOOS,runtime.GOARCH);a.saveLastRun("finished",nil)}
 }
 
+func(a *App)beginLiveEpisode(e Episode,d DiskConfig,partial string){
+ size,err:=directorySizeBytes(partial);if err!=nil||size<0{size=0}
+ a.liveMu.Lock()
+ if a.liveEpisodes==nil{a.liveEpisodes=map[string]liveEpisode{}}
+ a.liveEpisodes[e.ID]=liveEpisode{EpisodeID:e.ID,TaskName:e.Task,DiskName:d.Name,StartedAt:time.Now().UTC().Format(time.RFC3339Nano),ExpectedBytes:e.Size,PartialBytes:size}
+ a.liveMu.Unlock()
+}
+func(a *App)adjustLiveEpisodeBytes(episodeID string,delta int64){
+ if delta==0{return}
+ a.liveMu.Lock()
+ if current,ok:=a.liveEpisodes[episodeID];ok{
+  current.PartialBytes+=delta
+  if current.PartialBytes<0{current.PartialBytes=0}
+  a.liveEpisodes[episodeID]=current
+ }
+ a.liveMu.Unlock()
+}
+func(a *App)endLiveEpisode(episodeID string){
+ a.liveMu.Lock();delete(a.liveEpisodes,episodeID);a.liveMu.Unlock()
+}
+func(a *App)liveStatusSnapshot(running bool,speed float64)liveStatusSnapshot{
+ a.liveMu.RLock()
+ episodes:=make([]liveEpisode,0,len(a.liveEpisodes))
+ for _,episode:=range a.liveEpisodes{episodes=append(episodes,episode)}
+ a.liveMu.RUnlock()
+ sort.Slice(episodes,func(i,j int)bool{if episodes[i].StartedAt==episodes[j].StartedAt{return episodes[i].EpisodeID<episodes[j].EpisodeID};return episodes[i].StartedAt<episodes[j].StartedAt})
+ downloaded,expected:=int64(0),int64(0)
+ for _,episode:=range episodes{downloaded+=maxInt64(episode.PartialBytes,0);expected+=maxInt64(episode.ExpectedBytes,0)}
+ displayed:=episodes
+ if len(displayed)>24{displayed=displayed[:24]}
+ if displayed==nil{displayed=[]liveEpisode{}}
+ if speed<0{speed=0}
+ remaining:=maxInt64(expected-downloaded,0)
+ percent:=0.0
+ if expected>0{percent=math.Min(100,float64(downloaded)/float64(expected)*100)}
+ var eta *int64
+ if speed>0&&remaining>0{value:=int64(math.Ceil(float64(remaining)/speed));eta=&value}else if expected>0&&remaining==0{value:=int64(0);eta=&value}
+ return liveStatusSnapshot{Running:running,RunningEpisodes:displayed,TransferProgress:liveTransferProgress{DownloadedBytes:downloaded,ExpectedBytes:expected,RemainingBytes:remaining,SpeedBytesPerSecond:math.Round(speed),ETASeconds:eta,ProgressPercent:math.Round(percent*100)/100}}
+}
+func(a *App)startLiveStatusReporter(address,token string)func(){
+ if strings.TrimSpace(address)==""||strings.TrimSpace(token)==""{return nil}
+ ctx,cancel:=context.WithCancel(a.ctx)
+ done:=make(chan struct{})
+ go func(){defer close(done);a.liveStatusRelayLoop(ctx,address,token)}()
+ return func(){cancel();<-done}
+}
+func(a *App)liveStatusRelayLoop(ctx context.Context,address,token string){
+ ticker:=time.NewTicker(500*time.Millisecond);defer ticker.Stop()
+ var conn net.Conn
+ var writer *bufio.Writer
+ closeConnection:=func(){if conn!=nil{_=conn.Close()};conn=nil;writer=nil}
+ connect:=func()bool{
+  candidate,err:=net.DialTimeout("tcp",address,2*time.Second);if err!=nil{return false}
+  buffer:=bufio.NewWriter(candidate)
+  _=candidate.SetWriteDeadline(time.Now().Add(2*time.Second))
+  if err=json.NewEncoder(buffer).Encode(map[string]string{"token":token});err!=nil{_=candidate.Close();return false}
+  if err=buffer.Flush();err!=nil{_=candidate.Close();return false}
+  conn=candidate;writer=buffer;return true
+ }
+ send:=func(snapshot liveStatusSnapshot){
+  if conn==nil&&!connect(){return}
+  _=conn.SetWriteDeadline(time.Now().Add(2*time.Second))
+  if err:=json.NewEncoder(writer).Encode(snapshot);err!=nil{closeConnection();return}
+  if err:=writer.Flush();err!=nil{closeConnection()}
+ }
+ var lastBytes int64
+ var lastAt time.Time
+ for{
+  select{
+  case <-ctx.Done():
+   send(a.liveStatusSnapshot(false,0));closeConnection();return
+  case now:=<-ticker.C:
+   snapshot:=a.liveStatusSnapshot(true,0)
+   speed:=0.0
+   if !lastAt.IsZero()&&now.After(lastAt)&&snapshot.TransferProgress.DownloadedBytes>=lastBytes{
+    speed=float64(snapshot.TransferProgress.DownloadedBytes-lastBytes)/now.Sub(lastAt).Seconds()
+   }
+   lastAt=now;lastBytes=snapshot.TransferProgress.DownloadedBytes
+   send(a.liveStatusSnapshot(true,speed))
+  }
+ }
+}
 type sqliteLogEntry struct{createdAt,message string}
 type sqliteLogWriter struct{
  db *sql.DB
@@ -575,7 +681,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 <section id="records" class="panel"><div class="card"><h2>运行日志（SQLite）</h2><div class="actions"><button class="btn" id="refresh-logs">刷新日志</button></div><pre id="logs" class="logs"></pre></div></section>
 </main>
 <script>
-let configData=null,statusData=null,logOffset=0,refreshTimer=null,logRefreshTimer=null,diskMounts=[];let statusRequestInFlight=false,logsRequestInFlight=false;
+let configData=null,statusData=null,logOffset=0,refreshTimer=null,logRefreshTimer=null,diskMounts=[];let statusRequestInFlight=false,logsRequestInFlight=false,statusEventsController=null,statusEventsRetryTimer=null,statusEventsRetryMs=1000;
 const $=id=>document.getElementById(id);
 async function downloadRunCSV(runID){
  try{
@@ -733,10 +839,63 @@ function renderStatus(d){
  $("task-status").innerHTML=rows.length?'<table><thead><tr><th>场景</th><th>任务</th><th>'+(durationMode?"累计时长 / 目标":"完成条数 / 目标")+'</th><th>累计时长</th></tr></thead><tbody>'+rows.join("")+'</tbody></table>':"尚未配置任务";
 }
 async function refreshStatus(){if(statusRequestInFlight)return;statusRequestInFlight=true;try{const range=$("run-history-range")?.value||"30";renderStatus(await api("/api/status?history_days="+encodeURIComponent(range)))}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad"}finally{statusRequestInFlight=false}}
-async function refreshLogs(){if(logsRequestInFlight)return;logsRequestInFlight=true;try{const d=await api("/api/logs?offset="+logOffset);if(d.reset){$("logs").textContent=d.text||""}else if(d.text){$("logs").textContent+=($("logs").textContent?"\n":"")+d.text}$("logs").scrollTop=$("logs").scrollHeight;logOffset=d.offset||logOffset}catch(e){$("logs").textContent=e.message}finally{logsRequestInFlight=false}}
+function renderLiveStatus(live){
+ if(!live)return;
+ const t=live.transfer_progress||{},running=!!live.running;
+ const speed=Math.max(0,Number(t.speed_bytes_per_second)||0),downloaded=Math.max(0,Number(t.downloaded_bytes)||0),expected=Math.max(0,Number(t.expected_bytes)||0),remaining=Math.max(0,Number(t.remaining_bytes)||0),percent=Math.max(0,Math.min(100,Number(t.progress_percent)||0));
+ const metrics=[["运行状态",running?"下载中":"空闲"],["下载速度",(speed/1048576).toFixed(2)+" MiB/s"],["已下载",formatGiB(downloaded)],["进度",percent.toFixed(1)+"%"],["预计剩余",t.eta_seconds===null||t.eta_seconds===undefined?"—":Math.round(Number(t.eta_seconds)/60)+" 分钟"]];
+ $("metrics").innerHTML=metrics.map(x=>'<div class="metric">'+esc(x[0])+'<b>'+esc(x[1])+'</b></div>').join("");
+ $("transfer-summary").textContent=running?(expected>0?percent.toFixed(1)+"% · "+(speed/1048576).toFixed(2)+" MiB/s":"传输中 · 等待对象大小统计"):"当前没有活动传输";
+ $("transfer-bar").style.width=(expected>0?percent:0)+"%";
+ $("transfer-downloaded").textContent="已传输 "+formatGiB(downloaded);
+ $("transfer-remaining").textContent=expected>0?"预计剩余 "+formatGiB(remaining):"待传输 —";
+ const stopPending=!!(statusData&&statusData.stop_requested);
+ $("run-control-state").textContent=stopPending?"正在安全停止":(running?"下载运行中":"当前空闲");
+ $("run-control-state").className="summary-chip "+(stopPending?"run-state-chip pending":running?"run-state-chip":"");
+ $("start-run").disabled=running;$("pause-run").disabled=!running||stopPending;$("force-run").disabled=!running;
+ $("pause-run").textContent=stopPending?"正在停止…":"安全暂停";
+ const active=live.running_episodes||[];
+ $("active-count").textContent=active.length+" 个活动任务";
+ $("active-downloads").innerHTML=active.length?'<div class="active-list">'+active.map(x=>{const partial=Math.max(0,Number(x.partial_bytes)||0),expected=Math.max(0,Number(x.expected_bytes)||0),pct=expected>0?Math.max(0,Math.min(100,partial/expected*100)):0;return '<div class="active-item"><div class="active-item-top"><div class="active-item-main"><div class="active-item-title">'+esc(x.task_name||"未知任务")+'</div><div class="active-item-meta">磁盘：'+esc(x.disk_name||"未分配")+' · Episode：'+esc(x.episode_id||"")+'</div></div><div class="active-item-size">'+formatGiB(partial)+'</div></div><div class="active-item-progress"><span style="width:'+pct.toFixed(1)+'%"></span></div><div class="active-item-bottom"><span>'+(expected>0?(pct.toFixed(1)+"% · 目标 "+formatGiB(expected)):"目标容量未知")+'</span><span>开始：'+esc(x.started_at||"—")+'</span></div></div>'}).join("")+'</div>':'<div class="notice">当前没有正在下载的 Episode。</div>';
+}
+function closeStatusEvents(){
+ if(statusEventsRetryTimer){clearTimeout(statusEventsRetryTimer);statusEventsRetryTimer=null}
+ if(statusEventsController){const current=statusEventsController;statusEventsController=null;current.abort()}
+}
+async function connectStatusEvents(){
+ if(statusEventsController||document.visibilityState!=="visible"||document.querySelector(".nav button.active")?.dataset.tab!=="dashboard")return;
+ const controller=new AbortController();statusEventsController=controller;
+ try{
+  const headers={"Accept":"text/event-stream"};const token=sessionStorage.getItem("minio_download_token");if(token)headers.Authorization="Bearer "+token;
+  const response=await fetch("/api/events",{headers,signal:controller.signal,cache:"no-store"});
+  if(!response.ok||!response.body)throw new Error("状态推送连接失败："+response.status);
+  statusEventsRetryMs=1000;
+  const reader=response.body.getReader(),decoder=new TextDecoder();let buffer="";
+  while(!controller.signal.aborted){
+   const part=await reader.read();if(part.done)break;
+   buffer+=decoder.decode(part.value,{stream:true});
+   const blocks=buffer.split(/\r?\n\r?\n/);buffer=blocks.pop()||"";
+   for(const block of blocks){
+    let eventName="message";const data=[];
+    for(const line of block.split(/\r?\n/)){if(line.startsWith("event:"))eventName=line.slice(6).trim();else if(line.startsWith("data:"))data.push(line.slice(5).trimStart())}
+    if(eventName==="status"&&data.length){try{renderLiveStatus(JSON.parse(data.join("\n")))}catch(e){}}
+   }
+  }
+  if(!controller.signal.aborted)throw new Error("状态推送连接已关闭");
+ }catch(e){
+  if(!controller.signal.aborted&&statusData){$("connection-state").textContent="状态推送断开，5 秒轮询继续工作";$("connection-state").className="bad"}
+ }finally{
+  if(statusEventsController===controller)statusEventsController=null;
+  if(!controller.signal.aborted&&document.visibilityState==="visible"&&document.querySelector(".nav button.active")?.dataset.tab==="dashboard"){
+   statusEventsRetryTimer=setTimeout(connectStatusEvents,statusEventsRetryMs);statusEventsRetryMs=Math.min(10000,statusEventsRetryMs*2);
+  }
+ }
+}
+async function refreshLogs(){"if(logsRequestInFlight)return;logsRequestInFlight=true;try{const d=await api("/api/logs?offset="+logOffset);if(d.reset){$("logs").textContent=d.text||""}else if(d.text){$("logs").textContent+=($("logs").textContent?"\n":"")+d.text}$("logs").scrollTop=$("logs").scrollHeight;logOffset=d.offset||logOffset}catch(e){$("logs").textContent=e.message}finally{logsRequestInFlight=false}}
 async function testConnection(target){try{const root=target==="minio"?$("connection-fields"):$("connection-fields");const d=await api("/api/config/test","POST",{target:target,values:readFields(root)});message("connection-result",d.message,d.ok)}catch(e){message("connection-result",e.message,false)}}
 $("run-history-range")?.addEventListener("change",refreshStatus);
-document.querySelectorAll(".nav button").forEach(btn=>btn.addEventListener("click",()=>{document.querySelectorAll(".nav button").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".panel").forEach(x=>x.classList.remove("active"));btn.classList.add("active");$(btn.dataset.tab).classList.add("active");if(btn.dataset.tab==="records")refreshLogs();else if(btn.dataset.tab==="dashboard")refreshStatus()}));
+document.querySelectorAll(".nav button").forEach(btn=>btn.addEventListener("click",()=>{document.querySelectorAll(".nav button").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".panel").forEach(x=>x.classList.remove("active"));btn.classList.add("active");$(btn.dataset.tab).classList.add("active");if(btn.dataset.tab==="records"){closeStatusEvents();refreshLogs()}else if(btn.dataset.tab==="dashboard"){refreshStatus();connectStatusEvents()}}));
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState!=="visible")closeStatusEvents();else if(document.querySelector(".nav button.active")?.dataset.tab==="dashboard")connectStatusEvents()});
 $("save-connection").onclick=async()=>{try{await api("/api/config/settings","PUT",{values:readFields($("connection-fields"))});message("connection-result","连接配置已保存到 SQLite",true);await loadConfig()}catch(e){message("connection-result",e.message,false)}};
 $("test-minio").onclick=()=>testConnection("minio");$("test-pg").onclick=()=>testConnection("pg");
 $("save-advanced").onclick=async()=>{try{await api("/api/config/settings","PUT",{values:readFields($("advanced-fields"))});alert("运行参数已保存到 SQLite");await loadConfig()}catch(e){alert(e.message)}};
@@ -752,11 +911,79 @@ $("pause-run").onclick=async()=>{try{await api("/api/stop","POST",{});message("s
 $("force-run").onclick=async()=>{if(!confirm("强制结束下载进程？临时文件保留，下次可续传。"))return;try{await api("/api/stop","POST",{force:true});message("setup-issues","已发送强制停止",true)}catch(e){message("setup-issues",e.message,false)}};
 $("refresh").onclick=refreshStatus;$("refresh-logs").onclick=refreshLogs;
 $("set-token").onclick=async()=>{const token=$("access-token").value;if(token.length<12){message("token-result","口令至少 12 个字符",false);return}try{const d=await api("/api/auth/token","PUT",{action:"set",token:token});sessionStorage.setItem("minio_download_token",token);$("access-token").value="";message("token-result","访问口令已保存。启用非本机监听前需重启程序。",true)}catch(e){message("token-result",e.message,false)}};
-(async()=>{try{await loadConfig();await refreshPlans();await refreshStatus();// Keep dashboard status polling infrequent: /api/status aggregates SQLite and disk statistics.
+(async()=>{try{await loadConfig();await refreshPlans();await refreshStatus();connectStatusEvents();
  refreshTimer=setInterval(()=>{if(document.visibilityState==="visible"&&document.querySelector(".nav button.active")?.dataset.tab==="dashboard")refreshStatus()},5000);logRefreshTimer=setInterval(()=>{if(document.visibilityState==="visible"&&document.querySelector(".nav button.active")?.dataset.tab==="records")refreshLogs()},20000)}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad";$("setup-issues").textContent="初始化失败："+e.message}})();
 </script></body></html>`;
 
-type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time;partialSizeMu sync.Mutex;partialSizeCache map[string]statusPartialSize;completedPathMu sync.Mutex;completedPathCache map[string]statusCompletedPath}
+type WebAPI struct{cfg Config;db *sql.DB;tokenHash string;configFile string;mode string;childPID int32;childCreated float64;childMu sync.RWMutex;runMu sync.Mutex;authMu sync.Mutex;statusMu sync.Mutex;statusSampleAt time.Time;statusSampleBytes int64;statusRateBps float64;failures map[string][]time.Time;lockouts map[string]time.Time;partialSizeMu sync.Mutex;partialSizeCache map[string]statusPartialSize;completedPathMu sync.Mutex;completedPathCache map[string]statusCompletedPath;statusRelayAddr string;statusRelayToken string;liveMu sync.RWMutex;liveSnapshot liveStatusSnapshot;liveUpdatedAt time.Time;eventMu sync.Mutex;eventSubscribers map[chan []byte]struct{}}
+func(a *WebAPI)acceptStatusRelay(listener net.Listener){
+ for{
+  conn,err:=listener.Accept()
+  if err!=nil{return}
+  go a.handleStatusRelay(conn)
+ }
+}
+func(a *WebAPI)handleStatusRelay(conn net.Conn){
+ defer conn.Close()
+ scanner:=bufio.NewScanner(conn);scanner.Buffer(make([]byte,4096),1<<20)
+ if !scanner.Scan(){return}
+ var auth map[string]string
+ if err:=json.Unmarshal(scanner.Bytes(),&auth);err!=nil||!hmac.Equal([]byte(auth["token"]),[]byte(a.statusRelayToken)){return}
+ for scanner.Scan(){
+  var snapshot liveStatusSnapshot
+  if err:=json.Unmarshal(scanner.Bytes(),&snapshot);err!=nil{continue}
+  a.publishLiveStatus(snapshot)
+ }
+ a.publishLiveStatus(liveStatusSnapshot{Running:false,RunningEpisodes:[]liveEpisode{}})
+}
+func(a *WebAPI)publishLiveStatus(snapshot liveStatusSnapshot){
+ if snapshot.RunningEpisodes==nil{snapshot.RunningEpisodes=[]liveEpisode{}}
+ if snapshot.TransferProgress.RemainingBytes<0{snapshot.TransferProgress.RemainingBytes=0}
+ if snapshot.TransferProgress.DownloadedBytes<0{snapshot.TransferProgress.DownloadedBytes=0}
+ if snapshot.TransferProgress.ExpectedBytes<0{snapshot.TransferProgress.ExpectedBytes=0}
+ a.liveMu.Lock();a.liveSnapshot=snapshot;a.liveUpdatedAt=time.Now();a.liveMu.Unlock()
+ encoded,err:=json.Marshal(snapshot);if err!=nil{return}
+ a.eventMu.Lock()
+ for subscriber:=range a.eventSubscribers{
+  select{case subscriber<-encoded:default:
+   select{case <-subscriber:default:}
+   select{case subscriber<-encoded:default:}
+  }
+ }
+ a.eventMu.Unlock()
+}
+func(a *WebAPI)currentLiveStatus()(liveStatusSnapshot,time.Time,bool){
+ a.liveMu.RLock();defer a.liveMu.RUnlock()
+ if a.liveUpdatedAt.IsZero(){return liveStatusSnapshot{},time.Time{},false}
+ return a.liveSnapshot,a.liveUpdatedAt,true
+}
+func(a *WebAPI)statusEvents(w http.ResponseWriter,r *http.Request){
+ flusher,ok:=w.(http.Flusher);if !ok{http.Error(w,"streaming 不受支持",http.StatusInternalServerError);return}
+ _=http.NewResponseController(w).SetWriteDeadline(time.Time{})
+ w.Header().Set("Content-Type","text/event-stream; charset=utf-8")
+ w.Header().Set("Cache-Control","no-cache, no-store")
+ w.Header().Set("Connection","keep-alive")
+ w.Header().Set("X-Accel-Buffering","no")
+ subscriber:=make(chan []byte,1)
+ a.eventMu.Lock()
+ if a.eventSubscribers==nil{a.eventSubscribers=map[chan []byte]struct{}{}}
+ a.eventSubscribers[subscriber]=struct{}{}
+ a.eventMu.Unlock()
+ defer func(){a.eventMu.Lock();delete(a.eventSubscribers,subscriber);a.eventMu.Unlock()}()
+ writeEvent:=func(payload []byte)error{
+  if _,err:=fmt.Fprintf(w,"event: status\ndata: %s\n\n",payload);err!=nil{return err}
+  flusher.Flush();return nil
+ }
+ if snapshot,_,ok:=a.currentLiveStatus();ok{if payload,err:=json.Marshal(snapshot);err==nil{if err=writeEvent(payload);err!=nil{return}}}
+ heartbeat:=time.NewTicker(15*time.Second);defer heartbeat.Stop()
+ for{
+  select{
+  case <-r.Context().Done():return
+  case payload:=<-subscriber:if err:=writeEvent(payload);err!=nil{return}
+  case <-heartbeat.C:if _,err:=io.WriteString(w,": keep-alive\n\n");err!=nil{return};flusher.Flush()
+  }
+ }
+}
 func(a *WebAPI)completedPath(path string)bool{return a.cfg.TrustCompletedRecords||completedEpisodeDir(path,a.cfg.RequireMCAP,a.cfg.MCAPPattern)}
 func serveWeb(c Config,host string,port int)error{
  if port<1||port>65535{return errors.New("web-port 必须在 1 到 65535 之间")}
@@ -767,6 +994,10 @@ func serveWeb(c Config,host string,port int)error{
   if e=db.QueryRow("SELECT CASE WHEN value='null' THEN '' ELSE trim(value,char(34)) END FROM settings WHERE key='web.token_hash'").Scan(&api.tokenHash);e!=nil&&e!=sql.ErrNoRows{return e}
  }
  if !isLoopbackHost(host)&&api.tokenHash==""{return errors.New("监听非本机地址之前必须先在 Python Web 配置库设置访问口令")}
+ relayListener,err:=net.Listen("tcp","127.0.0.1:0");if err!=nil{return fmt.Errorf("启动本机状态中继失败: %w",err)};defer relayListener.Close()
+ relaySecret:=make([]byte,32);if _,err=rand.Read(relaySecret);err!=nil{return fmt.Errorf("生成状态中继密钥失败: %w",err)}
+ api.statusRelayAddr=relayListener.Addr().String();api.statusRelayToken=hex.EncodeToString(relaySecret)
+ go api.acceptStatusRelay(relayListener)
  mux:=http.NewServeMux()
  mux.HandleFunc("GET /healthz",func(w http.ResponseWriter,r *http.Request){writeJSON(w,map[string]any{"ok":true,"version":"go-dev"})})
  mux.HandleFunc("GET /",func(w http.ResponseWriter,r *http.Request){if r.URL.Path!="/" {http.NotFound(w,r);return};w.Header().Set("Content-Type","text/html; charset=utf-8");_,_=io.WriteString(w,webUIHTML)})
@@ -788,6 +1019,7 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("POST /api/config/disks/check",api.configDisksCheck)
  mux.HandleFunc("GET /api/config",api.config)
  mux.HandleFunc("GET /api/status",api.status)
+ mux.HandleFunc("GET /api/events",api.statusEvents)
  mux.HandleFunc("POST /api/run",api.run)
  mux.HandleFunc("GET /api/episodes",api.episodes)
  mux.HandleFunc("GET /api/runs/{id}/episodes",api.runEpisodes)
@@ -978,7 +1210,9 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
  issues:=[]map[string]string{};if a.cfg.Endpoint==""||a.cfg.AccessKey==""||a.cfg.SecretKey==""||a.cfg.Bucket==""{issues=append(issues,map[string]string{"page":"connection","text":"请在连接配置中填写完整的 MinIO 地址、密钥和 Bucket"})};if a.cfg.PGHost==""||a.cfg.PGDB==""||a.cfg.PGUser==""||a.cfg.PGPassword==""{issues=append(issues,map[string]string{"page":"connection","text":"请在连接配置中填写完整的 PostgreSQL 连接信息"})};if len(a.cfg.Disks)==0{issues=append(issues,map[string]string{"page":"disks","text":"尚未配置目标磁盘"})};if len(a.cfg.Tasks)==0{issues=append(issues,map[string]string{"page":"tasks","text":"尚未配置下载任务"})}
  endpoint:=a.cfg.Endpoint;if u,e:=url.Parse(endpoint);e==nil&&u.Host!=""{endpoint=u.Scheme+"://"+u.Host}
  settings:=map[string]any{"min_free_gb":a.cfg.MinFreeGB,"writes_per_disk":a.cfg.Workers,"require_mcap":a.cfg.RequireMCAP,"mcap_pattern":a.cfg.MCAPPattern,"default_rounds":a.cfg.DefaultRounds}
- writeJSON(w,map[string]any{"version":"go-dev","data_version":a.cfg.DataVersion,"downloader":state,"stop_requested":running&&isStopRequested(control["stop_requested"]),"setup_issues":issues,"minio":map[string]any{"endpoint":endpoint,"bucket":a.cfg.Bucket},"settings":settings,"last_run":last,"history_summary":historySummary,"disk_history":diskHistory,"run_history":runHistory,"recent_failures":recentFailures,"stale_records":staleRecords,"running_episodes":runningEpisodes,"transfer_progress":map[string]any{"downloaded_bytes":runningBytes,"expected_bytes":expectedBytes,"remaining_bytes":maxInt64(expectedBytes-runningBytes,0),"speed_bytes_per_second":math.Round(speedBps),"eta_seconds":etaSeconds,"progress_percent":progressPercent},"disks":disks,"scenes":scenes})
+ response:=map[string]any{"version":"go-dev","data_version":a.cfg.DataVersion,"downloader":state,"stop_requested":running&&isStopRequested(control["stop_requested"]),"setup_issues":issues,"minio":map[string]any{"endpoint":endpoint,"bucket":a.cfg.Bucket},"settings":settings,"last_run":last,"history_summary":historySummary,"disk_history":diskHistory,"run_history":runHistory,"recent_failures":recentFailures,"stale_records":staleRecords,"running_episodes":runningEpisodes,"transfer_progress":map[string]any{"downloaded_bytes":runningBytes,"expected_bytes":expectedBytes,"remaining_bytes":maxInt64(expectedBytes-runningBytes,0),"speed_bytes_per_second":math.Round(speedBps),"eta_seconds":etaSeconds,"progress_percent":progressPercent},"disks":disks,"scenes":scenes}
+ if live,updated,ok:=a.currentLiveStatus();ok&&time.Since(updated)<=2*time.Second{response["running_episodes"]=live.RunningEpisodes;response["transfer_progress"]=live.TransferProgress}
+ writeJSON(w,response)
 }
 func webConfigSchema() []map[string]any {
  return []map[string]any{
@@ -1539,7 +1773,7 @@ func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
  if err:=clearStopRequestDB(a.cfg.StateDB);err!=nil{writeJSONStatus(w,500,map[string]any{"error":"清理旧暂停请求失败: "+err.Error()});return}
  dbName,err:=filepath.Abs(a.cfg.StateDB);if err!=nil{writeJSONStatus(w,500,map[string]any{"error":"解析 SQLite 路径失败: "+err.Error()});return}
  args:=[]string{"--worker","--db",dbName,"--mode",body.Mode,"--max-rounds",strconv.Itoa(body.MaxRounds),"--preserve-stop-request"};if body.RecheckMissing{args=append(args,"--recheck-missing")}
- cmd:=exec.Command(executable,args...);configureDetached(cmd);cmd.Stdout=io.Discard;cmd.Stderr=io.Discard;cmd.Stdin=nil
+ cmd:=exec.Command(executable,args...);if a.statusRelayAddr!=""&&a.statusRelayToken!=""{cmd.Env=append(os.Environ(),"MINIO_DOWNLOAD_STATUS_RELAY="+a.statusRelayAddr,"MINIO_DOWNLOAD_STATUS_RELAY_TOKEN="+a.statusRelayToken)};configureDetached(cmd);cmd.Stdout=io.Discard;cmd.Stderr=io.Discard;cmd.Stdin=nil
  if err=cmd.Start();err!=nil{writeJSONStatus(w,500,map[string]any{"error":"启动下载器失败: "+err.Error()});return}
  go func(){_=cmd.Wait()}();created:=float64(0);if proc,e:=process.NewProcess(int32(cmd.Process.Pid));e==nil{if ms,e:=proc.CreateTime();e==nil{created=float64(ms)/1000}};a.setChildProcess(int32(cmd.Process.Pid),created)
  writeJSON(w,map[string]any{"ok":true,"pid":cmd.Process.Pid})
@@ -2443,6 +2677,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
   if status!="ok"{_=os.RemoveAll(partial);_=a.set(e,d,final,"",status,detail);return nil}
  }
  _=a.set(e,d,final,partial,"running","")
+ a.beginLiveEpisode(e,d,partial);defer a.endLiveEpisode(e.ID)
  objects:=make([]minio.ObjectInfo,0)
  for obj:=range a.mc.ListObjects(a.ctx,a.cfg.Bucket,minio.ListObjectsOptions{Prefix:e.ParentKey+"/",Recursive:true}){
   if obj.Err!=nil{return a.fail(e,d,final,partial,obj.Err)}
@@ -2479,7 +2714,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
     if errors.Is(spaceErr,errInsufficientDiskSpace){stopStarting=true}
     if spaceErr==nil{reservation.consumed=uint64(partialBytes)}
     admissionMu.Unlock()
-    if spaceErr!=nil{err=spaceErr}else{defer reservation.Release();err=a.fetchObject(item.Key,dst,item,reservation)}
+    if spaceErr!=nil{err=spaceErr}else{defer reservation.Release();err=a.fetchObject(e.ID,item.Key,dst,item,reservation)}
    }
    if err!=nil{mu.Lock();if first==nil{first=err};mu.Unlock();return}
    completedObjects.Add(1)
@@ -2670,12 +2905,12 @@ func replaceDownloadedFileForOS(src,dst string,windows bool)error{
  }
  return nil
 }
-func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *spaceReservation)error{
+func(a *App)fetchObject(episodeID,key,dst string,expected minio.ObjectInfo,reservation *spaceReservation)error{
  if existingObjectComplete(dst,expected){return nil}
  tmp:=dst+".minio-tmp"
  var writtenThisCall int64=reservation.ConsumedBytes()
- onProgress:=func(n int64){if n>0{reservation.Consume(n);writtenThisCall+=n}}
- restoreWritten:=func(){if writtenThisCall>0{reservation.Restore(writtenThisCall);writtenThisCall=0}}
+ onProgress:=func(n int64){if n>0{reservation.Consume(n);writtenThisCall+=n;a.adjustLiveEpisodeBytes(episodeID,n)}}
+ restoreWritten:=func(){if writtenThisCall>0{reservation.Restore(writtenThisCall);a.adjustLiveEpisodeBytes(episodeID,-writtenThisCall);writtenThisCall=0}}
  discardTemp:=func()error{
   err:=os.Remove(tmp)
   if err==nil||os.IsNotExist(err){restoreWritten();return nil}
@@ -2692,6 +2927,7 @@ func(a *App)fetchObject(key,dst string,expected minio.ObjectInfo,reservation *sp
      if err:=truncateResumeFile(tmp,offset);err!=nil{return fmt.Errorf("回退续传临时文件失败 %s: %w",key,err)}
      backedOff:=st.Size()-offset
      reservation.Restore(backedOff)
+     a.adjustLiveEpisodeBytes(episodeID,-backedOff)
      writtenThisCall-=backedOff
     }
    }
