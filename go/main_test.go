@@ -1926,3 +1926,20 @@ func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
  csvBody:=exportResponse.Body.String();if !strings.Contains(csvBody,"episode-2")||strings.Contains(csvBody,"episode-1")||!strings.Contains(csvBody,"simulated failure")||!strings.Contains(csvBody,"task_summary")||!strings.Contains(csvBody,"50.0%"){t.Fatalf("CSV export did not include filtered Episode rows and task summary: %q",csvBody)}
  if csvSafeCell("=HYPERLINK(1)")!="'=HYPERLINK(1)"||csvSafeCell("normal")!="normal"{t.Fatal("CSV formula injection protection failed")}
 }
+
+func TestRunTimingMetricsPersist(t *testing.T) {
+ dbPath:=filepath.Join(t.TempDir(),"timing.sqlite3")
+ if err:=initializeSQLiteDatabase(dbPath);err!=nil{t.Fatal(err)}
+ db,err:=sql.Open("sqlite",dbPath);if err!=nil{t.Fatal(err)};defer db.Close();db.SetMaxOpenConns(1)
+ app:=&App{db:db,runID:"timing-run"}
+ if err=app.recordRunTaskTiming("task-a",5,10);err!=nil{t.Fatal(err)}
+ if err=app.recordRunTaskTiming("task-a",3,20);err!=nil{t.Fatal(err)}
+ var wait,duration float64
+ if err=db.QueryRow("SELECT wait_seconds,duration_seconds FROM run_task_history WHERE run_id=? AND task_name=?","timing-run","task-a").Scan(&wait,&duration);err!=nil{t.Fatal(err)}
+ if wait!=8||duration!=30{t.Fatalf("unexpected task timing: wait=%v duration=%v",wait,duration)}
+ if _,err=db.Exec("INSERT INTO run_episode_history(run_id,episode_id,task_name,status,disk_name,completed_bytes,content_seconds,updated_at) VALUES('timing-run','ep-1','task-a','completed','disk-a',10485760,60,?)",time.Now().UTC().Format(time.RFC3339Nano));err!=nil{t.Fatal(err)}
+ if err=app.recordRunDiskTiming("disk-a",20);err!=nil{t.Fatal(err)}
+ var diskDuration float64;var bytes int64
+ if err=db.QueryRow("SELECT duration_seconds,completed_bytes FROM run_disk_history WHERE run_id=? AND disk_name=?","timing-run","disk-a").Scan(&diskDuration,&bytes);err!=nil{t.Fatal(err)}
+ if diskDuration!=20||bytes!=10485760{t.Fatalf("unexpected disk timing: duration=%v bytes=%d",diskDuration,bytes)}
+}
