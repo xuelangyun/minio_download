@@ -1314,7 +1314,8 @@ func TestWebPlanApplyReplaceAndMerge(t *testing.T) {
 		"CREATE TABLE task_aliases(task_id INTEGER NOT NULL,position INTEGER NOT NULL,alias TEXT NOT NULL,PRIMARY KEY(task_id,alias))",
 	}
 	for _, stmt := range schema { if _, err := db.Exec(stmt); err != nil { t.Fatal(err) } }
-	if err := db.Close(); err != nil { t.Fatal(err) }
+	api.db = db // planApply checks process_state through the runtime DB handle.
+	defer db.Close()
 	payload := `{"data_version":"v2","scenes":[{"scene":"Office","tasks":[{"name":"文件整理","count":12,"aliases":["整理文件"],"dir":"文件整理","tags":["办公"]}]}]}`
 	created := httptest.NewRecorder()
 	api.planCreate(created, httptest.NewRequest(http.MethodPost, "/api/plans", strings.NewReader(`{"name":"办公方案","payload":`+payload+`}`)))
