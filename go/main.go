@@ -504,7 +504,7 @@ function renderStatus(d){
  const result=d.last_run||{};
  const resultLabel={finished:"已完成",paused:"已暂停",error:"运行失败"}[result.result]||"暂无记录";
  $("last-run-state").textContent=resultLabel;
- $("last-run-detail").textContent=result.at?("最近运行："+result.at+" · 模式："+(result.mode==="duration"?"按时长":"按条数")+(result.error?" · 错误："+result.error:"")):"暂无历史运行结果";
+ const latestRun=(d.run_history||[])[0]||{},latestStats=latestRun.episode_stats||{};const latestEpisodeSummary=latestRun.run_id?(" · Episode：成功 "+Number(latestStats.completed||0)+" / 失败 "+Number(latestStats.failed||0)+" / 暂停 "+Number(latestStats.paused||0)):"";$("last-run-detail").textContent=result.at?("最近运行："+result.at+" · 模式："+(result.mode==="duration"?"按时长":"按条数")+latestEpisodeSummary+(result.error?" · 错误："+result.error:"")):"暂无历史运行结果";
  const summaryItems=[["完成记录",Number(summary.completed||0)+" 条"],["失败记录",Number(summary.failed||0)+" 条"],["暂停 / 待续传",Number(summary.paused||0)+ " / "+Number(summary.pending||0)],["完成数据容量",formatGiB(summary.completed_bytes||0)],["累计内容时长",(Number(summary.content_seconds||0)/3600).toFixed(1)+" 小时"]];
  $("run-summary").innerHTML=summaryItems.map(x=>'<div class="metric">'+esc(x[0])+'<b>'+esc(x[1])+'</b></div>').join("");
  const diskHistory=d.disk_history||[];
