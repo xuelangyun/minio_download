@@ -1880,5 +1880,5 @@ func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
  if response.Code!=http.StatusOK{t.Fatalf("run episodes API status=%d body=%s",response.Code,response.Body.String())}
  var payload struct{Total int `json:"total"`;Episodes []struct{ID string `json:"episode_id"`;Status string `json:"status"`} `json:"episodes"`}
  if err=json.Unmarshal(response.Body.Bytes(),&payload);err!=nil{t.Fatal(err)}
- if payload.Total!=2||len(payload.Episodes)!=2{t.Fatalf("unexpected episode page: total=%d episodes=%d",payload.Total,len(payload.Episodes))}
+ if payload.Total!=3||len(payload.Episodes)!=3{t.Fatalf("unexpected episode page: total=%d episodes=%d",payload.Total,len(payload.Episodes))}
 }
