@@ -173,7 +173,6 @@ func initializeSQLiteDatabase(name string)error{
   "CREATE INDEX IF NOT EXISTS idx_download_task_status ON downloads(task_name,status);"+
   "CREATE INDEX IF NOT EXISTS idx_downloaded_task ON downloaded_episodes(task_name);"+
   "CREATE INDEX IF NOT EXISTS idx_runtime_logs_created ON runtime_logs(created_at);");err!=nil{return err}
- if err=ensureColumn(db,"tasks","target_hours","REAL NOT NULL DEFAULT 0");err!=nil{return err}
  for _,item:=range webConfigSchema(){
   key,ok:=item["key"].(string);if !ok{continue};value:=item["default"];if value==nil{continue}
   encoded,e:=json.Marshal(value);if e!=nil{return e}
@@ -1225,14 +1224,6 @@ func (a *App) recordAndSet(e Episode, d DiskConfig, final string) error {
 	return nil
 }
 func nullableTime(ok bool,v string)any{if ok{return v};return nil}
-func ensureColumn(db *sql.DB,table,column,typ string)error{
- rows,err:=db.Query("PRAGMA table_info("+table+")");if err!=nil{return err}
- found:=false
- for rows.Next(){var cid,notnull,pk int;var name,kind string;var def sql.NullString;if err=rows.Scan(&cid,&name,&kind,&notnull,&def,&pk);err!=nil{rows.Close();return err};if name==column{found=true}}
- if err=rows.Err();err!=nil{rows.Close();return err};if err=rows.Close();err!=nil{return err}
- if !found{_,err=db.Exec("ALTER TABLE "+table+" ADD COLUMN "+column+" "+typ)}
- return err
-}
 func nullable(s string)any{if s==""{return nil};return s}
 func completedEpisodeDir(dir string,requireMCAP bool,mcapPattern string)bool{
  info,err:=os.Lstat(dir)
