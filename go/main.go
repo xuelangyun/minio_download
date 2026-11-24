@@ -247,10 +247,12 @@ document.querySelectorAll(".nav button").forEach(btn=>btn.addEventListener("clic
 $("save-connection").onclick=async()=>{try{await api("/api/config/settings","PUT",{values:readFields($("connection-fields"))});message("connection-result","连接配置已保存到 SQLite",true);await loadConfig()}catch(e){message("connection-result",e.message,false)}};
 $("test-minio").onclick=()=>testConnection("minio");$("test-pg").onclick=()=>testConnection("pg");
 $("save-advanced").onclick=async()=>{try{await api("/api/config/settings","PUT",{values:readFields($("advanced-fields"))});alert("运行参数已保存到 SQLite");await loadConfig()}catch(e){alert(e.message)}};
-$("detect-disks").onclick=async()=>{await loadDiskMounts();renderDisks(readDisks());message("disk-result","已重新检测到 "+diskMounts.length+" 个挂载点",true)};$("add-disk").onclick=addDisk;\n$("check-disks").onclick=async()=>{try{const d=await api("/api/config/disks/check","POST",{disks:readDisks()});message("disk-result",d.results.map(x=>x.name+": "+(x.ok?"正常":"异常")+"；"+(x.notes||[]).map(n=>n.text).join("；")+(x.ok?"；可用空间 "+(x.free/1073741824).toFixed(1)+" GiB":"")).join("\\n"),d.results.every(x=>x.ok))}catch(e){message("disk-result",e.message,false)}};
+$("detect-disks").onclick=async()=>{await loadDiskMounts();renderDisks(readDisks());message("disk-result","已重新检测到 "+diskMounts.length+" 个挂载点",true)};$("add-disk").onclick=addDisk;
+$("check-disks").onclick=async()=>{try{const d=await api("/api/config/disks/check","POST",{disks:readDisks()});message("disk-result",d.results.map(x=>x.name+": "+(x.ok?"正常":"异常")+"；"+(x.notes||[]).map(n=>n.text).join("；")+(x.ok?"；可用空间 "+(x.free/1073741824).toFixed(1)+" GiB":"")).join("\n"),d.results.every(x=>x.ok))}catch(e){message("disk-result",e.message,false)}};
 $("save-disks").onclick=async()=>{try{await api("/api/config/disks","PUT",{disks:readDisks()});message("disk-result","磁盘配置已保存到 SQLite",true);await loadConfig();await refreshStatus()}catch(e){message("disk-result",e.message,false)}};
 $("save-tasks").onclick=async()=>{try{const value=JSON.parse($("task-json").value);value.data_version=$("data-version").value;await api("/api/config/tasks","PUT",value);message("task-result","任务配置已保存到 SQLite",true);await loadConfig()}catch(e){message("task-result",e.message,false)}};
-$("refresh-plans").onclick=refreshPlans;$("save-plan").onclick=savePlan;\n$("reset-tasks").onclick=async()=>{if(!confirm("恢复内置默认任务清单？当前任务清单将被替换。"))return;try{await api("/api/config/tasks/reset","POST",{});message("task-result","已恢复默认任务",true);await loadConfig()}catch(e){message("task-result",e.message,false)}};
+$("refresh-plans").onclick=refreshPlans;$("save-plan").onclick=savePlan;
+$("reset-tasks").onclick=async()=>{if(!confirm("恢复内置默认任务清单？当前任务清单将被替换。"))return;try{await api("/api/config/tasks/reset","POST",{});message("task-result","已恢复默认任务",true);await loadConfig()}catch(e){message("task-result",e.message,false)}};
 $("start-run").onclick=async()=>{try{const d=await api("/api/run","POST",{mode:$("download-mode").value});message("setup-issues","下载进程已启动，PID "+d.pid,true);await refreshStatus()}catch(e){message("setup-issues",e.message,false)}};
 $("pause-run").onclick=async()=>{try{await api("/api/stop","POST",{});message("setup-issues","已发送安全暂停请求",true)}catch(e){message("setup-issues",e.message,false)}};
 $("force-run").onclick=async()=>{if(!confirm("强制结束下载进程？临时文件保留，下次可续传。"))return;try{await api("/api/stop","POST",{force:true});message("setup-issues","已发送强制停止",true)}catch(e){message("setup-issues",e.message,false)}};
@@ -286,7 +288,8 @@ func serveWeb(c Config,host string,port int)error{
  mux.HandleFunc("POST /api/config/test",api.configTest)
  mux.HandleFunc("PUT /api/config/tasks",api.configTasks)
  mux.HandleFunc("POST /api/config/tasks/reset",api.configTasksReset)
- mux.HandleFunc("GET /api/config/disks/detect",api.configDisksDetect)\n mux.HandleFunc("PUT /api/config/disks",api.configDisks)
+ mux.HandleFunc("GET /api/config/disks/detect",api.configDisksDetect)
+ mux.HandleFunc("PUT /api/config/disks",api.configDisks)
  mux.HandleFunc("POST /api/config/disks/check",api.configDisksCheck)
  mux.HandleFunc("GET /api/config",api.config)
  mux.HandleFunc("GET /api/status",api.status)
