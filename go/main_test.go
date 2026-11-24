@@ -1984,22 +1984,23 @@ func TestSQLiteLogWriterFlushesBufferedEntriesOnClose(t *testing.T) {
 
 	var output bytes.Buffer
 	writer := newSQLiteLogWriter(db, &output)
-	for i := 0; i < 3; i++ {
-		line := fmt.Sprintf("buffered-%d\\n", i)
+	for i := 0; i < 64; i++ {
+		line := fmt.Sprintf("buffered-%d%s", i, string(rune(10)))
 		if n, writeErr := writer.Write([]byte(line)); writeErr != nil || n != len(line) {
 			t.Fatalf("write log entry: n=%d err=%v", n, writeErr)
 		}
 	}
+	var count int
+	if err = db.QueryRow("SELECT COUNT(*) FROM runtime_logs").Scan(&count); err != nil { t.Fatal(err) }
+	if count != 64 { t.Fatalf("expected 64 entries to flush as one batch, got %d", count) }
+	line := "buffered-tail" + string(rune(10))
+	if n, writeErr := writer.Write([]byte(line)); writeErr != nil || n != len(line) { t.Fatalf("write tail log entry: n=%d err=%v", n, writeErr) }
 	writer.Close()
 
-	var count int
-	if err = db.QueryRow("SELECT COUNT(*) FROM runtime_logs").Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 3 {
-		t.Fatalf("expected 3 persisted log rows after close, got %d", count)
-	}
-	if got := output.String(); !strings.Contains(got, "buffered-0") || !strings.Contains(got, "buffered-2") {
+	var countFinal int
+	if err = db.QueryRow("SELECT COUNT(*) FROM runtime_logs").Scan(&countFinal); err != nil { t.Fatal(err) }
+	if countFinal != 65 { t.Fatalf("expected 65 persisted log rows after close, got %d", countFinal) }
+	if got := output.String(); !strings.Contains(got, "buffered-0") || !strings.Contains(got, "buffered-tail") {
 		t.Fatalf("stdout mirror lost log lines: %q", got)
 	}
 }
