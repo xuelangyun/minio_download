@@ -672,7 +672,9 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
  historySummary:=map[string]any{"completed":0,"failed":0,"paused":0,"pending":0,"completed_bytes":int64(0),"content_seconds":float64(0)}
  statusRows,summaryErr:=a.db.Query("SELECT status,COUNT(*) FROM downloads GROUP BY status")
  if summaryErr==nil{for statusRows.Next(){var status string;var count int64;if statusRows.Scan(&status,&count)==nil{switch status{case "completed":historySummary["completed"]=count;case "failed":historySummary["failed"]=count;case "paused":historySummary["paused"]=count;case "pending":historySummary["pending"]=count}}};statusRows.Close()}
- _=a.db.QueryRow("SELECT COALESCE(SUM(file_size),0),COALESCE(SUM(content_time),0) FROM downloaded_episodes").Scan(&historySummary["completed_bytes"],&historySummary["content_seconds"])
+ var completedBytes int64;var contentSeconds float64
+ _=a.db.QueryRow("SELECT COALESCE(SUM(file_size),0),COALESCE(SUM(content_time),0) FROM downloaded_episodes").Scan(&completedBytes,&contentSeconds)
+ historySummary["completed_bytes"]=completedBytes;historySummary["content_seconds"]=contentSeconds
  diskHistory:=[]map[string]any{}
  diskRows,diskErr:=a.db.Query("SELECT COALESCE(disk_name,''),COUNT(*),COALESCE(SUM(file_size),0),COALESCE(SUM(content_time),0) FROM downloaded_episodes GROUP BY disk_name ORDER BY disk_name")
  if diskErr==nil{for diskRows.Next(){var name string;var count,bytes int64;var seconds float64;if diskRows.Scan(&name,&count,&bytes,&seconds)==nil{diskHistory=append(diskHistory,map[string]any{"disk_name":name,"count":count,"bytes":bytes,"seconds":seconds})}};diskRows.Close()}
