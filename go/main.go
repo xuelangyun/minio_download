@@ -1164,58 +1164,188 @@ func(a *WebAPI)cachedCompletedPath(target string,now time.Time)bool{
  a.completedPathMu.Unlock()
  return completed
 }
+type dashboardTaskProgress struct { Count int; Seconds float64; Bytes int64 }
+type dashboardDiskTotal struct { Count int64; Bytes int64; Seconds float64 }
+type dashboardLedgerTotals struct {
+ Tasks map[string]dashboardTaskProgress
+ Disks map[string]dashboardDiskTotal
+ Completed int64
+ CompletedBytes int64
+ ContentSeconds float64
+ StaleRecords int
+}
+func newDashboardLedgerTotals() dashboardLedgerTotals {
+ return dashboardLedgerTotals{Tasks:map[string]dashboardTaskProgress{},Disks:map[string]dashboardDiskTotal{}}
+}
+func(a *dashboardLedgerTotals)add(task,diskName string,size sql.NullInt64,contentTime sql.NullFloat64,target sql.NullString,completed,configuredTask bool){
+ if !target.Valid{return}
+ if !completed{if configuredTask{a.StaleRecords++};return}
+ bytes,seconds:=int64(0),0.0
+ if size.Valid{bytes=size.Int64};if contentTime.Valid{seconds=contentTime.Float64}
+ taskTotal:=a.Tasks[task];taskTotal.Count++;taskTotal.Bytes+=bytes;taskTotal.Seconds+=seconds;a.Tasks[task]=taskTotal
+ diskTotal:=a.Disks[diskName];diskTotal.Count++;diskTotal.Bytes+=bytes;diskTotal.Seconds+=seconds;a.Disks[diskName]=diskTotal
+ a.Completed++;a.CompletedBytes+=bytes;a.ContentSeconds+=seconds
+}
 func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
- sampledAt:=time.Now();scenes:=[]map[string]any{};sceneIndex:=map[string]int{};taskDisk:=map[string]string{};staleRecords:=0
- rowsAssign,err:=a.db.Query("SELECT task_name,disk_name FROM task_disk_assignments");if err==nil{for rowsAssign.Next(){var task,diskName string;if rowsAssign.Scan(&task,&diskName)==nil{taskDisk[task]=diskName}};rowsAssign.Close()}
+ sampledAt:=time.Now()
+ taskDisk:=map[string]string{}
+ rowsAssign,err:=a.db.Query("SELECT task_name,disk_name FROM task_disk_assignments")
+ if err==nil{for rowsAssign.Next(){var task,diskName string;if rowsAssign.Scan(&task,&diskName)==nil{taskDisk[task]=diskName}};rowsAssign.Close()}
+ configuredTasks:=make(map[string]bool,len(a.cfg.Tasks))
+ for _,task:=range a.cfg.Tasks{configuredTasks[task.Name]=true}
+ ledger:=newDashboardLedgerTotals()
+ ledgerRows,ledgerErr:=a.db.Query("SELECT task_name,COALESCE(disk_name,''),file_size,content_time,target_path FROM downloaded_episodes")
+ if ledgerErr!=nil{ledgerRows,ledgerErr=a.db.Query("SELECT task_name,'' AS disk_name,file_size,content_time,target_path FROM downloaded_episodes")}
+ if ledgerErr==nil{
+  for ledgerRows.Next(){
+   var task,diskName string;var size sql.NullInt64;var seconds sql.NullFloat64;var target sql.NullString
+   if ledgerRows.Scan(&task,&diskName,&size,&seconds,&target)!=nil{continue}
+   completed:=target.Valid&&a.cachedCompletedPath(target.String,sampledAt)
+   ledger.add(task,diskName,size,seconds,target,completed,configuredTasks[task])
+  }
+  ledgerRows.Close()
+ }
+ taskIssues:=map[string]map[string]int{}
+ issueRows,issueErr:=a.db.Query("SELECT task_name,status,COUNT(*) FROM downloads WHERE status<>'completed' GROUP BY task_name,status")
+ if issueErr==nil{
+  for issueRows.Next(){var task,state string;var count int;if issueRows.Scan(&task,&state,&count)==nil{if taskIssues[task]==nil{taskIssues[task]=map[string]int{}};taskIssues[task][state]=count}}
+  issueRows.Close()
+ }
+ scenes:=[]map[string]any{}
+ sceneIndex:=map[string]int{}
  for _,t:=range a.cfg.Tasks{
-  idx,ok:=sceneIndex[t.Scene];if !ok{idx=len(scenes);sceneIndex[t.Scene]=idx;scenes=append(scenes,map[string]any{"scene":t.Scene,"tasks":[]map[string]any{}})}
-  rows:=scenes[idx]["tasks"].([]map[string]any);count:=0;seconds:=0.0;bytesCount:=int64(0);issues:=map[string]int{}
-  records,e:=a.db.Query("SELECT content_time,file_size,target_path FROM downloaded_episodes WHERE task_name=?",t.Name)
-  if e==nil{for records.Next(){var sec sql.NullFloat64;var size sql.NullInt64;var target sql.NullString;if records.Scan(&sec,&size,&target)!=nil{continue};if target.Valid&&a.cachedCompletedPath(target.String,sampledAt){count++;seconds+=sec.Float64;bytesCount+=size.Int64}else if target.Valid{staleRecords++}};records.Close()}
-  issueRows,e:=a.db.Query("SELECT status,COUNT(*) FROM downloads WHERE task_name=? AND status<>'completed' GROUP BY status",t.Name)
-  if e==nil{for issueRows.Next(){var state string;var n int;if issueRows.Scan(&state,&n)==nil{issues[state]=n}};issueRows.Close()}
-  var assigned any=nil;if name,ok:=taskDisk[t.Name];ok{assigned=name};aliases:=t.Aliases;if aliases==nil{aliases=[]string{}};tags:=t.Tags;if tags==nil{tags=[]string{}}
-  rows=append(rows,map[string]any{"name":t.Name,"dir":taskDir(t),"target":t.TargetCount,"target_hours":t.TargetHours,"aliases":aliases,"tags":tags,"downloaded":count,"hours":math.Round(seconds/3600*100)/100,"bytes":bytesCount,"issues":issues,"disk":assigned});scenes[idx]["tasks"]=rows
+  idx,ok:=sceneIndex[t.Scene]
+  if !ok{idx=len(scenes);sceneIndex[t.Scene]=idx;scenes=append(scenes,map[string]any{"scene":t.Scene,"tasks":[]map[string]any{}})}
+  rows:=scenes[idx]["tasks"].([]map[string]any)
+  progress:=ledger.Tasks[t.Name]
+  issues:=taskIssues[t.Name];if issues==nil{issues=map[string]int{}}
+  var assigned any=nil;if name,ok:=taskDisk[t.Name];ok{assigned=name}
+  aliases:=t.Aliases;if aliases==nil{aliases=[]string{}}
+  tags:=t.Tags;if tags==nil{tags=[]string{}}
+  rows=append(rows,map[string]any{"name":t.Name,"dir":taskDir(t),"target":t.TargetCount,"target_hours":t.TargetHours,"aliases":aliases,"tags":tags,"downloaded":progress.Count,"hours":math.Round(progress.Seconds/3600*100)/100,"bytes":progress.Bytes,"issues":issues,"disk":assigned})
+  scenes[idx]["tasks"]=rows
  }
  disks:=[]map[string]any{}
  diskTasks:=map[string][]string{};for task,name:=range taskDisk{diskTasks[name]=append(diskTasks[name],task)}
- for _,d:=range a.cfg.Disks{usage,e:=disk.Usage(d.Path);item:=map[string]any{"name":d.Name,"path":d.Path,"mounted":isMountedPath(d.Mountpoint),"exists":pathIsDir(d.Path),"total":uint64(0),"free":uint64(0),"used":uint64(0),"tasks":diskTasks[d.Name]};if e==nil{item["total"]=usage.Total;item["free"]=usage.Free;item["used"]=usage.Used};disks=append(disks,item)}
+ partitions,_:=disk.Partitions(false)
+ mounted:=map[string]bool{}
+ for _,partition:=range partitions{mount:=filepath.Clean(partition.Mountpoint);if runtime.GOOS=="windows"{mount=strings.ToLower(mount)};mounted[mount]=true}
+ for _,d:=range a.cfg.Disks{
+  usage,e:=disk.Usage(d.Path)
+  mount:=filepath.Clean(d.Mountpoint);if runtime.GOOS=="windows"{mount=strings.ToLower(mount)}
+  item:=map[string]any{"name":d.Name,"path":d.Path,"mounted":mounted[mount],"exists":pathIsDir(d.Path),"total":uint64(0),"free":uint64(0),"used":uint64(0),"tasks":diskTasks[d.Name]}
+  if e==nil{item["total"]=usage.Total;item["free"]=usage.Free;item["used"]=usage.Used}
+  disks=append(disks,item)
+ }
  pid,running,byWeb:=a.activeDownloader();var pidValue any=nil;if running{pidValue=pid};state:=map[string]any{"running":running,"pid":pidValue,"by_web":byWeb}
  control:=map[string]string{};for _,key:=range []string{"stop_requested","last_run"}{var v string;if a.db.QueryRow("SELECT value FROM control WHERE key=?",key).Scan(&v)==nil{control[key]=v}}
  var last any=map[string]any{};if raw:=control["last_run"];raw!=""{var v map[string]any;if json.Unmarshal([]byte(raw),&v)==nil{last=v}}
  runningEpisodes:=[]map[string]any{};runningBytes:=int64(0);expectedBytes:=int64(0)
  if running{rr,e:=a.db.Query("SELECT episode_id,task_name,disk_name,started_at,expected_bytes,partial_path FROM downloads WHERE status='running' ORDER BY updated_at DESC");if e==nil{for rr.Next(){var id,taskName string;var diskName,started,partial sql.NullString;var expected sql.NullInt64;if rr.Scan(&id,&taskName,&diskName,&started,&expected,&partial)==nil{partialBytes:=int64(0);if partial.Valid{partialBytes=a.cachedPartialDirectorySize(partial.String,sampledAt)};runningBytes+=partialBytes;if expected.Valid&&expected.Int64>0{expectedBytes+=expected.Int64};if len(runningEpisodes)<24{runningEpisodes=append(runningEpisodes,map[string]any{"episode_id":id,"task_name":taskName,"disk_name":diskName.String,"started_at":started.String,"expected_bytes":expected.Int64,"partial_bytes":partialBytes})}}};rr.Close()}}
  speedBps,etaSeconds,progressPercent:=a.updateTransferSample(sampledAt,runningBytes,expectedBytes)
- historySummary:=map[string]any{"completed":int64(0),"failed":int64(0),"paused":int64(0),"pending":int64(0),"completed_bytes":int64(0),"content_seconds":float64(0)}
- statusRows,summaryErr:=a.db.Query("SELECT status,COUNT(*) FROM downloads GROUP BY status")
- if summaryErr==nil{for statusRows.Next(){var status string;var count int64;if statusRows.Scan(&status,&count)==nil{switch status{case "failed":historySummary["failed"]=count;case "paused":historySummary["paused"]=count;case "pending":historySummary["pending"]=count}}};statusRows.Close()}
- diskTotals:=map[string]map[string]any{}
- ledgerRows,ledgerErr:=a.db.Query("SELECT COALESCE(disk_name,''),file_size,content_time,target_path FROM downloaded_episodes")
- if ledgerErr==nil{for ledgerRows.Next(){var name string;var size sql.NullInt64;var seconds sql.NullFloat64;var target sql.NullString;if ledgerRows.Scan(&name,&size,&seconds,&target)!=nil{continue};if !target.Valid||!a.cachedCompletedPath(target.String,sampledAt){continue};historySummary["completed"]=historySummary["completed"].(int64)+1;historySummary["completed_bytes"]=historySummary["completed_bytes"].(int64)+size.Int64;historySummary["content_seconds"]=historySummary["content_seconds"].(float64)+seconds.Float64;item:=diskTotals[name];if item==nil{item=map[string]any{"disk_name":name,"count":int64(0),"bytes":int64(0),"seconds":float64(0)};diskTotals[name]=item};item["count"]=item["count"].(int64)+1;item["bytes"]=item["bytes"].(int64)+size.Int64;item["seconds"]=item["seconds"].(float64)+seconds.Float64};ledgerRows.Close()}
- diskNames:=make([]string,0,len(diskTotals));for name:=range diskTotals{diskNames=append(diskNames,name)};sort.Strings(diskNames)
- diskHistory:=make([]map[string]any,0,len(diskNames));for _,name:=range diskNames{diskHistory=append(diskHistory,diskTotals[name])}
- historyDays:=strings.TrimSpace(r.URL.Query().Get("history_days"));if historyDays!="7"&&historyDays!="30"&&historyDays!="90"&&historyDays!="365"&&historyDays!="all"{historyDays="30"}
- historyModifier:="-"+historyDays+" days";runHistory:=[]map[string]any{}
- historyRows,historyErr:=a.db.Query("SELECT run_id,started_at,finished_at,duration_seconds,mode,result,completed_count,completed_bytes,content_seconds,COALESCE(error,'') FROM run_history WHERE (?='all' OR julianday(started_at)>=julianday('now',?)) ORDER BY started_at DESC LIMIT 50",historyDays,historyModifier)
- if historyErr==nil{for historyRows.Next(){var id,started,finished,mode,result,detail string;var elapsed,contentSeconds float64;var count,bytes int64;if historyRows.Scan(&id,&started,&finished,&elapsed,&mode,&result,&count,&bytes,&contentSeconds,&detail)==nil{if result=="running"{if parsed,e:=time.Parse(time.RFC3339Nano,started);e==nil{elapsed=time.Since(parsed).Seconds()}};runHistory=append(runHistory,map[string]any{"run_id":id,"started_at":started,"finished_at":finished,"duration_seconds":elapsed,"mode":mode,"result":result,"completed_count":count,"completed_bytes":bytes,"content_seconds":contentSeconds,"error":detail})}};historyRows.Close()}
- for _,run:=range runHistory{
-  tasks:=[]map[string]any{};taskRows,taskErr:=a.db.Query("SELECT task_name,completed_count,failed_count,completed_bytes,content_seconds,wait_seconds,duration_seconds FROM run_task_history WHERE run_id=? ORDER BY task_name",run["run_id"]);if taskErr==nil{for taskRows.Next(){var name string;var count,failed,bytes int64;var seconds,waitSeconds,durationSeconds float64;if taskRows.Scan(&name,&count,&failed,&bytes,&seconds,&waitSeconds,&durationSeconds)==nil{attempts:=count+failed;rate:=float64(0);if attempts>0{rate=float64(count)/float64(attempts)*100};throughput:=float64(0);if durationSeconds>0{throughput=float64(bytes)/durationSeconds};tasks=append(tasks,map[string]any{"task_name":name,"completed_count":count,"failed_count":failed,"success_rate":math.Round(rate*10)/10,"completed_bytes":bytes,"content_seconds":seconds,"wait_seconds":waitSeconds,"duration_seconds":durationSeconds,"throughput_bytes_per_second":throughput})}};taskRows.Close()};run["tasks"]=tasks
-  episodeStats:=map[string]any{"total":int64(0),"completed":int64(0),"failed":int64(0),"paused":int64(0),"failure_categories":map[string]int64{}}
-  categoryStats:=map[string]int64{};episodeRows,episodeErr:=a.db.Query("SELECT status,COALESCE(failure_category,''),COUNT(*) FROM run_episode_history WHERE run_id=? GROUP BY status,failure_category",run["run_id"])
-  if episodeErr==nil{for episodeRows.Next(){var state,category string;var count int64;if episodeRows.Scan(&state,&category,&count)==nil{episodeStats["total"]=episodeStats["total"].(int64)+count;switch state{case "completed":episodeStats["completed"]=episodeStats["completed"].(int64)+count;case "failed":episodeStats["failed"]=episodeStats["failed"].(int64)+count;if category!=""{categoryStats[category]+=count};case "paused":episodeStats["paused"]=episodeStats["paused"].(int64)+count}}};episodeRows.Close()}
-  episodeStats["failure_categories"]=categoryStats;run["episode_stats"]=episodeStats
-  diskStats:=[]map[string]any{};diskRows,diskErr:=a.db.Query("SELECT COALESCE(disk_name,''),SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),SUM(CASE WHEN status='paused' THEN 1 ELSE 0 END),SUM(CASE WHEN status='completed' THEN completed_bytes ELSE 0 END),SUM(CASE WHEN status='completed' THEN content_seconds ELSE 0 END) FROM run_episode_history WHERE run_id=? GROUP BY COALESCE(disk_name,'') ORDER BY disk_name",run["run_id"])
-  if diskErr==nil{for diskRows.Next(){var name string;var completed,failed,paused,bytes int64;var seconds float64;if diskRows.Scan(&name,&completed,&failed,&paused,&bytes,&seconds)==nil{diskStats=append(diskStats,map[string]any{"disk_name":name,"completed":completed,"failed":failed,"paused":paused,"completed_bytes":bytes,"content_seconds":seconds})}};diskRows.Close()}
-  diskTimingRows,diskTimingErr:=a.db.Query("SELECT disk_name,duration_seconds,completed_bytes FROM run_disk_history WHERE run_id=?",run["run_id"]);if diskTimingErr==nil{timing:=map[string]map[string]any{};for diskTimingRows.Next(){var name string;var elapsed float64;var bytes int64;if diskTimingRows.Scan(&name,&elapsed,&bytes)==nil{rate:=float64(0);if elapsed>0{rate=float64(bytes)/elapsed};timing[name]=map[string]any{"duration_seconds":elapsed,"throughput_bytes_per_second":rate}}};diskTimingRows.Close();for _,item:=range diskStats{if v:=timing[item["disk_name"].(string)];v!=nil{item["duration_seconds"]=v["duration_seconds"];item["throughput_bytes_per_second"]=v["throughput_bytes_per_second"]}}}
-  run["disk_stats"]=diskStats
+ 
+historySummary:=map[string]any{"completed":ledger.Completed,"failed":int64(0),"paused":int64(0),"pending":int64(0),"completed_bytes":ledger.CompletedBytes,"content_seconds":ledger.ContentSeconds}
+statusRows,summaryErr:=a.db.Query("SELECT status,COUNT(*) FROM downloads GROUP BY status")
+if summaryErr==nil{for statusRows.Next(){var status string;var count int64;if statusRows.Scan(&status,&count)==nil{switch status{case "failed":historySummary["failed"]=count;case "paused":historySummary["paused"]=count;case "pending":historySummary["pending"]=count}}};statusRows.Close()}
+diskNames:=make([]string,0,len(ledger.Disks))
+for name:=range ledger.Disks{diskNames=append(diskNames,name)}
+sort.Strings(diskNames)
+diskHistory:=make([]map[string]any,0,len(diskNames))
+for _,name:=range diskNames{total:=ledger.Disks[name];diskHistory=append(diskHistory,map[string]any{"disk_name":name,"count":total.Count,"bytes":total.Bytes,"seconds":total.Seconds})}
+
+historyDays:=strings.TrimSpace(r.URL.Query().Get("history_days"))
+if historyDays!="7"&&historyDays!="30"&&historyDays!="90"&&historyDays!="365"&&historyDays!="all"{historyDays="30"}
+historyModifier:="-"+historyDays+" days"
+runHistory:=[]map[string]any{}
+historyRows,historyErr:=a.db.Query("SELECT run_id,started_at,finished_at,duration_seconds,mode,result,completed_count,completed_bytes,content_seconds,COALESCE(error,'') FROM run_history WHERE (?='all' OR julianday(started_at)>=julianday('now',?)) ORDER BY started_at DESC LIMIT 50",historyDays,historyModifier)
+if historyErr==nil{
+ for historyRows.Next(){
+  var id,started,finished,runMode,result,detail string;var elapsed,contentSeconds float64;var count,bytes int64
+  if historyRows.Scan(&id,&started,&finished,&elapsed,&runMode,&result,&count,&bytes,&contentSeconds,&detail)==nil{
+   if result=="running"{if parsed,e:=time.Parse(time.RFC3339Nano,started);e==nil{elapsed=time.Since(parsed).Seconds()}}
+   runHistory=append(runHistory,map[string]any{"run_id":id,"started_at":started,"finished_at":finished,"duration_seconds":elapsed,"mode":runMode,"result":result,"completed_count":count,"completed_bytes":bytes,"content_seconds":contentSeconds,"error":detail})
+  }
  }
- recentFailures:=[]map[string]any{}
+ historyRows.Close()
+}
+runIDs:=make([]string,0,len(runHistory))
+tasksByRun:=map[string][]map[string]any{}
+episodeStatsByRun:=map[string]map[string]any{}
+categoriesByRun:=map[string]map[string]int64{}
+diskStatsByRun:=map[string][]map[string]any{}
+diskTimingByRun:=map[string]map[string]map[string]any{}
+for _,run:=range runHistory{runIDs=append(runIDs,run["run_id"].(string))}
+if len(runIDs)>0{
+ placeholders:=strings.TrimSuffix(strings.Repeat("?,",len(runIDs)),",")
+ runArgs:=make([]any,len(runIDs));for i,id:=range runIDs{runArgs[i]=id}
+ taskRows,taskErr:=a.db.Query("SELECT run_id,task_name,completed_count,failed_count,completed_bytes,content_seconds,wait_seconds,duration_seconds FROM run_task_history WHERE run_id IN ("+placeholders+") ORDER BY run_id,task_name",runArgs...)
+ if taskErr==nil{
+  for taskRows.Next(){
+   var id,name string;var count,failed,bytes int64;var seconds,waitSeconds,durationSeconds float64
+   if taskRows.Scan(&id,&name,&count,&failed,&bytes,&seconds,&waitSeconds,&durationSeconds)==nil{
+    attempts:=count+failed;rate:=float64(0);if attempts>0{rate=float64(count)/float64(attempts)*100}
+    throughput:=float64(0);if durationSeconds>0{throughput=float64(bytes)/durationSeconds}
+    tasksByRun[id]=append(tasksByRun[id],map[string]any{"task_name":name,"completed_count":count,"failed_count":failed,"success_rate":math.Round(rate*10)/10,"completed_bytes":bytes,"content_seconds":seconds,"wait_seconds":waitSeconds,"duration_seconds":durationSeconds,"throughput_bytes_per_second":throughput})
+   }
+  }
+  taskRows.Close()
+ }
+ episodeRows,episodeErr:=a.db.Query("SELECT run_id,status,COALESCE(failure_category,''),COUNT(*) FROM run_episode_history WHERE run_id IN ("+placeholders+") GROUP BY run_id,status,failure_category",runArgs...)
+ if episodeErr==nil{
+  for episodeRows.Next(){
+   var id,state,category string;var count int64
+   if episodeRows.Scan(&id,&state,&category,&count)==nil{
+    stats:=episodeStatsByRun[id]
+    if stats==nil{stats=map[string]any{"total":int64(0),"completed":int64(0),"failed":int64(0),"paused":int64(0)};episodeStatsByRun[id]=stats;categoriesByRun[id]=map[string]int64{}}
+    stats["total"]=stats["total"].(int64)+count
+    switch state{case "completed":stats["completed"]=stats["completed"].(int64)+count;case "failed":stats["failed"]=stats["failed"].(int64)+count;if category!=""{categoriesByRun[id][category]+=count};case "paused":stats["paused"]=stats["paused"].(int64)+count}
+   }
+  }
+  episodeRows.Close()
+ }
+ diskRows,diskErr:=a.db.Query("SELECT run_id,COALESCE(disk_name,''),SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),SUM(CASE WHEN status='paused' THEN 1 ELSE 0 END),SUM(CASE WHEN status='completed' THEN completed_bytes ELSE 0 END),SUM(CASE WHEN status='completed' THEN content_seconds ELSE 0 END) FROM run_episode_history WHERE run_id IN ("+placeholders+") GROUP BY run_id,COALESCE(disk_name,'') ORDER BY run_id,disk_name",runArgs...)
+ if diskErr==nil{
+  for diskRows.Next(){
+   var id,name string;var completed,failed,paused,bytes int64;var seconds float64
+   if diskRows.Scan(&id,&name,&completed,&failed,&paused,&bytes,&seconds)==nil{
+    diskStatsByRun[id]=append(diskStatsByRun[id],map[string]any{"disk_name":name,"completed":completed,"failed":failed,"paused":paused,"completed_bytes":bytes,"content_seconds":seconds})
+   }
+  }
+  diskRows.Close()
+ }
+ timingRows,timingErr:=a.db.Query("SELECT run_id,disk_name,duration_seconds,completed_bytes FROM run_disk_history WHERE run_id IN ("+placeholders+") ORDER BY run_id,disk_name",runArgs...)
+ if timingErr==nil{
+  for timingRows.Next(){
+   var id,name string;var elapsed float64;var bytes int64
+   if timingRows.Scan(&id,&name,&elapsed,&bytes)==nil{
+    rate:=float64(0);if elapsed>0{rate=float64(bytes)/elapsed}
+    if diskTimingByRun[id]==nil{diskTimingByRun[id]=map[string]map[string]any{}}
+    diskTimingByRun[id][name]=map[string]any{"duration_seconds":elapsed,"throughput_bytes_per_second":rate}
+   }
+  }
+  timingRows.Close()
+ }
+}
+for _,run:=range runHistory{
+ id:=run["run_id"].(string)
+ tasks:=tasksByRun[id];if tasks==nil{tasks=[]map[string]any{}}
+ run["tasks"]=tasks
+ stats:=episodeStatsByRun[id]
+ if stats==nil{stats=map[string]any{"total":int64(0),"completed":int64(0),"failed":int64(0),"paused":int64(0)}}
+ categories:=categoriesByRun[id];if categories==nil{categories=map[string]int64{}}
+ stats["failure_categories"]=categories
+ run["episode_stats"]=stats
+ diskStats:=diskStatsByRun[id];if diskStats==nil{diskStats=[]map[string]any{}}
+ for _,item:=range diskStats{if timing:=diskTimingByRun[id][item["disk_name"].(string)];timing!=nil{item["duration_seconds"]=timing["duration_seconds"];item["throughput_bytes_per_second"]=timing["throughput_bytes_per_second"]}}
+ run["disk_stats"]=diskStats
+}
+recentFailures:=[]map[string]any{}
  failedRows,failedErr:=a.db.Query("SELECT episode_id,task_name,COALESCE(error,''),updated_at FROM downloads WHERE status='failed' ORDER BY updated_at DESC LIMIT 8")
  if failedErr==nil{for failedRows.Next(){var id,taskName,detail,updated string;if failedRows.Scan(&id,&taskName,&detail,&updated)==nil{recentFailures=append(recentFailures,map[string]any{"episode_id":id,"task_name":taskName,"error":detail,"updated_at":updated})}};failedRows.Close()}
  issues:=[]map[string]string{};if a.cfg.Endpoint==""||a.cfg.AccessKey==""||a.cfg.SecretKey==""||a.cfg.Bucket==""{issues=append(issues,map[string]string{"page":"connection","text":"请在连接配置中填写完整的 MinIO 地址、密钥和 Bucket"})};if a.cfg.PGHost==""||a.cfg.PGDB==""||a.cfg.PGUser==""||a.cfg.PGPassword==""{issues=append(issues,map[string]string{"page":"connection","text":"请在连接配置中填写完整的 PostgreSQL 连接信息"})};if len(a.cfg.Disks)==0{issues=append(issues,map[string]string{"page":"disks","text":"尚未配置目标磁盘"})};if len(a.cfg.Tasks)==0{issues=append(issues,map[string]string{"page":"tasks","text":"尚未配置下载任务"})}
  endpoint:=a.cfg.Endpoint;if u,e:=url.Parse(endpoint);e==nil&&u.Host!=""{endpoint=u.Scheme+"://"+u.Host}
  settings:=map[string]any{"min_free_gb":a.cfg.MinFreeGB,"writes_per_disk":a.cfg.Workers,"require_mcap":a.cfg.RequireMCAP,"mcap_pattern":a.cfg.MCAPPattern,"default_rounds":a.cfg.DefaultRounds}
- response:=map[string]any{"version":"go-dev","data_version":a.cfg.DataVersion,"downloader":state,"stop_requested":running&&isStopRequested(control["stop_requested"]),"setup_issues":issues,"minio":map[string]any{"endpoint":endpoint,"bucket":a.cfg.Bucket},"settings":settings,"last_run":last,"history_summary":historySummary,"disk_history":diskHistory,"run_history":runHistory,"recent_failures":recentFailures,"stale_records":staleRecords,"running_episodes":runningEpisodes,"transfer_progress":map[string]any{"downloaded_bytes":runningBytes,"expected_bytes":expectedBytes,"remaining_bytes":maxInt64(expectedBytes-runningBytes,0),"speed_bytes_per_second":math.Round(speedBps),"eta_seconds":etaSeconds,"progress_percent":progressPercent},"disks":disks,"scenes":scenes}
+ response:=map[string]any{"version":"go-dev","data_version":a.cfg.DataVersion,"downloader":state,"stop_requested":running&&isStopRequested(control["stop_requested"]),"setup_issues":issues,"minio":map[string]any{"endpoint":endpoint,"bucket":a.cfg.Bucket},"settings":settings,"last_run":last,"history_summary":historySummary,"disk_history":diskHistory,"run_history":runHistory,"recent_failures":recentFailures,"stale_records":ledger.StaleRecords,"running_episodes":runningEpisodes,"transfer_progress":map[string]any{"downloaded_bytes":runningBytes,"expected_bytes":expectedBytes,"remaining_bytes":maxInt64(expectedBytes-runningBytes,0),"speed_bytes_per_second":math.Round(speedBps),"eta_seconds":etaSeconds,"progress_percent":progressPercent},"disks":disks,"scenes":scenes}
  if live,updated,ok:=a.currentLiveStatus();ok&&time.Since(updated)<=2*time.Second{response["running_episodes"]=live.RunningEpisodes;response["transfer_progress"]=live.TransferProgress}
  writeJSON(w,response)
 }
