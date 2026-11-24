@@ -1892,9 +1892,9 @@ func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
  req:=httptest.NewRequest("GET","/api/runs/run-1/episodes?task=scene-task&limit=10",nil);req.SetPathValue("id","run-1")
  response:=httptest.NewRecorder();api.runEpisodes(response,req)
  if response.Code!=http.StatusOK{t.Fatalf("run episodes API status=%d body=%s",response.Code,response.Body.String())}
- var payload struct{Total int `json:"total"`;Episodes []struct{ID string `json:"episode_id"`;Status string `json:"status"`} `json:"episodes"`}
+ var payload struct{Total int `json:"total"`;Episodes []struct{ID string `json:"episode_id"`;Status string `json:"status"`} `json:"episodes"`;FailureCategories map[string]int `json:"failure_categories"`}
  if err=json.Unmarshal(response.Body.Bytes(),&payload);err!=nil{t.Fatal(err)}
- if payload.Total!=3||len(payload.Episodes)!=3{t.Fatalf("unexpected episode page: total=%d episodes=%d",payload.Total,len(payload.Episodes))}
+ if payload.Total!=3||len(payload.Episodes)!=3{t.Fatalf("unexpected episode page: total=%d episodes=%d",payload.Total,len(payload.Episodes))};if payload.FailureCategories["other"]!=1{t.Fatalf("unexpected failure category counts: %#v",payload.FailureCategories)}
  pageReq:=httptest.NewRequest("GET","/api/runs/run-1/episodes?task=scene-task&limit=1&offset=1",nil);pageReq.SetPathValue("id","run-1")
  pageResponse:=httptest.NewRecorder();api.runEpisodes(pageResponse,pageReq)
  var pagePayload struct{Total int `json:"total"`;Offset int `json:"offset"`;Episodes []map[string]any `json:"episodes"`}
