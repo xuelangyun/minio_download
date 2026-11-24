@@ -1342,6 +1342,16 @@ func TestWebPlanApplyReplaceAndMerge(t *testing.T) {
 	api.planApply(merged, mergeReq)
 	if merged.Code != http.StatusOK { t.Fatalf("merge apply failed: %d %s", merged.Code, merged.Body.String()) }
 	if len(api.cfg.Tasks) != 2 || api.cfg.Tasks[1].Name != "邮件归档" { t.Fatalf("merge did not append only new task: %#v", api.cfg.Tasks) }
+
+	// Explicit per-task resolution replaces a conflicting same-name task.
+	resolveReq := httptest.NewRequest(http.MethodPost, "/api/plans/"+mergeID+"/apply", strings.NewReader(`{"mode":"merge","resolutions":{"文件整理":"replace"}}`))
+	resolveReq.SetPathValue("id", mergeID)
+	resolved := httptest.NewRecorder()
+	api.planApply(resolved, resolveReq)
+	if resolved.Code != http.StatusOK { t.Fatalf("resolved merge failed: %d %s", resolved.Code, resolved.Body.String()) }
+	if len(api.cfg.Tasks) != 2 || api.cfg.Tasks[0].Name != "文件整理" || api.cfg.Tasks[0].TargetCount != 99 {
+		t.Fatalf("explicit replace resolution was not applied: %#v", api.cfg.Tasks)
+	}
 }
 
 func TestValidatePlanPayloadAllowsEmptyDataVersion(t *testing.T) {
