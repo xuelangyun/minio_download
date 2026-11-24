@@ -174,6 +174,7 @@ func initializeSQLiteDatabase(name string)error{
   "CREATE TABLE IF NOT EXISTS downloaded_episodes(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,source_task_name TEXT,job_id INTEGER,sn_code TEXT,parent_key TEXT,disk_name TEXT,target_path TEXT,file_size INTEGER,content_time REAL,create_time TEXT,downloaded_at TEXT NOT NULL);"+
   "CREATE TABLE IF NOT EXISTS runtime_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,message TEXT NOT NULL);"+
   "CREATE TABLE IF NOT EXISTS run_history(run_id TEXT PRIMARY KEY,started_at TEXT NOT NULL,finished_at TEXT NOT NULL,duration_seconds REAL NOT NULL,mode TEXT NOT NULL,result TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,error TEXT);"+
+  "CREATE TABLE IF NOT EXISTS run_task_history(run_id TEXT NOT NULL,task_name TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,PRIMARY KEY(run_id,task_name));"+
   "CREATE INDEX IF NOT EXISTS idx_run_history_started ON run_history(started_at);"+
   "CREATE TABLE IF NOT EXISTS process_state(id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,created REAL NOT NULL,mode TEXT NOT NULL,updated_at TEXT NOT NULL);"+
   "CREATE INDEX IF NOT EXISTS idx_download_task_status ON downloads(task_name,status);"+
@@ -1381,8 +1382,7 @@ func requestStop(c Config) error {
 func(a *App)saveLastRun(result string,runErr error){
  finished:=time.Now().UTC();finishedAt:=finished.Format(time.RFC3339Nano);startedAt:=a.runStartedAt.UTC().Format(time.RFC3339Nano);elapsed:=finished.Sub(a.runStartedAt).Seconds();if a.runStartedAt.IsZero(){a.runStartedAt=finished;startedAt=finishedAt;elapsed=0}
  var completedCount,completedBytes int64;var contentSeconds float64
- _=a.db.QueryRow("SELECT COUNT(*),COALESCE(SUM(expected_bytes),0) FROM downloads WHERE status='completed' AND julianday(completed_at)>=julianday(?) AND julianday(completed_at)<=julianday(?)",startedAt,finishedAt).Scan(&completedCount,&completedBytes)
- _=a.db.QueryRow("SELECT COALESCE(SUM(content_time),0) FROM downloaded_episodes WHERE julianday(downloaded_at)>=julianday(?) AND julianday(downloaded_at)<=julianday(?)",startedAt,finishedAt).Scan(&contentSeconds)
+ if a.runID!=""{_=a.db.QueryRow("SELECT COALESCE(SUM(completed_count),0),COALESCE(SUM(completed_bytes),0),COALESCE(SUM(content_seconds),0) FROM run_task_history WHERE run_id=?",a.runID).Scan(&completedCount,&completedBytes,&contentSeconds)}
  payload:=map[string]any{"result":result,"at":finishedAt,"started_at":startedAt,"duration_seconds":math.Round(elapsed*100)/100,"mode":a.mode,"completed_count":completedCount,"completed_bytes":completedBytes,"content_seconds":contentSeconds}
  errorText:="";if runErr!=nil{errorText=runErr.Error();payload["error"]=errorText}
  raw,err:=json.Marshal(payload);if err!=nil{log.Printf("保存上次运行结果失败: %v",err);return}
@@ -1447,6 +1447,7 @@ func(a *App)open()error{
  "CREATE INDEX IF NOT EXISTS idx_downloaded_task ON downloaded_episodes(task_name);"+
  "CREATE TABLE IF NOT EXISTS control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL);"+
  "CREATE TABLE IF NOT EXISTS run_history(run_id TEXT PRIMARY KEY,started_at TEXT NOT NULL,finished_at TEXT NOT NULL,duration_seconds REAL NOT NULL,mode TEXT NOT NULL,result TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,error TEXT);"+
+  "CREATE TABLE IF NOT EXISTS run_task_history(run_id TEXT NOT NULL,task_name TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,PRIMARY KEY(run_id,task_name));"+
  "CREATE INDEX IF NOT EXISTS idx_run_history_started ON run_history(started_at);")
  if e==nil{
   if _,e=a.db.Exec("CREATE TABLE IF NOT EXISTS runtime_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,message TEXT NOT NULL); CREATE TABLE IF NOT EXISTS process_state(id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,created REAL NOT NULL,mode TEXT NOT NULL,updated_at TEXT NOT NULL)");e!=nil{return e}
@@ -1480,6 +1481,14 @@ func recordWithExec(db sqlExecer, e Episode, d DiskConfig, final string) error {
 
 func (a *App) record(e Episode, d DiskConfig, final string) error {
 	return recordWithExec(a.db, e, d, final)
+}
+
+func (a *App) recordAndSetForRun(e Episode,d DiskConfig,final string)error{
+ if err:=a.recordAndSet(e,d,final);err!=nil{return err}
+ if a.runID==""{return nil}
+ _,err:=a.db.Exec("INSERT INTO run_task_history(run_id,task_name,completed_count,completed_bytes,content_seconds) VALUES(?,?,1,?,?) ON CONFLICT(run_id,task_name) DO UPDATE SET completed_count=completed_count+1,completed_bytes=completed_bytes+excluded.completed_bytes,content_seconds=content_seconds+excluded.content_seconds",a.runID,e.Task,e.Size,e.Duration)
+ if err!=nil{return fmt.Errorf("保存本次任务统计失败: %w",err)}
+ return nil
 }
 
 func (a *App) recordAndSet(e Episode, d DiskConfig, final string) error {
@@ -2117,7 +2126,7 @@ func(a *App)downloadOne(t Task,d DiskConfig,e Episode)error{
  if a.ctx.Err()!=nil{return a.fail(e,d,final,partial,a.ctx.Err())}
  if completedObjects.Load()==0{return a.fail(e,d,final,partial,errors.New("MinIO 前缀为空"))};if err:=os.MkdirAll(filepath.Dir(final),0755);err!=nil{return a.fail(e,d,final,partial,err)}
  if err:=replaceEpisodeDirectory(partial,final);err!=nil{return a.fail(e,d,final,partial,err)};if *a.cfg.Fsync{syncDirectory(filepath.Dir(final))}
- return a.recordAndSet(e,d,final)
+ return a.recordAndSetForRun(e,d,final)
 }
 func sweepPartial(root,parent string,objects []minio.ObjectInfo)error{
  info,err:=os.Lstat(root);if err!=nil{return err};if info.Mode()&os.ModeSymlink!=0||!info.IsDir(){return fmt.Errorf("暂存路径不是普通目录: %s",root)}
