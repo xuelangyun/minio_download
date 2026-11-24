@@ -55,7 +55,7 @@ type Config struct {
  Disks []DiskConfig `json:"disks"`; Tasks []Task `json:"tasks"`
 }
 type Episode struct { ID string; JobID sql.NullInt64; Task,SourceTask,SN,ParentKey string; Size int64; Duration float64; Created sql.NullTime }
-type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool; spaceMu sync.Mutex; spaceInFlight map[string]uint64; processCreated float64 }
+type App struct { cfg Config; mc *minio.Client; db *sql.DB; ctx context.Context; cancel context.CancelFunc; mode string; recheck bool; validated map[string]bool; spaceMu sync.Mutex; spaceInFlight map[string]uint64; processCreated float64; runID string; runStartedAt time.Time }
 //go:embed config.count.example.json
 var defaultCountConfigJSON []byte
 
@@ -135,6 +135,8 @@ func main(){
   if !*cleanup{log.Fatal("--dry-run 必须与 --cleanup-missing-mcap 一起使用")}
   n,e:=a.cleanup(true);if e!=nil{log.Fatal(e)};log.Printf("清理预览结束：%d 条",n);return
  }
+ a.runStartedAt=time.Now().UTC();a.runID=strconv.FormatInt(a.runStartedAt.UnixNano(),10)
+ if _,err=a.db.Exec("INSERT INTO run_history(run_id,started_at,finished_at,duration_seconds,mode,result) VALUES(?,?,?,?,?,?)",a.runID,a.runStartedAt.Format(time.RFC3339Nano),a.runStartedAt.Format(time.RFC3339Nano),0,a.mode,"running");err!=nil{log.Fatalf("创建运行历史失败: %v",err)}
  if err=a.recoverPendingCleanup();err!=nil{log.Fatalf("恢复上次未完成的缺失 mcap 清理失败: %v",err)}
  if *cleanup{n,e:=a.cleanup(false);if e!=nil{log.Fatal(e)};log.Printf("清理结束：%d 条",n)}
  rows,err:=a.fetch();if err!=nil{if ctx.Err()!=nil{log.Print("已安全暂停（候选查询期间收到暂停请求）");a.saveLastRun("paused",nil);return};log.Printf("候选查询失败: %v",err);a.saveLastRun("error",err);return}
@@ -169,6 +171,8 @@ func initializeSQLiteDatabase(name string)error{
   "CREATE TABLE IF NOT EXISTS task_disk_assignments(task_name TEXT NOT NULL,disk_name TEXT NOT NULL,last_used_at TEXT NOT NULL,PRIMARY KEY(task_name,disk_name));"+
   "CREATE TABLE IF NOT EXISTS downloaded_episodes(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,source_task_name TEXT,job_id INTEGER,sn_code TEXT,parent_key TEXT,disk_name TEXT,target_path TEXT,file_size INTEGER,content_time REAL,create_time TEXT,downloaded_at TEXT NOT NULL);"+
   "CREATE TABLE IF NOT EXISTS runtime_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,message TEXT NOT NULL);"+
+  "CREATE TABLE IF NOT EXISTS run_history(run_id TEXT PRIMARY KEY,started_at TEXT NOT NULL,finished_at TEXT NOT NULL,duration_seconds REAL NOT NULL,mode TEXT NOT NULL,result TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,error TEXT);"+
+  "CREATE INDEX IF NOT EXISTS idx_run_history_started ON run_history(started_at);"+
   "CREATE TABLE IF NOT EXISTS process_state(id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,created REAL NOT NULL,mode TEXT NOT NULL,updated_at TEXT NOT NULL);"+
   "CREATE INDEX IF NOT EXISTS idx_download_task_status ON downloads(task_name,status);"+
   "CREATE INDEX IF NOT EXISTS idx_downloaded_task ON downloaded_episodes(task_name);"+
@@ -1368,11 +1372,16 @@ func requestStop(c Config) error {
  return writeStopRequest(db)
 }
 func(a *App)saveLastRun(result string,runErr error){
- payload:=map[string]any{"result":result,"at":controlTimestamp(),"mode":a.mode}
- if runErr!=nil{payload["error"]=runErr.Error()}
+ finished:=time.Now().UTC();finishedAt:=finished.Format(time.RFC3339Nano);startedAt:=a.runStartedAt.UTC().Format(time.RFC3339Nano);elapsed:=finished.Sub(a.runStartedAt).Seconds();if a.runStartedAt.IsZero(){a.runStartedAt=finished;startedAt=finishedAt;elapsed=0}
+ var completedCount,completedBytes int64;var contentSeconds float64
+ _=a.db.QueryRow("SELECT COUNT(*),COALESCE(SUM(expected_bytes),0) FROM downloads WHERE status='completed' AND completed_at>=? AND completed_at<=?",startedAt,finishedAt).Scan(&completedCount,&completedBytes)
+ _=a.db.QueryRow("SELECT COALESCE(SUM(content_time),0) FROM downloaded_episodes WHERE downloaded_at>=? AND downloaded_at<=?",startedAt,finishedAt).Scan(&contentSeconds)
+ payload:=map[string]any{"result":result,"at":finishedAt,"started_at":startedAt,"duration_seconds":math.Round(elapsed*100)/100,"mode":a.mode,"completed_count":completedCount,"completed_bytes":completedBytes,"content_seconds":contentSeconds}
+ errorText:="";if runErr!=nil{errorText=runErr.Error();payload["error"]=errorText}
  raw,err:=json.Marshal(payload);if err!=nil{log.Printf("保存上次运行结果失败: %v",err);return}
- _,err=a.db.Exec("INSERT INTO control(key,value,updated_at) VALUES('last_run',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",string(raw),controlTimestamp())
+ _,err=a.db.Exec("INSERT INTO control(key,value,updated_at) VALUES('last_run',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",string(raw),finishedAt)
  if err!=nil{log.Printf("保存上次运行结果失败: %v",err)}
+ if a.runID!=""{_,err=a.db.Exec("INSERT INTO run_history(run_id,started_at,finished_at,duration_seconds,mode,result,completed_count,completed_bytes,content_seconds,error) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET finished_at=excluded.finished_at,duration_seconds=excluded.duration_seconds,result=excluded.result,completed_count=excluded.completed_count,completed_bytes=excluded.completed_bytes,content_seconds=excluded.content_seconds,error=excluded.error",a.runID,startedAt,finishedAt,elapsed,a.mode,result,completedCount,completedBytes,contentSeconds,nullable(errorText));if err!=nil{log.Printf("保存运行历史失败: %v",err)}}
 }
 func(a *App)clearStopRequest()error{
  _,err:=a.db.Exec("DELETE FROM control WHERE key='stop_requested'")
@@ -1429,7 +1438,9 @@ func(a *App)open()error{
  "CREATE TABLE IF NOT EXISTS task_disk_assignments(task_name TEXT NOT NULL,disk_name TEXT NOT NULL,last_used_at TEXT NOT NULL,PRIMARY KEY(task_name,disk_name));"+
  "CREATE TABLE IF NOT EXISTS downloaded_episodes(episode_id TEXT PRIMARY KEY,task_name TEXT NOT NULL,source_task_name TEXT,job_id INTEGER,sn_code TEXT,parent_key TEXT,disk_name TEXT,target_path TEXT,file_size INTEGER,content_time REAL,create_time TEXT,downloaded_at TEXT NOT NULL);"+
  "CREATE INDEX IF NOT EXISTS idx_downloaded_task ON downloaded_episodes(task_name);"+
- "CREATE TABLE IF NOT EXISTS control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL);")
+ "CREATE TABLE IF NOT EXISTS control(key TEXT PRIMARY KEY,value TEXT,updated_at TEXT NOT NULL);"+
+ "CREATE TABLE IF NOT EXISTS run_history(run_id TEXT PRIMARY KEY,started_at TEXT NOT NULL,finished_at TEXT NOT NULL,duration_seconds REAL NOT NULL,mode TEXT NOT NULL,result TEXT NOT NULL,completed_count INTEGER NOT NULL DEFAULT 0,completed_bytes INTEGER NOT NULL DEFAULT 0,content_seconds REAL NOT NULL DEFAULT 0,error TEXT);"+
+ "CREATE INDEX IF NOT EXISTS idx_run_history_started ON run_history(started_at);")
  if e==nil{
   if _,e=a.db.Exec("CREATE TABLE IF NOT EXISTS runtime_logs(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT NOT NULL,message TEXT NOT NULL); CREATE TABLE IF NOT EXISTS process_state(id INTEGER PRIMARY KEY CHECK(id=1),pid INTEGER NOT NULL,created REAL NOT NULL,mode TEXT NOT NULL,updated_at TEXT NOT NULL)");e!=nil{return e}
   log.Printf("MinIO=%s bucket=%s；PostgreSQL=%s:%d/%s；SQLite=%s",a.cfg.Endpoint,a.cfg.Bucket,a.cfg.PGHost,a.cfg.PGPort,a.cfg.PGDB,a.cfg.StateDB)
