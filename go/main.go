@@ -671,13 +671,12 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
  sampledAt:=time.Now();speedBps,etaSeconds,progressPercent:=a.updateTransferSample(sampledAt,runningBytes,expectedBytes)
  historySummary:=map[string]any{"completed":0,"failed":0,"paused":0,"pending":0,"completed_bytes":int64(0),"content_seconds":float64(0)}
  statusRows,summaryErr:=a.db.Query("SELECT status,COUNT(*) FROM downloads GROUP BY status")
- if summaryErr==nil{for statusRows.Next(){var status string;var count int64;if statusRows.Scan(&status,&count)==nil{switch status{case "completed":historySummary["completed"]=count;case "failed":historySummary["failed"]=count;case "paused":historySummary["paused"]=count;case "pending":historySummary["pending"]=count}}};statusRows.Close()}
- var completedBytes int64;var contentSeconds float64
- _=a.db.QueryRow("SELECT COALESCE(SUM(file_size),0),COALESCE(SUM(content_time),0) FROM downloaded_episodes").Scan(&completedBytes,&contentSeconds)
- historySummary["completed_bytes"]=completedBytes;historySummary["content_seconds"]=contentSeconds
- diskHistory:=[]map[string]any{}
- diskRows,diskErr:=a.db.Query("SELECT COALESCE(disk_name,''),COUNT(*),COALESCE(SUM(file_size),0),COALESCE(SUM(content_time),0) FROM downloaded_episodes GROUP BY disk_name ORDER BY disk_name")
- if diskErr==nil{for diskRows.Next(){var name string;var count,bytes int64;var seconds float64;if diskRows.Scan(&name,&count,&bytes,&seconds)==nil{diskHistory=append(diskHistory,map[string]any{"disk_name":name,"count":count,"bytes":bytes,"seconds":seconds})}};diskRows.Close()}
+ if summaryErr==nil{for statusRows.Next(){var status string;var count int64;if statusRows.Scan(&status,&count)==nil{switch status{case "failed":historySummary["failed"]=count;case "paused":historySummary["paused"]=count;case "pending":historySummary["pending"]=count}}};statusRows.Close()}
+ diskTotals:=map[string]map[string]any{}
+ ledgerRows,ledgerErr:=a.db.Query("SELECT COALESCE(disk_name,''),file_size,content_time,target_path FROM downloaded_episodes")
+ if ledgerErr==nil{for ledgerRows.Next(){var name string;var size sql.NullInt64;var seconds sql.NullFloat64;var target sql.NullString;if ledgerRows.Scan(&name,&size,&seconds,&target)!=nil{continue};if !target.Valid||!a.completedPath(target.String){continue};historySummary["completed"]=historySummary["completed"].(int64)+1;historySummary["completed_bytes"]=historySummary["completed_bytes"].(int64)+size.Int64;historySummary["content_seconds"]=historySummary["content_seconds"].(float64)+seconds.Float64;item:=diskTotals[name];if item==nil{item=map[string]any{"disk_name":name,"count":int64(0),"bytes":int64(0),"seconds":float64(0)};diskTotals[name]=item};item["count"]=item["count"].(int64)+1;item["bytes"]=item["bytes"].(int64)+size.Int64;item["seconds"]=item["seconds"].(float64)+seconds.Float64}};ledgerRows.Close()}
+ diskNames:=make([]string,0,len(diskTotals));for name:=range diskTotals{diskNames=append(diskNames,name)};sort.Strings(diskNames)
+ diskHistory:=make([]map[string]any,0,len(diskNames));for _,name:=range diskNames{diskHistory=append(diskHistory,diskTotals[name])}
  recentFailures:=[]map[string]any{}
  failedRows,failedErr:=a.db.Query("SELECT episode_id,task_name,COALESCE(error,''),updated_at FROM downloads WHERE status='failed' ORDER BY updated_at DESC LIMIT 8")
  if failedErr==nil{for failedRows.Next(){var id,taskName,detail,updated string;if failedRows.Scan(&id,&taskName,&detail,&updated)==nil{recentFailures=append(recentFailures,map[string]any{"episode_id":id,"task_name":taskName,"error":detail,"updated_at":updated})}};failedRows.Close()}
