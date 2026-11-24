@@ -136,6 +136,8 @@ func main(){
   n,e:=a.cleanup(true);if e!=nil{log.Fatal(e)};log.Printf("清理预览结束：%d 条",n);return
  }
  a.runStartedAt=time.Now().UTC();a.runID=strconv.FormatInt(a.runStartedAt.UnixNano(),10)
+ runStartText:=a.runStartedAt.Format(time.RFC3339Nano)
+ if _,err=a.db.Exec("UPDATE run_history SET result='interrupted',finished_at=?,duration_seconds=MAX(0,(julianday(?) - julianday(started_at))*86400),error='下载进程未正常结束' WHERE result='running'",runStartText,runStartText);err!=nil{log.Fatalf("恢复异常中断的运行历史失败: %v",err)}
  if _,err=a.db.Exec("INSERT INTO run_history(run_id,started_at,finished_at,duration_seconds,mode,result) VALUES(?,?,?,?,?,?)",a.runID,a.runStartedAt.Format(time.RFC3339Nano),a.runStartedAt.Format(time.RFC3339Nano),0,a.mode,"running");err!=nil{log.Fatalf("创建运行历史失败: %v",err)}
  if err=a.recoverPendingCleanup();err!=nil{log.Fatalf("恢复上次未完成的缺失 mcap 清理失败: %v",err)}
  if *cleanup{n,e:=a.cleanup(false);if e!=nil{log.Fatal(e)};log.Printf("清理结束：%d 条",n)}
@@ -483,7 +485,7 @@ function renderStatus(d){
  const diskHistory=d.disk_history||[];
  $("disk-history").innerHTML=diskHistory.length?'<table class="history-table"><thead><tr><th>磁盘</th><th>完成数量</th><th>容量</th><th>内容时长</th></tr></thead><tbody>'+diskHistory.map(x=>'<tr><td>'+esc(x.disk_name||"未分配")+'</td><td>'+Number(x.count||0)+'</td><td>'+formatGiB(x.bytes||0)+'</td><td>'+(Number(x.seconds||0)/3600).toFixed(1)+' 小时</td></tr>').join("")+'</tbody></table>':'<div class="notice">暂无按磁盘汇总的完成记录。</div>';
  const runs=d.run_history||[];
- $("run-history").innerHTML=runs.length?'<h3>最近运行记录</h3><table class="history-table"><thead><tr><th>开始时间</th><th>结果</th><th>耗时</th><th>完成数量</th><th>容量</th><th>内容时长</th></tr></thead><tbody>'+runs.map(x=>'<tr><td>'+esc(x.started_at||"")+'</td><td>'+esc(({running:"运行中",finished:"已完成",paused:"已暂停",error:"失败"}[x.result]||x.result))+'</td><td>'+((Number(x.duration_seconds)||0)/60).toFixed(1)+' 分钟</td><td>'+Number(x.completed_count||0)+'</td><td>'+formatGiB(x.completed_bytes||0)+'</td><td>'+(Number(x.content_seconds||0)/3600).toFixed(2)+' 小时</td></tr>').join("")+'</tbody></table>':'<div class="notice">暂无运行历史。</div>';
+ $("run-history").innerHTML=runs.length?'<h3>最近运行记录</h3><table class="history-table"><thead><tr><th>开始时间</th><th>结果</th><th>耗时</th><th>完成数量</th><th>容量</th><th>内容时长</th></tr></thead><tbody>'+runs.map(x=>'<tr><td>'+esc(x.started_at||"")+'</td><td>'+esc(({running:"运行中",finished:"已完成",paused:"已暂停",error:"失败",interrupted:"异常中断"}[x.result]||x.result))+'</td><td>'+((Number(x.duration_seconds)||0)/60).toFixed(1)+' 分钟</td><td>'+Number(x.completed_count||0)+'</td><td>'+formatGiB(x.completed_bytes||0)+'</td><td>'+(Number(x.content_seconds||0)/3600).toFixed(2)+' 小时</td></tr>').join("")+'</tbody></table>':'<div class="notice">暂无运行历史。</div>';
  const failures=d.recent_failures||[];
  $("recent-failures").innerHTML=failures.length?'<div class="failure-list"><strong>最近失败记录（最多 8 条）</strong>'+failures.map(x=>'<div class="failure-item">'+esc(x.task_name||"未知任务")+' · '+esc(x.episode_id||"")+' · '+esc(x.error||"未提供错误详情")+'</div>').join("")+'</div>':'<div class="notice">没有失败记录。</div>';
  const durationMode=$("download-mode").value==="duration";let rows=[];
