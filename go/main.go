@@ -1195,6 +1195,7 @@ func(a *WebAPI)status(w http.ResponseWriter,r *http.Request){
  for _,task:=range a.cfg.Tasks{configuredTasks[task.Name]=true}
  ledger:=newDashboardLedgerTotals()
  ledgerRows,ledgerErr:=a.db.Query("SELECT task_name,COALESCE(disk_name,''),file_size,content_time,target_path FROM downloaded_episodes")
+ if ledgerErr!=nil{ledgerRows,ledgerErr=a.db.Query("SELECT task_name,'' AS disk_name,file_size,content_time,target_path FROM downloaded_episodes")}
  if ledgerErr==nil{
   for ledgerRows.Next(){
    var task,diskName string;var size sql.NullInt64;var seconds sql.NullFloat64;var target sql.NullString
