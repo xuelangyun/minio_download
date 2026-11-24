@@ -1863,6 +1863,9 @@ func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
  var count,bytes int64;var seconds float64
  if err=db.QueryRow("SELECT completed_count,completed_bytes,content_seconds FROM run_task_history WHERE run_id='run-1' AND task_name='scene-task'").Scan(&count,&bytes,&seconds);err!=nil{t.Fatal(err)}
  if count!=1||bytes!=8192||seconds!=90{t.Fatalf("unexpected task stats: count=%d bytes=%d seconds=%v",count,bytes,seconds)}
+ if err=app.fail(Episode{ID:"episode-2",Task:"scene-task",Size:1024},DiskConfig{Name:"disk-a"},"","",errors.New("simulated failure"));err==nil{t.Fatal("expected simulated episode failure")}
+ var failed int64
+ if err=db.QueryRow("SELECT failed_count FROM run_task_history WHERE run_id='run-1' AND task_name='scene-task'").Scan(&failed);err!=nil||failed!=1{t.Fatalf("failed_count=%d err=%v",failed,err)}
  var status string
  if err=db.QueryRow("SELECT status FROM downloads WHERE episode_id='episode-1'").Scan(&status);err!=nil||status!="completed"{t.Fatalf("download status=%q err=%v",status,err)}
 }
