@@ -1901,4 +1901,13 @@ func TestRecordAndSetForRunAccumulatesTaskStats(t *testing.T) {
  if pageResponse.Code!=http.StatusOK{t.Fatalf("paginated API status=%d body=%s",pageResponse.Code,pageResponse.Body.String())}
  if err=json.Unmarshal(pageResponse.Body.Bytes(),&pagePayload);err!=nil{t.Fatal(err)}
  if pagePayload.Total!=3||pagePayload.Offset!=1||len(pagePayload.Episodes)!=1{t.Fatalf("unexpected paginated response: total=%d offset=%d items=%d",pagePayload.Total,pagePayload.Offset,len(pagePayload.Episodes))}
+ categoryReq:=httptest.NewRequest("GET","/api/runs/run-1/episodes?task=scene-task&status=failed&category=other",nil);categoryReq.SetPathValue("id","run-1")
+ categoryResponse:=httptest.NewRecorder();api.runEpisodes(categoryResponse,categoryReq)
+ var categoryPayload struct{Total int `json:"total"`;Episodes []struct{Status string `json:"status"`;Category string `json:"failure_category"`} `json:"episodes"`}
+ if categoryResponse.Code!=http.StatusOK{t.Fatalf("category filter status=%d body=%s",categoryResponse.Code,categoryResponse.Body.String())}
+ if err=json.Unmarshal(categoryResponse.Body.Bytes(),&categoryPayload);err!=nil{t.Fatal(err)}
+ if categoryPayload.Total!=1||len(categoryPayload.Episodes)!=1||categoryPayload.Episodes[0].Status!="failed"||categoryPayload.Episodes[0].Category!="other"{t.Fatalf("unexpected category filter response: %#v",categoryPayload)}
+ invalidReq:=httptest.NewRequest("GET","/api/runs/run-1/episodes?category=unknown",nil);invalidReq.SetPathValue("id","run-1")
+ invalidResponse:=httptest.NewRecorder();api.runEpisodes(invalidResponse,invalidReq)
+ if invalidResponse.Code!=http.StatusBadRequest{t.Fatalf("invalid category should return 400, got %d",invalidResponse.Code)}
 }
