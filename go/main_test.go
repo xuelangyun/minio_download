@@ -1969,3 +1969,59 @@ func TestRunTimingMetricsPersist(t *testing.T) {
  if err=db.QueryRow("SELECT duration_seconds,completed_bytes FROM run_disk_history WHERE run_id=? AND disk_name=?","timing-run","disk-a").Scan(&diskDuration,&bytes);err!=nil{t.Fatal(err)}
  if diskDuration!=20||bytes!=10485760{t.Fatalf("unexpected disk timing: duration=%v bytes=%d",diskDuration,bytes)}
 }
+
+
+func TestSQLiteLogWriterFlushesBufferedEntriesOnClose(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "logs.sqlite3")
+	if err := initializeSQLiteDatabase(dbPath); err != nil {
+		t.Fatalf("initialize SQLite schema: %v", err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var output bytes.Buffer
+	writer := newSQLiteLogWriter(db, &output)
+	for i := 0; i < 3; i++ {
+		line := fmt.Sprintf("buffered-%d\\n", i)
+		if n, writeErr := writer.Write([]byte(line)); writeErr != nil || n != len(line) {
+			t.Fatalf("write log entry: n=%d err=%v", n, writeErr)
+		}
+	}
+	writer.Close()
+
+	var count int
+	if err = db.QueryRow("SELECT COUNT(*) FROM runtime_logs").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 persisted log rows after close, got %d", count)
+	}
+	if got := output.String(); !strings.Contains(got, "buffered-0") || !strings.Contains(got, "buffered-2") {
+		t.Fatalf("stdout mirror lost log lines: %q", got)
+	}
+}
+
+func TestDashboardPartialDirectorySizeCache(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "first.bin")
+	if err := os.WriteFile(first, []byte("12345"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	api := &WebAPI{}
+	now := time.Now()
+	if got := api.cachedPartialDirectorySize(root, now); got != 5 {
+		t.Fatalf("initial partial size = %d, want 5", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, "second.bin"), []byte("1234567"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := api.cachedPartialDirectorySize(root, now.Add(10*time.Second)); got != 5 {
+		t.Fatalf("cached partial size = %d, want cached value 5", got)
+	}
+	if got := api.cachedPartialDirectorySize(root, now.Add(31*time.Second)); got != 12 {
+		t.Fatalf("refreshed partial size = %d, want 12", got)
+	}
+}
