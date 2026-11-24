@@ -1,0 +1,67 @@
+name: Publish v0.0.3 release assets
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/publish-v0.0.3.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v0.0.3
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+          cache: false
+      - name: Download Go modules
+        working-directory: go
+        run: go mod tidy
+      - name: Run focused unit tests
+        working-directory: go
+        run: |
+          go test ./... -run "^(TestSafeJoinRejectsTraversal|TestLoadConfigDBImportsPythonCountConfiguration|TestResumeReservationTracksOnlyRemainingBytes|TestCompletedEpisodeDirRequiresTaskInfo|TestWebAPIRequiresBearerTokenWhenConfigured|TestMissingMCAPCleanupCanRecoverAfterInterruption|TestFirstRunUsesSingleSQLiteDatabase|TestDurationTargetsPersistInSQLite|TestValidatePlanRejectsNegativeDurationTarget|TestLoadConfigDBRejectsDatabaseWithoutSchema|TestWebStatusReturnsConfiguredTasksAndProgress|TestSaveLastRunPersistsPerRunStatistics|TestClassifyFailure|TestRecordAndSetForRunAccumulatesTaskStats|TestRunTimingMetricsPersist)$"
+      - name: Build Windows amd64
+        working-directory: go
+        run: |
+          mkdir -p dist/windows-amd64
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/windows-amd64/minio-download.exe .
+      - name: Build Linux amd64
+        working-directory: go
+        run: |
+          mkdir -p dist/linux-amd64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/linux-amd64/minio-download .
+      - name: Build Linux arm64
+        working-directory: go
+        run: |
+          mkdir -p dist/linux-arm64
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/linux-arm64/minio-download .
+      - name: Add documentation
+        working-directory: go
+        run: |
+          cp README.md dist/windows-amd64/
+          cp README.md dist/linux-amd64/
+          cp README.md dist/linux-arm64/
+      - name: Package artifacts
+        run: |
+          cd go/dist
+          zip -qr ../../minio-download-windows-amd64.zip windows-amd64
+          tar -czf ../../minio-download-linux-amd64.tar.gz linux-amd64
+          tar -czf ../../minio-download-linux-arm64.tar.gz linux-arm64
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.0.3
+          name: v0.0.3
+          generate_release_notes: true
+          files: |
+            minio-download-windows-amd64.zip
+            minio-download-linux-amd64.tar.gz
+            minio-download-linux-arm64.tar.gz
