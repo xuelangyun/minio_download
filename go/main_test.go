@@ -26,13 +26,14 @@ import (
 
 func TestDurationTargetsPersistInSQLite(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "config.sqlite3")
-	if err = initializeSQLiteDatabase(dbPath); err != nil {
+	if err := initializeSQLiteDatabase(dbPath); err != nil {
 		t.Fatalf("initialize SQLite schema: %v", err)
 	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer db.Close()
 
 	payload := planPayload{
 		DataVersion: "test-version",
@@ -44,18 +45,10 @@ func TestDurationTargetsPersistInSQLite(t *testing.T) {
 	if _, err = validatePlanPayload(json.RawMessage(mustJSON(payload))); err != nil {
 		t.Fatalf("validate plan: %v", err)
 	}
-	db, err = sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err = persistPlanPayload(db, payload); err != nil {
 		db.Close()
 		t.Fatalf("persist plan: %v", err)
 	}
-	if err = db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
 	cfg := Config{ConfigDB: dbPath}
 	if err = loadConfigDB(&cfg, "duration"); err != nil {
 		t.Fatalf("load duration config: %v", err)
