@@ -296,7 +296,15 @@ button{transition:background .16s,border-color .16s,box-shadow .16s,transform .1
 .disk-monitor-fill{height:100%;border-radius:99px;background:#6b8ed8}
 .disk-monitor-fill.warn{background:#d99a3d}.disk-monitor-fill.critical{background:#cf625b}
 .disk-monitor-stats{display:flex;justify-content:space-between;gap:8px;color:#65738a;font-size:11px;font-variant-numeric:tabular-nums}
-.active-list{display:grid;gap:8px}
+.active-list{display:grid;gap:10px}
+.active-item{display:block}
+.active-item-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.active-item-progress{height:6px;margin:9px 0 7px;border-radius:99px;background:#e9edf4;overflow:hidden}
+.active-item-progress>span{display:block;height:100%;border-radius:99px;background:#5b8ce6}
+.active-item-bottom{display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.run-state-chip{border-color:#c8d6f4;background:#edf3ff;color:#315aab}
+.run-state-chip.pending{border-color:#f0d7a9;background:#fff8e9;color:#95651b}
+
 .active-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid var(--line);border-radius:9px;background:#fbfcff}
 .active-item-main{min-width:0}.active-item-title{font-size:12px;font-weight:650;color:#34445d;overflow-wrap:anywhere}
 .active-item-meta{margin-top:4px;color:var(--muted);font-size:11px}
@@ -368,7 +376,7 @@ input[type=file]{max-width:260px;color:var(--muted);font-size:12px}
 <button class="active" data-tab="dashboard">运行状态</button><button data-tab="connection">连接配置</button><button data-tab="disks">磁盘配置</button><button data-tab="tasks">任务配置</button><button data-tab="advanced">运行参数</button><button data-tab="records">日志记录</button>
 </div>
 <section id="dashboard" class="panel active">
-<div class="card"><h2>下载任务</h2><div class="field" style="max-width:320px"><label for="download-mode">下载目标模式</label><select id="download-mode"><option value="count">按条数下载</option><option value="duration">按时长下载</option></select><small>按时长模式根据已完成数据的 content_time 累计，达到任务目标后停止补充。</small></div><div class="status" id="metrics"></div><div id="transfer-panel" class="transfer-panel"><div class="transfer-head"><strong>当前传输进度</strong><span id="transfer-summary">等待状态数据</span></div><div class="progress-track"><div id="transfer-bar" class="progress-fill" style="width:0%"></div></div><div class="transfer-foot"><span id="transfer-downloaded">已传输 0 GiB</span><span id="transfer-remaining">待传输 —</span></div></div><div id="setup-issues" class="notice">正在检查配置…</div><div class="actions"><button class="btn primary" id="start-run">开始下载</button><button class="btn" id="pause-run">安全暂停</button><button class="btn danger" id="force-run">强制停止</button><button class="btn" id="refresh">刷新状态</button></div></div>
+<div class="card"><h2>下载任务</h2><div class="field" style="max-width:320px"><label for="download-mode">下载目标模式</label><select id="download-mode"><option value="count">按条数下载</option><option value="duration">按时长下载</option></select><small>按时长模式根据已完成数据的 content_time 累计，达到任务目标后停止补充。</small></div><div class="status" id="metrics"></div><div id="transfer-panel" class="transfer-panel"><div class="transfer-head"><strong>当前传输进度</strong><span id="transfer-summary">等待状态数据</span></div><div class="progress-track"><div id="transfer-bar" class="progress-fill" style="width:0%"></div></div><div class="transfer-foot"><span id="transfer-downloaded">已传输 0 GiB</span><span id="transfer-remaining">待传输 —</span></div></div><div id="setup-issues" class="notice">正在检查配置…</div><div class="actions"><button class="btn primary" id="start-run">开始下载</button><button class="btn" id="pause-run">安全暂停</button><button class="btn danger" id="force-run">强制停止</button><button class="btn" id="refresh">刷新状态</button><span id="run-control-state" class="summary-chip">等待状态</span></div></div>
 <div class="card"><div class="section-heading"><div><h2>磁盘容量</h2><p class="hint">显示各下载磁盘的已用空间、可用空间和挂载状态。</p></div><span id="disk-total-summary" class="summary-chip">尚无磁盘</span></div><div id="disk-status" class="disk-monitor-grid"></div></div><div class="card"><div class="section-heading"><div><h2>正在下载</h2><p class="hint">当前正在处理的 Episode。</p></div><span id="active-count" class="summary-chip">0 个活动任务</span></div><div id="active-downloads"></div></div><div class="card"><h2>任务进度</h2><div id="task-status"></div></div>
 </section>
 <section id="connection" class="panel">
@@ -441,6 +449,13 @@ function renderStatus(d){
  $("transfer-bar").style.width=(expected>0?percent:0)+"%";
  $("transfer-downloaded").textContent="已传输 "+formatGiB(downloaded);
  $("transfer-remaining").textContent=expected>0?"预计剩余 "+formatGiB(remaining):"待传输 —";
+ const stopPending=!!d.stop_requested;
+ $("run-control-state").textContent=stopPending?"正在安全停止":(running?"下载运行中":"当前空闲");
+ $("run-control-state").className="summary-chip "+(stopPending?"run-state-chip pending":running?"run-state-chip":"");
+ $("start-run").disabled=running;
+ $("pause-run").disabled=!running||stopPending;
+ $("force-run").disabled=!running;
+ $("pause-run").textContent=stopPending?"正在停止…":"安全暂停";
  $("setup-issues").innerHTML=(d.setup_issues||[]).length?(d.setup_issues.map(x=>'<div class="bad">· '+esc(x.text)+'</div>').join("")):'<span class="ok">配置检查通过，可启动下载。</span>';
  const disks=d.disks||[];let totalBytes=0,freeBytes=0;
  $("disk-status").innerHTML=disks.map(x=>{
@@ -452,7 +467,7 @@ function renderStatus(d){
  $("disk-total-summary").textContent=disks.length?("合计可用 "+formatGiB(freeBytes)):"尚无磁盘";
  const active=d.running_episodes||[];
  $("active-count").textContent=active.length+" 个活动任务";
- $("active-downloads").innerHTML=active.length?'<div class="active-list">'+active.map(x=>'<div class="active-item"><div class="active-item-main"><div class="active-item-title">'+esc(x.task_name||"未知任务")+'</div><div class="active-item-meta">磁盘：'+esc(x.disk_name||"未分配")+' · Episode：'+esc(x.episode_id||"")+'</div></div><div class="active-item-size">'+formatGiB(x.partial_bytes||0)+'</div></div>').join("")+'</div>':'<div class="notice">当前没有正在下载的 Episode。</div>';
+ $("active-downloads").innerHTML=active.length?'<div class="active-list">'+active.map(x=>{const partial=Math.max(0,Number(x.partial_bytes)||0),expected=Math.max(0,Number(x.expected_bytes)||0),pct=expected>0?Math.max(0,Math.min(100,partial/expected*100)):0;return '<div class="active-item"><div class="active-item-top"><div class="active-item-main"><div class="active-item-title">'+esc(x.task_name||"未知任务")+'</div><div class="active-item-meta">磁盘：'+esc(x.disk_name||"未分配")+' · Episode：'+esc(x.episode_id||"")+'</div></div><div class="active-item-size">'+formatGiB(partial)+'</div></div><div class="active-item-progress"><span style="width:'+pct.toFixed(1)+'%"></span></div><div class="active-item-bottom"><span>'+ (expected>0?(pct.toFixed(1)+"% · 目标 "+formatGiB(expected)):"目标容量未知")+'</span><span>开始：'+esc(x.started_at||"—")+'</span></div></div>'}).join("")+'</div>':'<div class="notice">当前没有正在下载的 Episode。</div>';
  const durationMode=$("download-mode").value==="duration";let rows=[];
  (d.scenes||[]).forEach(scene=>(scene.tasks||[]).forEach(task=>{
   const progress=durationMode?(Number(task.hours||0).toFixed(2)+" / "+Number(task.target_hours||0).toFixed(2)+" 小时"):(task.downloaded+" / "+task.target+" 条");
