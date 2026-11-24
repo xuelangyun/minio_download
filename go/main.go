@@ -277,6 +277,31 @@ button{transition:background .16s,border-color .16s,box-shadow .16s,transform .1
 .status{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}
 .metric{min-width:0;padding:15px 16px;background:linear-gradient(145deg,#f8faff,#f2f6fd);border:1px solid #e5ebf5;border-radius:11px;color:#65738a}
 .metric b{display:block;margin-top:5px;color:#1c2c47;font-size:24px;font-weight:750;line-height:1.25;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.transfer-panel{padding:15px 16px;margin:2px 0 16px;border:1px solid #e4eaf4;border-radius:12px;background:#fbfcff}
+.transfer-head,.transfer-foot,.section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.transfer-head strong{font-size:13px;color:#33445f}.transfer-head span,.transfer-foot{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.progress-track{height:10px;margin:12px 0 9px;border-radius:99px;background:#e8edf5;overflow:hidden}
+.progress-fill{height:100%;border-radius:99px;background:linear-gradient(90deg,#3974e8,#64a4ff);transition:width .25s ease}
+.transfer-foot{flex-wrap:wrap}
+.section-heading h2{margin:0}.section-heading .hint{margin:5px 0 0}
+.summary-chip{flex:0 0 auto;padding:5px 9px;border-radius:99px;background:#f0f4fb;color:#52627a;font-size:11px;font-weight:650}
+.disk-monitor-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.disk-monitor{min-width:0;padding:15px;border:1px solid var(--line);border-radius:11px;background:#fbfcff}
+.disk-monitor-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.disk-monitor-name{font-weight:700;color:#293a54;overflow-wrap:anywhere}
+.disk-monitor-state{font-size:11px;font-weight:650;white-space:nowrap}
+.disk-monitor-state.good{color:var(--success)}.disk-monitor-state.bad{color:var(--danger)}
+.disk-monitor-path{margin-top:5px;color:var(--muted);font-size:11px;overflow-wrap:anywhere}
+.disk-monitor-track{height:8px;margin:12px 0 8px;border-radius:99px;background:#e9edf4;overflow:hidden}
+.disk-monitor-fill{height:100%;border-radius:99px;background:#6b8ed8}
+.disk-monitor-fill.warn{background:#d99a3d}.disk-monitor-fill.critical{background:#cf625b}
+.disk-monitor-stats{display:flex;justify-content:space-between;gap:8px;color:#65738a;font-size:11px;font-variant-numeric:tabular-nums}
+.active-list{display:grid;gap:8px}
+.active-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;border:1px solid var(--line);border-radius:9px;background:#fbfcff}
+.active-item-main{min-width:0}.active-item-title{font-size:12px;font-weight:650;color:#34445d;overflow-wrap:anywhere}
+.active-item-meta{margin-top:4px;color:var(--muted);font-size:11px}
+.active-item-size{flex:0 0 auto;color:#52627a;font-size:12px;font-variant-numeric:tabular-nums}
+@media(max-width:720px){.disk-monitor-grid{grid-template-columns:1fr}.section-heading{align-items:flex-start}}
 .disk-row{padding:17px;margin:12px 0;background:#fbfcff;border:1px solid var(--line);border-radius:12px}
 .disk-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
 .disk-actions{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px}
@@ -343,8 +368,8 @@ input[type=file]{max-width:260px;color:var(--muted);font-size:12px}
 <button class="active" data-tab="dashboard">运行状态</button><button data-tab="connection">连接配置</button><button data-tab="disks">磁盘配置</button><button data-tab="tasks">任务配置</button><button data-tab="advanced">运行参数</button><button data-tab="records">日志记录</button>
 </div>
 <section id="dashboard" class="panel active">
-<div class="card"><h2>下载任务</h2><div class="field" style="max-width:320px"><label for="download-mode">下载目标模式</label><select id="download-mode"><option value="count">按条数下载</option><option value="duration">按时长下载</option></select><small>按时长模式根据已完成数据的 content_time 累计，达到任务目标后停止补充。</small></div><div class="status" id="metrics"></div><div id="setup-issues" class="notice">正在检查配置…</div><div class="actions"><button class="btn primary" id="start-run">开始下载</button><button class="btn" id="pause-run">安全暂停</button><button class="btn danger" id="force-run">强制停止</button><button class="btn" id="refresh">刷新状态</button></div></div>
-<div class="card"><h2>磁盘状态</h2><div id="disk-status"></div></div><div class="card"><h2>任务进度</h2><div id="task-status"></div></div>
+<div class="card"><h2>下载任务</h2><div class="field" style="max-width:320px"><label for="download-mode">下载目标模式</label><select id="download-mode"><option value="count">按条数下载</option><option value="duration">按时长下载</option></select><small>按时长模式根据已完成数据的 content_time 累计，达到任务目标后停止补充。</small></div><div class="status" id="metrics"></div><div id="transfer-panel" class="transfer-panel"><div class="transfer-head"><strong>当前传输进度</strong><span id="transfer-summary">等待状态数据</span></div><div class="progress-track"><div id="transfer-bar" class="progress-fill" style="width:0%"></div></div><div class="transfer-foot"><span id="transfer-downloaded">已传输 0 GiB</span><span id="transfer-remaining">待传输 —</span></div></div><div id="setup-issues" class="notice">正在检查配置…</div><div class="actions"><button class="btn primary" id="start-run">开始下载</button><button class="btn" id="pause-run">安全暂停</button><button class="btn danger" id="force-run">强制停止</button><button class="btn" id="refresh">刷新状态</button></div></div>
+<div class="card"><div class="section-heading"><div><h2>磁盘容量</h2><p class="hint">显示各下载磁盘的已用空间、可用空间和挂载状态。</p></div><span id="disk-total-summary" class="summary-chip">尚无磁盘</span></div><div id="disk-status" class="disk-monitor-grid"></div></div><div class="card"><div class="section-heading"><div><h2>正在下载</h2><p class="hint">当前正在处理的 Episode。</p></div><span id="active-count" class="summary-chip">0 个活动任务</span></div><div id="active-downloads"></div></div><div class="card"><h2>任务进度</h2><div id="task-status"></div></div>
 </section>
 <section id="connection" class="panel">
 <div class="card"><h2>MinIO 和 PostgreSQL</h2><div class="hint">连接信息保存到 SQLite。Secret Key 和数据库密码不会回显；留空表示保留已保存的密码。</div><div id="connection-fields" class="grid"></div><div class="actions"><button class="btn primary" id="save-connection">保存连接配置</button><button class="btn" id="test-minio">测试 MinIO</button><button class="btn" id="test-pg">测试 PostgreSQL</button></div><div id="connection-result" class="notice">尚未测试连接</div></div>
@@ -406,7 +431,35 @@ $("task-editor").addEventListener("click",event=>{const button=event.target.clos
 });
 $("add-scene").onclick=()=>{taskEditorData.scenes.push({scene:"新场景",tasks:[]});renderTaskEditor();const inputs=$("task-editor").querySelectorAll("[data-scene-name]");if(inputs.length)inputs[inputs.length-1].focus()};
 $("apply-task-json").onclick=()=>{try{const value=JSON.parse($("task-json").value);if(!value||!Array.isArray(value.scenes))throw new Error("JSON 必须包含 scenes 数组");taskEditorData={data_version:value.data_version||"",scenes:value.scenes};$("data-version").value=value.data_version||$("data-version").value;renderTaskEditor();message("task-result","JSON 已应用到任务表格，保存后生效",true)}catch(e){message("task-result","JSON 格式错误："+e.message,false)}};
-function renderStatus(d){statusData=d;const t=d.transfer_progress||{};const metrics=[["运行状态",d.downloader&&d.downloader.running?"下载中":"空闲"],["下载速度",((t.speed_bytes_per_second||0)/1048576).toFixed(2)+" MiB/s"],["已下载",((t.downloaded_bytes||0)/1073741824).toFixed(2)+" GiB"],["进度",(t.progress_percent||0).toFixed(1)+"%"],["预计剩余",t.eta_seconds===null||t.eta_seconds===undefined?"—":Math.round(t.eta_seconds/60)+" 分钟"]];$("metrics").innerHTML=metrics.map(x=>'<div class="metric">'+esc(x[0])+'<b>'+esc(x[1])+'</b></div>').join("");$("setup-issues").innerHTML=(d.setup_issues||[]).length?(d.setup_issues.map(x=>'<div class="bad">· '+esc(x.text)+'</div>').join("")):'<span class="ok">配置检查通过，可启动下载。</span>';$("disk-status").innerHTML=(d.disks||[]).map(x=>'<div class="notice">'+esc(x.name)+' · '+esc(x.path)+' · '+(x.mounted?"挂载正常":"未挂载")+' · 可用 '+(x.free/1073741824||0).toFixed(1)+' GiB</div>').join("")||"尚未配置磁盘";const durationMode=$("download-mode").value==="duration";let rows=[];(d.scenes||[]).forEach(scene=>(scene.tasks||[]).forEach(task=>{const progress=durationMode?(Number(task.hours||0).toFixed(2)+" / "+Number(task.target_hours||0).toFixed(2)+" 小时"):(task.downloaded+" / "+task.target+" 条");rows.push('<tr><td>'+esc(scene.scene)+'</td><td>'+esc(task.name)+'</td><td>'+progress+'</td><td>'+Number(task.hours||0).toFixed(2)+' 小时</td></tr>')}));$("task-status").innerHTML=rows.length?'<table><thead><tr><th>场景</th><th>任务</th><th>'+(durationMode?"累计时长 / 目标":"完成条数 / 目标")+'</th><th>累计时长</th></tr></thead><tbody>'+rows.join("")+'</tbody></table>':"尚未配置任务"}
+function formatGiB(bytes){return (Math.max(0,Number(bytes)||0)/1073741824).toFixed(1)+" GiB"}
+function renderStatus(d){
+ statusData=d;const t=d.transfer_progress||{},running=!!(d.downloader&&d.downloader.running);
+ const speed=Math.max(0,Number(t.speed_bytes_per_second)||0),downloaded=Math.max(0,Number(t.downloaded_bytes)||0),expected=Math.max(0,Number(t.expected_bytes)||0),remaining=Math.max(0,Number(t.remaining_bytes)||0),percent=Math.max(0,Math.min(100,Number(t.progress_percent)||0));
+ const metrics=[["运行状态",running?"下载中":"空闲"],["下载速度",(speed/1048576).toFixed(2)+" MiB/s"],["已下载",formatGiB(downloaded)],["进度",percent.toFixed(1)+"%"],["预计剩余",t.eta_seconds===null||t.eta_seconds===undefined?"—":Math.round(Number(t.eta_seconds)/60)+" 分钟"]];
+ $("metrics").innerHTML=metrics.map(x=>'<div class="metric">'+esc(x[0])+'<b>'+esc(x[1])+'</b></div>').join("");
+ $("transfer-summary").textContent=running?(expected>0?percent.toFixed(1)+"% · "+(speed/1048576).toFixed(2)+" MiB/s":"传输中 · 等待对象大小统计"):"当前没有活动传输";
+ $("transfer-bar").style.width=(expected>0?percent:0)+"%";
+ $("transfer-downloaded").textContent="已传输 "+formatGiB(downloaded);
+ $("transfer-remaining").textContent=expected>0?"预计剩余 "+formatGiB(remaining):"待传输 —";
+ $("setup-issues").innerHTML=(d.setup_issues||[]).length?(d.setup_issues.map(x=>'<div class="bad">· '+esc(x.text)+'</div>').join("")):'<span class="ok">配置检查通过，可启动下载。</span>';
+ const disks=d.disks||[];let totalBytes=0,freeBytes=0;
+ $("disk-status").innerHTML=disks.map(x=>{
+  const total=Math.max(0,Number(x.total)||0),free=Math.max(0,Number(x.free)||0),used=Math.max(0,Number(x.used)||0),usedPct=total>0?Math.max(0,Math.min(100,used/total*100)):0;
+  totalBytes+=total;freeBytes+=free;
+  const fillClass=usedPct>=95?"critical":usedPct>=85?"warn":"";
+  return '<div class="disk-monitor"><div class="disk-monitor-top"><span class="disk-monitor-name">'+esc(x.name)+'</span><span class="disk-monitor-state '+(x.mounted&&x.exists?"good":"bad")+'">'+(x.mounted&&x.exists?"挂载正常":(!x.mounted?"未挂载":"目录不可用"))+'</span></div><div class="disk-monitor-path">'+esc(x.path)+'</div><div class="disk-monitor-track"><div class="disk-monitor-fill '+fillClass+'" style="width:'+usedPct.toFixed(1)+'%"></div></div><div class="disk-monitor-stats"><span>已用 '+formatGiB(used)+' / '+formatGiB(total)+'</span><strong>可用 '+formatGiB(free)+'</strong></div></div>';
+ }).join("")||'<div class="notice">尚未配置下载磁盘。</div>';
+ $("disk-total-summary").textContent=disks.length?("合计可用 "+formatGiB(freeBytes)):"尚无磁盘";
+ const active=d.running_episodes||[];
+ $("active-count").textContent=active.length+" 个活动任务";
+ $("active-downloads").innerHTML=active.length?'<div class="active-list">'+active.map(x=>'<div class="active-item"><div class="active-item-main"><div class="active-item-title">'+esc(x.task_name||"未知任务")+'</div><div class="active-item-meta">磁盘：'+esc(x.disk_name||"未分配")+' · Episode：'+esc(x.episode_id||"")+'</div></div><div class="active-item-size">'+formatGiB(x.partial_bytes||0)+'</div></div>').join("")+'</div>':'<div class="notice">当前没有正在下载的 Episode。</div>';
+ const durationMode=$("download-mode").value==="duration";let rows=[];
+ (d.scenes||[]).forEach(scene=>(scene.tasks||[]).forEach(task=>{
+  const progress=durationMode?(Number(task.hours||0).toFixed(2)+" / "+Number(task.target_hours||0).toFixed(2)+" 小时"):(task.downloaded+" / "+task.target+" 条");
+  rows.push('<tr><td>'+esc(scene.scene)+'</td><td>'+esc(task.name)+'</td><td>'+progress+'</td><td>'+Number(task.hours||0).toFixed(2)+' 小时</td></tr>');
+ }));
+ $("task-status").innerHTML=rows.length?'<table><thead><tr><th>场景</th><th>任务</th><th>'+(durationMode?"累计时长 / 目标":"完成条数 / 目标")+'</th><th>累计时长</th></tr></thead><tbody>'+rows.join("")+'</tbody></table>':"尚未配置任务";
+}
 async function refreshStatus(){try{renderStatus(await api("/api/status"))}catch(e){$("connection-state").textContent=e.message;$("connection-state").className="bad"}}
 async function refreshLogs(){try{const d=await api("/api/logs?offset="+logOffset);if(d.reset){$("logs").textContent=d.text||""}else if(d.text){$("logs").textContent+=($("logs").textContent?"\n":"")+d.text}$("logs").scrollTop=$("logs").scrollHeight;logOffset=d.offset||logOffset}catch(e){$("logs").textContent=e.message}}
 async function testConnection(target){try{const root=target==="minio"?$("connection-fields"):$("connection-fields");const d=await api("/api/config/test","POST",{target:target,values:readFields(root)});message("connection-result",d.message,d.ok)}catch(e){message("connection-result",e.message,false)}}
