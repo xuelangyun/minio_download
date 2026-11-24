@@ -972,6 +972,7 @@ func(a *WebAPI)run(w http.ResponseWriter,r *http.Request){
  if body.Mode==""{body.Mode=a.mode};if body.Mode!="count"&&body.Mode!="duration"{writeJSONStatus(w,400,map[string]any{"error":"mode 只能是 count 或 duration"});return}
  if body.MaxRounds==0{body.MaxRounds=a.cfg.DefaultRounds;if body.MaxRounds<=0{body.MaxRounds=1}};if body.MaxRounds<1||body.MaxRounds>50{writeJSONStatus(w,400,map[string]any{"error":"补齐轮数范围 1–50"});return}
  validatedConfig:=a.cfg
+ validatedConfig.Mode=body.Mode
  if err:=validatedConfig.normalize(body.Mode);err!=nil{writeJSONStatus(w,400,map[string]any{"error":"配置未完成："+err.Error()});return}
  a.runMu.Lock();defer a.runMu.Unlock()
  if pid,running,_:=a.activeDownloader();running{writeJSONStatus(w,409,map[string]any{"error":fmt.Sprintf("下载器已在运行（PID %d）",pid)});return}
